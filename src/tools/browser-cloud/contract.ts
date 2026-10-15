@@ -25,6 +25,7 @@ export type CloudBrowserAction =
   | { type: "snapshot" }
   | { type: "capture"; request: BrowserCaptureRequest }
   | { type: "upload"; selector: string; fileId: string }
+  | { type: "upload_directory"; selector: string; files: Array<{ fileId: string; relativePath: string }> }
   | {
       type: "press_key";
       key: (typeof CLOUD_BROWSER_KEYS)[number];
@@ -156,7 +157,8 @@ export interface CloudBrowserStore {
 
 export interface CloudBrowserTransport {
   start(input: { owner: string; profile: CloudBrowserProfile; maxSeconds: number }): Promise<Pick<CloudBrowserSession, "providerSessionId" | "automationEndpoint" | "providerBrowserId">>;
-  execute(session: CloudBrowserSession, action: CloudBrowserAction, timeoutSeconds: number): Promise<CloudBrowserObservation | null | CloudBrowserExecutionResult>;
+  /** Trusted invocation binding is used only for uploads through legacy unbound session profiles. */
+  execute(session: CloudBrowserSession, action: CloudBrowserAction, timeoutSeconds: number, uploadPrincipalHash?: string): Promise<CloudBrowserObservation | null | CloudBrowserExecutionResult>;
   stop(session: CloudBrowserSession): Promise<void>;
   /** Persist the active remote browser state (cookies/local storage) at the provider, never locally. */
   saveProfile?(session: CloudBrowserSession, profile: CloudBrowserProfile): Promise<void>;

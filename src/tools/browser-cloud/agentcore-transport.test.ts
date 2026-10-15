@@ -345,7 +345,8 @@ test('provider upload action resolves owner bytes and attaches them through fixe
   process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
   const body = new TextEncoder().encode('name,value\nexample,1\n');
   const { createHash } = await import('node:crypto');
-  const record = { id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', owner: 'cfo', filename: 'report.csv', contentType: 'text/csv', byteLength: body.byteLength, sha256: createHash('sha256').update(body).digest('hex'), status: 'ready' as const, expiresAt: Date.now() + 60_000 };
+  const principalHash = 'a'.repeat(64);
+  const record = { id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', owner: 'cfo', ownerSubjectHash: principalHash, filename: 'report.csv', contentType: 'text/csv', byteLength: body.byteLength, sha256: createHash('sha256').update(body).digest('hex'), status: 'ready' as const, expiresAt: Date.now() + 60_000 };
   const commands: Array<{ method: string; params: Record<string, unknown>; sessionId?: string }> = [];
   let corruptFileReadback = false;
   let rejectFileInputType = false;
@@ -382,9 +383,10 @@ test('provider upload action resolves owner bytes and attaches them through fixe
   const factory = () => { const socket = new Socket(); queueMicrotask(() => socket.dispatchEvent(new Event('open'))); return socket as unknown as WebSocket; };
   const resolvedOwners: string[] = [];
   let resolverUnavailable = false;
-  const resolver = async (owner: string, fileId: string) => {
+  const resolver = async (owner: string, fileId: string, requestedPrincipal?: string) => {
     resolvedOwners.push(owner);
     assert.equal(fileId, record.id);
+    assert.equal(requestedPrincipal, principalHash, 'an OAuth caller on a legacy unbound session retains file ownership');
     if (resolverUnavailable) throw new Error('private storage detail must not escape');
     return { record, body };
   };
@@ -392,10 +394,10 @@ test('provider upload action resolves owner bytes and attaches them through fixe
   const owned = { ...session, owner: 'cfo', sessionId: 'local', expiresAt: Date.now() + 60_000, ownedTargetIds: ['owned-target'], selectedTargetId: 'owned-target' } as CloudBrowserSession;
   owned.effectUnknown = true; // Simulate the durable pre-dispatch intent persisted by CloudBrowserService.
   resolverUnavailable = true;
-  await assert.rejects(transport.execute(owned, { type: 'upload', selector: 'input[type=file]', fileId: record.id }, 10), (error: unknown) => (error as { code?: unknown }).code === 'file_unavailable');
+  await assert.rejects(transport.execute(owned, { type: 'upload', selector: 'input[type=file]', fileId: record.id }, 10, principalHash), (error: unknown) => (error as { code?: unknown }).code === 'file_unavailable');
   assert.equal(owned.effectUnknown, false, 'known pre-assignment resolver failure clears the upload intent');
   resolverUnavailable = false;
-  const result = await transport.execute(owned, { type: 'upload', selector: 'input[type=file]', fileId: record.id }, 10) as { fileReceipt?: { status: string; sha256: string } };
+  const result = await transport.execute(owned, { type: 'upload', selector: 'input[type=file]', fileId: record.id }, 10, principalHash) as { fileReceipt?: { status: string; sha256: string } };
   assert.deepEqual(result.fileReceipt, { status: 'attached', filename: record.filename, contentType: record.contentType, byteLength: record.byteLength, sha256: record.sha256 });
   assert.deepEqual(resolvedOwners, ['cfo', 'cfo']);
   assert.ok(commands.some((command) => command.method === 'Runtime.callFunctionOn' && String(command.params.functionDeclaration).includes('this.files = transfer.files')));
@@ -403,12 +405,12 @@ test('provider upload action resolves owner bytes and attaches them through fixe
   assert.ok(commands.filter((command) => command.method === 'Runtime.callFunctionOn').every((command) => command.sessionId === 'page-session'));
   owned.effectUnknown = true;
   rejectFileInputType = true;
-  await assert.rejects(transport.execute(owned, { type: 'upload', selector: 'input[type=file]', fileId: record.id }, 10), (error: unknown) => (error as { code?: unknown }).code === 'file_input_type_rejected');
+  await assert.rejects(transport.execute(owned, { type: 'upload', selector: 'input[type=file]', fileId: record.id }, 10, principalHash), (error: unknown) => (error as { code?: unknown }).code === 'file_input_type_rejected');
   assert.equal(owned.effectUnknown, false, 'known pre-assignment rejection clears the upload intent');
   rejectFileInputType = false;
   owned.effectUnknown = true;
   corruptFileReadback = true;
-  await assert.rejects(transport.execute(owned, { type: 'upload', selector: 'input[type=file]', fileId: record.id }, 10), (error: unknown) => (error as { code?: unknown }).code === 'file_transfer_uncertain');
+  await assert.rejects(transport.execute(owned, { type: 'upload', selector: 'input[type=file]', fileId: record.id }, 10, principalHash), (error: unknown) => (error as { code?: unknown }).code === 'file_transfer_uncertain');
   assert.equal(owned.effectUnknown, true, 'a post-dispatch readback failure preserves the uncertainty fence');
 });
 

@@ -66,6 +66,26 @@ test('file store reads exact owner key and version, then verifies bytes and meta
   assert.equal(JSON.parse(String(ddbGet.init.body)).ConsistentRead, true);
 });
 
+test('scan receipt survives exact immutable storage and malformed/mismatched receipts reject', async () => {
+  const h = harness();
+  const scanned = { ...record, scanReceipt: { verdict: 'clean' as const, scanner: 'clamav' as const, sha256, byteLength: body.length, scannedAt: 999000, engineVersion: '1.4.3', signatureVersion: '27832', signaturesUpdatedAt: 998000 } };
+  await h.store.put(`browser-files/${owner}/${id}`, scanned, body);
+  assert.deepEqual((await h.store.get(`browser-files/${owner}/${id}`))?.record, scanned);
+  await assert.rejects(h.store.put(`browser-files/${owner}/${id}`, { ...scanned, scanReceipt: { ...scanned.scanReceipt, sha256: '0'.repeat(64) } }, body));
+});
+
+test('file store retains the connection hash through durable metadata and rejects malformed persisted bindings', async () => {
+  const h = harness();
+  const bound = { ...record, ownerSubjectHash: 'a'.repeat(64) };
+  await h.store.put(`browser-files/${owner}/${id}`, bound, body);
+  assert.deepEqual(h.getItem()!.ownerSubjectHash, { S: bound.ownerSubjectHash });
+  assert.deepEqual((await h.store.get(`browser-files/${owner}/${id}`))?.record, bound);
+  h.getItem()!.ownerSubjectHash = { N: '123' };
+  h.requests.length = 0;
+  assert.equal(await h.store.get(`browser-files/${owner}/${id}`), null);
+  assert.equal(h.requests.some(request => new Request(request.url, request.init).method === 'GET'), false);
+});
+
 test('file store rejects foreign keys, oversized bytes, and returned integrity mismatches', async () => {
   const h = harness(Buffer.from('different bytes'));
   await assert.rejects(h.store.put(`browser-files/other/${id}`, record, body), /invalid/i);

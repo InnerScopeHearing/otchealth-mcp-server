@@ -289,7 +289,12 @@ export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
       providerBrowserId: browserId,
     };
   }
-  async execute(session: CloudBrowserSession, action: CloudBrowserAction, timeoutSeconds: number): Promise<CloudBrowserObservation | null | import("./contract.js").CloudBrowserExecutionResult> {
+  async execute(session: CloudBrowserSession, action: CloudBrowserAction, timeoutSeconds: number, uploadPrincipalHash?: string): Promise<CloudBrowserObservation | null | import("./contract.js").CloudBrowserExecutionResult> {
+    if (action.type === 'upload' && ((uploadPrincipalHash !== undefined && !/^[a-f0-9]{64}$/.test(uploadPrincipalHash)) ||
+        (session.ownerSubjectHash !== undefined && (!/^[a-f0-9]{64}$/.test(session.ownerSubjectHash) ||
+          (uploadPrincipalHash !== undefined && session.ownerSubjectHash !== uploadPrincipalHash))))) {
+      throw new CloudBrowserError('owner_forbidden', 'The browser file connection binding is invalid.');
+    }
     const credentials = await resolveAwsCredentials();
     if (!credentials) throw new CloudBrowserError("aws_credentials_unavailable", "Cloud browser runtime credentials are unavailable.");
     const signingCredentials = {
@@ -370,7 +375,7 @@ export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
         }
         let file: Awaited<ReturnType<BrowserFileResolver>>;
         try {
-          file = await this.uploadFileResolver(session.owner, action.fileId);
+          file = await this.uploadFileResolver(session.owner, action.fileId, session.ownerSubjectHash ?? uploadPrincipalHash);
         } catch {
           // The trusted resolver failed before any file was assigned or input event dispatched.
           session.effectUnknown = false;
@@ -380,6 +385,7 @@ export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
           const fileReceipt = await attachStagedFileToOwnedInput({
             caller: session.owner,
             session,
+            principalHash: uploadPrincipalHash,
             targetId: selected(),
             pageSessionId: page,
             selector: action.selector,

@@ -309,7 +309,9 @@ export class CloudBrowserService {
             fileReceipt?: import('./provider-files.js').BrowserFileTransferReceipt;
           };
       try {
-        if (action.type !== "wait_for") result = await this.transport.execute(current, action, remainingSeconds());
+        if (action.type !== "wait_for") result = action.type === 'upload'
+          ? await this.transport.execute(current, action, remainingSeconds(), normalizedPrincipalHash)
+          : await this.transport.execute(current, action, remainingSeconds());
         else {
           for (;;) {
             if (remainingSeconds() <= 0) throw new CloudBrowserError("provider_timeout", "Browser wait action exceeded its bounded deadline.");

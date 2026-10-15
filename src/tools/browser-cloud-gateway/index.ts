@@ -8,8 +8,12 @@ import type { BrowserCaptureMetadata } from '../browser-cloud/contract.js';
 import { CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS } from "../browser-cloud/service.js";
 import { CloudBrowserJobs, type CloudBrowserArtifactStore, type CloudBrowserWorkerQueue } from "../browser-cloud-jobs/contracts.js";
 import { CloudBrowserJobWorker, type CloudBrowserPlanExecutor } from "../browser-cloud-jobs/worker.js";
-import type { BrowserFileBroker } from '../browser-cloud/file-broker.js';
+import { validBrowserFileScanReceipt, type BrowserFileBroker } from '../browser-cloud/file-broker.js';
 import type { BrowserFileTransferReceipt } from '../browser-cloud/provider-files.js';
+import { DaytonaBrowserError } from '../browser-daytona/contract.js';
+import type { DaytonaBrowserService } from '../browser-daytona/service.js';
+import type { DaytonaViewerHandoffService } from '../../server/daytona-viewer-service.js';
+import type { DaytonaDirectoryReceipt } from '../browser-daytona/transfer-bridge.js';
 
 import { currentIntercomPrincipalKey } from '../browser-cloud/intercom-login-service.js';
 import { websitePrincipalHash, type WebsiteLoginService } from '../browser-cloud/website-login-service.js';
@@ -120,10 +124,33 @@ export interface CloudBrowserGatewayRuntime {
   artifacts: CloudBrowserArtifactStore;
   files?: Pick<BrowserFileBroker, 'stage' | 'get'>;
 }
+export interface DaytonaGatewayRuntime {
+  capabilities: Readonly<{ checkpoint: boolean; humanViewer: boolean }>;
+  browser: Pick<DaytonaBrowserService, 'discover' | 'readiness' | 'start' | 'execute' | 'snapshot' | 'savePersistentProfile' | 'stop'>;
+  viewers: Pick<DaytonaViewerHandoffService, 'issue'>;
+}
+/** A consistent server-store lookup, never an untrusted provider hint, selects UUID routing. */
+export interface DaytonaGatewayAdapter {
+  get(): Promise<DaytonaGatewayRuntime | undefined>;
+  forSession(sessionId: string): Promise<DaytonaGatewayRuntime | undefined>;
+}
 /** Register narrow MCP tools. Owner identity always comes from ToolContext.callerAgent. */
 export function registerCloudBrowserTools(server: McpServer, callerHash: CallerHashProvider, runtime: CloudBrowserGatewayRuntime,
-  websiteLoginRuntime?: () => Pick<WebsiteLoginService, 'start' | 'discover'>): void {
+  websiteLoginRuntime?: () => Pick<WebsiteLoginService, 'start' | 'discover'>, daytona?: DaytonaGatewayAdapter): void {
   const live = () => cloudBrowserRuntimeStatus().enabled;
+  const daytonaPrincipal = (caller: string): string => {
+    if (!(CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS as readonly string[]).includes(caller)) throw new DaytonaBrowserError('company_connection_required');
+    const principal = principalHash(caller);
+    if (!principal) throw new DaytonaBrowserError('oauth_connection_required');
+    return principal;
+  };
+  const sessionBackend = async (sessionId: string, caller: string) => {
+    const desktop = await daytona?.forSession(sessionId);
+    if (desktop) return { browser: desktop.browser, principal: daytonaPrincipal(caller), daytona: true };
+    // A lookup or ownership error is never caught here and cannot select AWS.
+    if (!live()) throw new DaytonaBrowserError('cloud_browser_not_configured');
+    return { browser: runtime.browser, principal: principalHash(caller), daytona: false };
+  };
   const websiteProfiles = async (caller: string) => {
     const key = currentIntercomPrincipalKey();
     if (!websiteLoginRuntime || !key || !(CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS as readonly string[]).includes(caller)) return undefined;
@@ -146,7 +173,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
     name: 'browser_cloud_file_stage', category: 'write_simple',
     annotations: { title: 'Cloud browser: stage an owned upload file', description: 'Stages bounded file bytes privately for this caller. Validated UTF-8 text can be attached to a file input; binary files remain quarantined without a configured scanner. Staging is not a completed website upload.', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     inputShape: { filename: z.string().min(1).max(128), content_type: z.enum(['text/plain', 'text/csv', 'application/pdf', 'image/png', 'image/jpeg']), body_base64: z.string().min(4).max(4_000_000).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/) },
-    outputShape: { file_id: z.string().optional(), status: z.enum(['ready', 'quarantined', 'partial']).optional(), content_type: z.string().optional(), byte_length: z.number().optional(), sha256: z.string().optional(), expires_at: z.number().optional(), error: z.string().optional() },
+    outputShape: { file_id: z.string().optional(), status: z.enum(['ready', 'quarantined', 'partial']).optional(), content_type: z.string().optional(), byte_length: z.number().optional(), sha256: z.string().optional(), expires_at: z.number().optional(), scan_receipt: z.object({ verdict: z.literal('clean'), scanner: z.literal('clamav'), sha256: z.string(), byteLength: z.number(), scannedAt: z.number(), engineVersion: z.string(), signatureVersion: z.string(), signaturesUpdatedAt: z.number() }).strict().optional(), error: z.string().optional() },
     redactInputForLog: () => ({ operation: 'browser_cloud_file_stage', input: '[redacted file bytes and metadata]' }),
     shieldInputForScan: () => ({ operation: 'browser_cloud_file_stage' }),
     handler: async (input, ctx) => {
@@ -156,8 +183,9 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       try {
         const body = Buffer.from(input.body_base64, 'base64');
         if (body.toString('base64') !== input.body_base64) return { data: { error: 'invalid_file_encoding' }, summary: 'File bytes must have a canonical encoding.' };
-        const record = await runtime.files.stage(ctx.callerAgent, { filename: input.filename, contentType: input.content_type, body });
-        return { data: { file_id: record.id, status: record.status, content_type: record.contentType, byte_length: record.byteLength, sha256: record.sha256, expires_at: record.expiresAt }, summary: record.status === 'ready' ? 'Owner-bound validated text file staged for browser attachment. No antivirus or completed website upload is claimed.' : 'File staged privately in quarantine; it is not cleared for browser attachment.' };
+        const record = await runtime.files.stage(ctx.callerAgent, { filename: input.filename, contentType: input.content_type, body }, principalHash(ctx.callerAgent));
+        const scanned = validBrowserFileScanReceipt(record.scanReceipt, record.sha256, record.byteLength);
+        return { data: { file_id: record.id, status: record.status, content_type: record.contentType, byte_length: record.byteLength, sha256: record.sha256, expires_at: record.expiresAt, ...(scanned ? { scan_receipt: record.scanReceipt } : {}) }, summary: record.status === 'ready' ? (scanned ? 'Owner-bound file staged with a verified exact-byte ClamAV scan receipt. Website upload is not yet completed.' : 'Owner-bound file staged for browser attachment. No antivirus verdict or completed website upload is claimed.') : 'File staged privately in quarantine; it is not cleared for browser attachment or a completed website upload.' };
       } catch (e) { return error(e); }
     },
   }, callerHash);
@@ -497,7 +525,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       category: "write_simple",
       annotations: {
         title: "Cloud browser: start session",
-        description: "Starts an authenticated caller's browser within requested budgets. The named profiles website-login:linkedin and website-login:wefunder open the same connection-bound human sign-in flow without requiring a newer client tool name. Open the returned login_url, complete sign-in and Done, then reopen the returned real profile_id and verify authentication. Other profile IDs retain normal session behavior.",
+        description: "Starts an authenticated caller's browser within requested budgets. The opt-in daytona-company profile starts automation only when this OAuth connection's exact root-enrolled company browser proves V2 multi-mission readiness; it never opens a human viewer. The daytona-desktop profile requires configured human-viewer revocation and checkpoint support. The named profiles website-login:linkedin and website-login:wefunder retain the connection-bound AWS human sign-in flow. Open a returned login_url, confirm the signed-in account and click Done. Other profile IDs retain normal AWS session behavior.",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -514,7 +542,9 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
         profile_id: z.string().optional(),
         login_url: z.string().optional(),
         login_expires_at: z.number().optional(),
-        status: z.literal('human_login_required').optional(),
+        status: z.enum(['human_login_required', 'ready']).optional(),
+        provider: z.literal('daytona').optional(),
+        runtime_protocol: z.literal(2).optional(),
         error: z.string().optional(),
       },
       ephemeralOutput: true,
@@ -522,13 +552,38 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       shieldInputForScan: shieldCloudBrowserInput,
       redactResultForLog: () => ({ operation: 'browser_cloud_session_start', result: '[redacted browser session]' }),
       handler: async (input, ctx) => {
-        if (!live()) return unavailable();
+        if (!live() && input.profile_id !== 'daytona-desktop' && input.profile_id !== 'daytona-company') return unavailable();
         if (ctx.dryRun)
           return {
             data: { dry_run: true },
             summary: "Session start was not executed.",
           };
         try {
+          if (input.profile_id === 'daytona-company') {
+            const principal = daytonaPrincipal(ctx.callerAgent);
+            const company = await daytona?.get();
+            if (!company) throw new DaytonaBrowserError('daytona_not_configured');
+            const profile = await company.browser.discover(ctx.callerAgent, principal);
+            const readiness = await company.browser.readiness(ctx.callerAgent, profile.profileId, principal);
+            if (readiness.ready !== true || readiness.profileKey !== profile.profileId || readiness.runtimeProtocol !== 2 || readiness.multiMissionReady !== true) throw new DaytonaBrowserError('daytona_multimission_unavailable');
+            // The service must re-probe at the effect boundary and forbid a V1
+            // fallback if readiness changed after the gateway's observation.
+            const started = await company.browser.start(ctx.callerAgent, profile.profileId, input.max_seconds, input.action_budget, principal, { requireMultiMission: true });
+            if (started.runtimeProtocol !== 2) throw new DaytonaBrowserError('daytona_multimission_unavailable');
+            return { data: { sessionId: started.sessionId, expiresAt: started.expiresAt, profile_id: 'daytona-company', provider: 'daytona', runtime_protocol: 2, status: 'ready' }, summary: 'Owned company-browser automation mission started with confirmed V2 runtime routing. No human viewer or AWS session was created.' };
+          }
+          if (input.profile_id === 'daytona-desktop') {
+            const principal = daytonaPrincipal(ctx.callerAgent);
+            const desktop = await daytona?.get();
+            if (!desktop) throw new DaytonaBrowserError('daytona_not_configured');
+            if (desktop.capabilities.humanViewer !== true) throw new DaytonaBrowserError('daytona_handoff_unavailable');
+            const profile = await desktop.browser.discover(ctx.callerAgent, principal);
+            const readiness = await desktop.browser.readiness(ctx.callerAgent, profile.profileId, principal);
+            if (readiness.ready !== true || readiness.profileKey !== profile.profileId || readiness.checkpointReady !== true) throw new DaytonaBrowserError('daytona_handoff_unavailable');
+            const started = await desktop.browser.start(ctx.callerAgent, profile.profileId, input.max_seconds, input.action_budget, principal);
+            const handoff = await desktop.viewers.issue(ctx.callerAgent, started.sessionId, principal, Math.min(300, input.max_seconds));
+            return { data: { ...started, profile_id: 'daytona-desktop', provider: 'daytona', login_url: handoff.login_url, login_expires_at: handoff.expires_at, status: 'human_login_required' }, summary: 'Owned Daytona desktop mission started. Open the short-lived private viewer, confirm the signed-in account and click Done to release human control. No AWS session was created.' };
+          }
           if (input.profile_id.startsWith('website-login:')) {
             const site = input.profile_id === 'website-login:linkedin' ? 'linkedin'
               : input.profile_id === 'website-login:wefunder' ? 'wefunder' : undefined;
@@ -585,19 +640,22 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
         selected_target_id: z.string().nullable().optional(),
         file_id: z.string().optional(),
         file_status: z.literal('attached').optional(),
+        file_count: z.number().int().min(1).max(32).optional(),
         error: z.string().optional(),
       },
       redactInputForLog: redactCloudBrowserInputForLog,
       shieldInputForScan: shieldCloudBrowserInput,
       handler: async (input, ctx) => {
-        if (!live()) return unavailable();
+        if (!live() && !daytona) return unavailable();
         if (ctx.dryRun)
           return {
             data: { dry_run: true },
             summary: "Browser action was not executed.",
           };
         try {
-          const result = await runtime.browser.execute(ctx.callerAgent, input.session_id, input.action as CloudBrowserAction, input.timeout_seconds, principalHash(ctx.callerAgent)) as {
+          const backend = await sessionBackend(input.session_id, ctx.callerAgent);
+          if (input.action.type === 'upload_directory' && !backend.daytona) throw new DaytonaBrowserError('directory_upload_unsupported');
+          const result = await backend.browser.execute(ctx.callerAgent, input.session_id, input.action as CloudBrowserAction, input.timeout_seconds, backend.principal) as {
             createdTargetId?: string;
             closedTargetId?: string;
             selectedTargetId?: string | null;
@@ -611,6 +669,13 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
             const file = result as BrowserFileTransferReceipt | null;
             if (!file || file.status !== 'attached' || !Number.isSafeInteger(file.byteLength) || file.byteLength < 1 || !/^[a-f0-9]{64}$/.test(file.sha256)) throw new Error('file_result_invalid');
             return { data: { ok: true, file_id: input.action.fileId, file_status: 'attached', content_type: file.contentType, byte_length: file.byteLength, sha256: file.sha256 }, summary: 'Staged file attached to the owned browser input and its bytes verified. The website’s final upload completion must be verified separately.' };
+          }
+          if (input.action.type === 'upload_directory') {
+            const manifest = input.action.files;
+            const folder = result as unknown as DaytonaDirectoryReceipt | null;
+            if (!folder || folder.status !== 'attached' || folder.directory !== true || folder.fileCount !== manifest.length || !Array.isArray(folder.files) || folder.files.length !== folder.fileCount || !Number.isSafeInteger(folder.byteLength) || folder.byteLength < 1 || folder.byteLength > 10 * 1024 * 1024
+              || !folder.files.every((file, index) => file.relativePath === manifest[index]?.relativePath && Number.isSafeInteger(file.byteLength) && file.byteLength > 0 && /^[a-f0-9]{64}$/.test(file.sha256)) || folder.files.reduce((sum, file) => sum + file.byteLength, 0) !== folder.byteLength) throw new Error('directory_result_invalid');
+            return { data: { ok: true, file_status: 'attached', file_count: folder.fileCount, byte_length: folder.byteLength }, summary: 'Staged folder files attached to the owned directory input and exact bytes verified. Website upload completion must be verified separately.' };
           }
           const actionResult = result as { createdTargetId?: string; closedTargetId?: string; selectedTargetId?: string | null } | null;
           return {
@@ -654,10 +719,11 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
           error: z.string().optional(),
         },
         handler: async (input, ctx) => {
-          if (!live()) return unavailable();
+          if (!live() && !daytona) return unavailable();
           try {
             if (method === "snapshot") {
-              const session = await runtime.browser.snapshot(ctx.callerAgent, input.session_id, principalHash(ctx.callerAgent));
+              const backend = await sessionBackend(input.session_id, ctx.callerAgent);
+              const session = await backend.browser.snapshot(ctx.callerAgent, input.session_id, backend.principal);
               return {
                 data: { session },
                 summary: "Bounded cloud browser page observation returned.",
@@ -668,8 +734,9 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
                 data: { dry_run: true },
                 summary: "Lifecycle action was not executed.",
               };
-            if (method === "save") await runtime.browser.savePersistentProfile(ctx.callerAgent, input.session_id, principalHash(ctx.callerAgent));
-            else await runtime.browser.stop(ctx.callerAgent, input.session_id, principalHash(ctx.callerAgent));
+            const backend = await sessionBackend(input.session_id, ctx.callerAgent);
+            if (method === "save") await backend.browser.savePersistentProfile(ctx.callerAgent, input.session_id, backend.principal);
+            else await backend.browser.stop(ctx.callerAgent, input.session_id, backend.principal);
             return {
               data: { ok: true },
               summary: "Cloud browser lifecycle action completed.",

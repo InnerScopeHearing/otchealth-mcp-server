@@ -9,6 +9,7 @@
 // NOT enable any custom request-header capture here, so auth headers, bearer tokens, and
 // secrets are not recorded as span tags. Do not add header/body capture to this module.
 import tracer from 'dd-trace';
+import { daytonaTracePrivacyOptions } from './safety/daytona-trace-privacy.js';
 
 if (process.env.DD_API_KEY) {
   tracer.init({
@@ -18,6 +19,12 @@ if (process.env.DD_API_KEY) {
     logInjection: true,
     runtimeMetrics: true,
   });
+  // Default query obfuscation cannot hide a signed token embedded in a
+  // Daytona preview hostname or token-expiration path. Do not create those
+  // outbound span records or propagate tracing headers to private viewer endpoints.
+  const privacy = daytonaTracePrivacyOptions(process.env.DAYTONA_BROWSER_PREVIEW_DOMAIN);
+  tracer.use('http', privacy.http);
+  tracer.use('undici', privacy.undici);
 }
 
 export default tracer;

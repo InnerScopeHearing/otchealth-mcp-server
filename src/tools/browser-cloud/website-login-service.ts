@@ -9,6 +9,7 @@ import { assertWebsiteLoginTargetPublic, validateWebsiteLoginTarget, type Websit
 export { WEBSITE_LOGIN_SITES, type WebsiteLoginSite } from './website-login-store.js';
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const tokenValid = (value: string) => typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
+type WebsiteLoginViewer = { signed_url: string; expires_at: number; site_label: string; workspace_id: WebsiteLoginSite; status: 'login_required' };
 // These codes originate only before CloudBrowserService.start calls its transport.
 // Credential/store errors are deliberately absent: the same codes can also occur
 // while persisting a session after the remote provider has already created it.
@@ -115,13 +116,21 @@ export class WebsiteLoginService {
       throw error;
     }
   }
-  async exchange(token: string): Promise<{ signed_url: string; expires_at: number; site_label: string; workspace_id: WebsiteLoginSite; status: 'login_required' }> {
+  async exchange(token: string): Promise<WebsiteLoginViewer> {
     if (!tokenValid(token)) throw new CloudBrowserError('login_expired', 'This login link is invalid or expired.');
     const binding = await this.tickets.exchange(digest(token));
     if (!binding) throw new CloudBrowserError('login_expired', 'This login link is invalid, consumed or expired.');
     const session = await this.ownedSession(binding);
+    return this.viewerForBinding(binding, session);
+  }
+  /** Resume only the original exchanged capability; no ticket, session, lease or expiry is renewed. */
+  async resume(token: string): Promise<WebsiteLoginViewer> {
+    if (!tokenValid(token)) throw new CloudBrowserError('login_expired', 'The login session is invalid or expired.');
+    return this.withExchangedSession(digest(token), (binding, session, lockOwner) => this.viewerForBinding(binding, session, lockOwner));
+  }
+  private async viewerForBinding(binding: WebsiteLoginBinding, session: CloudBrowserSession, lockOwner?: string): Promise<WebsiteLoginViewer> {
     // Also repairs unconsumed tickets prepared by the prior video-only release.
-    await this.setAutomationStreamStatus(session, 'DISABLED');
+    await this.setAutomationStreamStatus(session, 'DISABLED', lockOwner);
     const expiresIn = Math.min(300, Math.floor((Math.min(binding.expiresAt, session.expiresAt) - this.now()) / 1000));
     if (expiresIn < 1) throw new CloudBrowserError('login_expired', 'The sign-in session has expired.');
     const signedAt = this.now();
@@ -133,22 +142,28 @@ export class WebsiteLoginService {
   async complete(token: string): Promise<{ status: 'saved'; site: WebsiteLoginSite; workspace_id: WebsiteLoginSite; verification: 'owner_confirmation_and_expected_url' }> {
     if (!tokenValid(token)) throw new CloudBrowserError('login_expired', 'The login session is invalid.');
     const hash = digest(token);
-    const ticket = await this.tickets.load(hash);
-    if (!ticket || ticket.phase !== 'EXCHANGED' || !await this.tickets.finish(hash)) throw new CloudBrowserError('login_expired', 'The login session is expired or already completed.');
+    let ticket: WebsiteLoginBinding | undefined;
     let confirmedStopped = false;
     try {
-      const session = await this.ownedSession(ticket);
-      await this.setAutomationStreamStatus(session, 'ENABLED');
-      await this.transport.verifyWebsiteLogin(session, ticket.site, ticket.target);
-      await this.browser.savePersistentProfile(ticket.owner, session.sessionId, ticket.ownerSubjectHash, ticket.profileLeaseOwner);
+      await this.withExchangedSession(hash, async (current, session, lockOwner) => {
+        if (!await this.tickets.finish(hash)) throw new CloudBrowserError('login_expired', 'The login session is expired or already completed.');
+        ticket = current;
+        await this.setAutomationStreamStatus(session, 'ENABLED', lockOwner);
+        await this.transport.verifyWebsiteLogin(session, current.site, current.target);
+        await this.browser.savePersistentProfile(current.owner, session.sessionId, current.ownerSubjectHash, current.profileLeaseOwner);
+      }, 300_000);
+      if (!ticket) throw new CloudBrowserError('login_expired', 'The login session is expired or already completed.');
       // Never unmask a human login session. Successful stop removes its suppressed state;
       // failed cleanup leaves suppression in force for operator reconciliation.
-      await this.browser.stop(ticket.owner, session.sessionId, ticket.ownerSubjectHash);
+      // The viewer fence has been released before stop acquires its own session lock.
+      await this.browser.stop(ticket.owner, ticket.sessionId, ticket.ownerSubjectHash);
       confirmedStopped = true;
       await this.tickets.releaseProfileLease(ticket.profileId, ticket.profileLeaseOwner);
       if (!await this.tickets.complete(hash, 'SAVED')) throw new CloudBrowserError('login_save_unknown', 'The saved sign-in receipt could not be confirmed.');
       return { status: 'saved', site: ticket.site, workspace_id: ticket.site, verification: 'owner_confirmation_and_expected_url' };
     } catch (error) {
+      // A busy fence or rejected binding never claims Done, changes its phase, or stops the human session.
+      if (!ticket) throw error;
       await this.tickets.complete(hash, 'FAILED').catch(() => undefined);
       if (!confirmedStopped) {
         try { await this.browser.stop(ticket.owner, ticket.sessionId, ticket.ownerSubjectHash); confirmedStopped = true; } catch { /* retain suppression and lease after ambiguous stop */ }
@@ -157,13 +172,43 @@ export class WebsiteLoginService {
       throw error;
     }
   }
-  private async setAutomationStreamStatus(session: CloudBrowserSession, streamStatus: 'DISABLED' | 'ENABLED'): Promise<void> {
+  private async withExchangedSession<T>(hash: string, run: (binding: WebsiteLoginBinding, session: CloudBrowserSession, lockOwner: string) => Promise<T>, fenceMs = 120_000): Promise<T> {
+    const ticket = await this.tickets.load(hash);
+    if (!ticket || ticket.phase !== 'EXCHANGED' || ticket.expiresAt <= this.now()) throw new CloudBrowserError('login_expired', 'The login session is expired or already completed.');
+    const lockOwner = `website-login:${randomUUID()}`;
+    // Covers the existing bounded control transfer, verification and provider-profile save calls.
+    // This distinct code proves Done has not claimed its ticket. Generic
+    // session_busy can also occur later, after a provider profile save.
+    if (!await this.store.acquireSessionLock(ticket.sessionId, lockOwner, this.now() + fenceMs)) throw new CloudBrowserError('login_operation_busy', 'Another sign-in operation is in progress for this session.');
+    try {
+      const current = await this.tickets.load(hash);
+      if (!current || current.phase !== 'EXCHANGED' || current.expiresAt !== ticket.expiresAt || current.sessionId !== ticket.sessionId
+        || current.owner !== ticket.owner || current.ownerSubjectHash !== ticket.ownerSubjectHash || current.profileId !== ticket.profileId
+        || current.profileLeaseOwner !== ticket.profileLeaseOwner || current.site !== ticket.site) {
+        throw new CloudBrowserError('login_expired', 'The login session is expired or already completed.');
+      }
+      const session = await this.ownedSession(current);
+      return await run(current, session, lockOwner);
+    } finally { await this.store.releaseSessionLock(ticket.sessionId, lockOwner); }
+  }
+  private async setAutomationStreamStatus(session: CloudBrowserSession, streamStatus: 'DISABLED' | 'ENABLED', lockOwner?: string): Promise<void> {
     if (!session.sensitiveOutputSuppressed || !session.providerBrowserId) throw new CloudBrowserError('owner_forbidden', 'The suppressed sign-in session is unavailable.');
+    // A resumed DISABLED request could complete remotely after an acknowledgement
+    // is lost. Persist intent first so a later Done cannot erase that uncertainty.
+    if (streamStatus === 'DISABLED' && lockOwner) await this.store.saveSessionUnderLock({ ...session, effectUnknown: true }, lockOwner);
     const receipt = await this.provider.setAutomationStreamStatus({ browserIdentifier: session.providerBrowserId, sessionId: session.providerSessionId, streamStatus });
     if (receipt.browserIdentifier !== session.providerBrowserId || receipt.sessionId !== session.providerSessionId || receipt.streamStatus !== streamStatus) throw new CloudBrowserError('automation_stream_state_unknown', 'The owned browser input handoff could not be confirmed.');
+    if (streamStatus === 'DISABLED' && lockOwner) {
+      // A committed clear with a lost storage acknowledgement may later read false:
+      // DISABLED is already confirmed, so no late provider effect remains. This
+      // request still fails without retry or a viewer URL if the clear throws.
+      await this.store.saveSessionUnderLock({ ...session, effectUnknown: false }, lockOwner);
+      session.effectUnknown = false;
+    }
     if (streamStatus === 'ENABLED' && receipt.automationEndpoint !== undefined) {
       session.automationEndpoint = receipt.automationEndpoint;
-      await this.store.saveSession(session);
+      if (lockOwner) await this.store.saveSessionUnderLock(session, lockOwner);
+      else await this.store.saveSession(session);
     }
   }
   private async ownedSession(binding: WebsiteLoginBinding): Promise<CloudBrowserSession> {
@@ -171,7 +216,7 @@ export class WebsiteLoginService {
     if (binding.expiresAt <= this.now() || websiteProfileId(binding.owner, binding.ownerSubjectHash, binding.site, binding.target) !== binding.profileId || !await this.tickets.ownsProfileLease(binding.profileId, binding.profileLeaseOwner)) throw new CloudBrowserError('owner_forbidden', 'The sign-in binding is unavailable.');
     if (policy.target) await this.assertPublic(policy.target);
     const session = await this.store.loadSession(binding.sessionId);
-    if (!session || session.owner !== binding.owner || session.ownerSubjectHash !== binding.ownerSubjectHash || session.profileId !== binding.profileId || !sameHosts(session.allowedHosts, policy.allowedHosts) || session.mode === 'public_web' || session.expiresAt <= this.now() || session.effectUnknown || !session.sensitiveOutputSuppressed || session.providerBrowserId !== 'aws.browser.v1') throw new CloudBrowserError('owner_forbidden', 'The sign-in session is unavailable.');
+    if (!session || session.owner !== binding.owner || session.ownerSubjectHash !== binding.ownerSubjectHash || session.profileId !== binding.profileId || !sameHosts(session.allowedHosts, policy.allowedHosts) || session.mode === 'public_web' || session.expiresAt <= this.now() || session.effectUnknown || session.providerStopped || session.providerStopToken !== undefined || !session.sensitiveOutputSuppressed || session.providerBrowserId !== 'aws.browser.v1' || (session.loginLeaseOwner !== undefined && session.loginLeaseOwner !== binding.profileLeaseOwner)) throw new CloudBrowserError('owner_forbidden', 'The sign-in session is unavailable.');
     return session;
   }
 }

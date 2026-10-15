@@ -155,6 +155,7 @@ import { registerIntercomBrowserLoginTool } from './browser-cloud/intercom-login
 import { registerWebsiteBrowserLoginTools } from './browser-cloud/website-login-tools.js';
 import { intercomLoginRuntime, websiteLoginRuntime } from '../server/cloud-browser-runtime.js';
 import { cloudBrowserRuntime } from '../server/cloud-browser-runtime.js';
+import { daytonaGatewayAdapter } from '../server/daytona-runtime.js';
 import { registerFramerProjectInspect } from './framer/tool.js';
 
 // ===== EXHAUSTIVE WAVE: complete per-connector CRUD surface =====
@@ -1971,7 +1972,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerBrowserAgentcoreTools(server, callerHash);
   // General Browser broker: per-agent capability enrollments, beginning with Wefunder Campaign Director.
   registerAgentCoreBrowserBrokerTools(server, callerHash);
-  registerCloudBrowserTools(server, callerHash, cloudBrowserRuntime, websiteLoginRuntime);
+  registerCloudBrowserTools(server, callerHash, cloudBrowserRuntime, websiteLoginRuntime, daytonaGatewayAdapter);
   registerIntercomBrowserLoginTool(server, callerHash, intercomLoginRuntime);
   registerWebsiteBrowserLoginTools(server, callerHash, websiteLoginRuntime);
   registerFramerProjectInspect(server, callerHash);

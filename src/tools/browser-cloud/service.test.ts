@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { CloudBrowserError, type BrowserCaptureMetadata, type CloudBrowserProfile, type CloudBrowserSession, type CloudBrowserStore, type CloudBrowserTransport } from "./contract.js";
 import { CloudBrowserService } from "./service.js";
 import { parseTrustedPublicWebPolicy } from './public-web-policy.js';
+import { BrowserFileBroker, type BrowserFileRecord } from './file-broker.js';
 
 const TEST_PUBLIC_WEB_POLICY = parseTrustedPublicWebPolicy({
   AWS_REGION: 'us-east-1',
@@ -387,6 +388,34 @@ test("cloud browser persists an opaque session and binds every operation to its 
   await service.stop("cto", started.sessionId);
   assert.equal(transport.stopped, 1);
   assert.equal(store.sessions.has(started.sessionId), false);
+});
+
+test('upload on an unbound lane profile retains the invocation connection when resolving staged files', async () => {
+  const store = new MemoryStore();
+  const fileRows = new Map<string, { record: BrowserFileRecord; body: Uint8Array }>();
+  const files = new BrowserFileBroker({
+    put: async (key, record, body) => { fileRows.set(key, { record, body }); },
+    get: async key => fileRows.get(key) ?? null,
+  }, { allowValidatedText: true });
+  const principal = 'a'.repeat(64);
+  const staged = await files.stage('cto', { filename: 'notes.txt', contentType: 'text/plain', body: Buffer.from('owned text') }, principal);
+  const fake = new FakeTransport();
+  const transport: CloudBrowserTransport = {
+    start: input => fake.start(input), stop: () => fake.stop(),
+    execute: async (_session, action, _timeout, invocationPrincipal) => {
+      if (action.type === 'upload') {
+        const selected = await files.forUpload('cto', action.fileId, invocationPrincipal);
+        return { observation: null, fileReceipt: { status: 'attached', filename: selected.record.filename, contentType: selected.record.contentType, byteLength: selected.record.byteLength, sha256: selected.record.sha256 } };
+      }
+      return { url: 'https://example.test/', title: 'Example', visibleText: '' };
+    },
+  };
+  const service = new CloudBrowserService(store, transport);
+  await service.saveProfile('cto', { profileId: 'legacy-public-profile', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
+  const started = await service.start('cto', 'legacy-public-profile', 60, undefined, principal);
+  assert.equal(store.sessions.get(started.sessionId)!.ownerSubjectHash, undefined);
+  await service.execute('cto', started.sessionId, { type: 'upload', selector: 'input[type=file]', fileId: staged.id }, 2, principal);
+  await assert.rejects(service.execute('cto', started.sessionId, { type: 'upload', selector: 'input[type=file]', fileId: staged.id }, 2, 'b'.repeat(64)), /owner|connection/i);
 });
 
 test("cloud browser rejects hosts, uncontrolled selectors and over-budget action calls before transport", async () => {

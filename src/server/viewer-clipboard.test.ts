@@ -28,7 +28,7 @@ async function viewer(options: { delayed?: boolean; saved?: boolean } = {}) {
     syncClipboards: () => { state.copies++; return true; }, disconnect: () => { state.disconnects++; },
   };
   const window = {
-    location: { hash: `#token=${TOKEN}`, pathname: '/browser/connect' },
+    location: { hash: `#token=${TOKEN}`, pathname: '/browser/connect', origin: 'https://mcp.otchealth.app' },
     addEventListener: (name: string, callback: () => unknown) => { windowListeners.set(name, callback); },
     dcv: {
       LogLevel: { SILENT: 'silent' }, setLogLevel: (level: string) => { assert.equal(level, 'silent'); },

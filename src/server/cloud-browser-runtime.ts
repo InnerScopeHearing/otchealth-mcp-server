@@ -3,7 +3,8 @@ import { parseTrustedPublicWebPolicy } from '../tools/browser-cloud/public-web-p
 import { CloudBrowserJobs } from '../tools/browser-cloud-jobs/contracts.js';
 import { createDynamoBrowserJobStore, createS3BrowserArtifactStore, createSqsBrowserQueue } from '../tools/browser-cloud-jobs/aws-adapters.js';
 import { cloudBrowserRuntimeStatus, startCloudBrowserWorker, type CloudBrowserGatewayRuntime } from '../tools/browser-cloud-gateway/index.js';
-import { BrowserFileBroker } from '../tools/browser-cloud/file-broker.js';
+import { BrowserFileBroker, type BrowserFileStore } from '../tools/browser-cloud/file-broker.js';
+import { createConfiguredBrowserFileScanner } from '../tools/browser-cloud/clamav-scanner.js';
 import { createAwsBrowserFileStore } from '../tools/browser-cloud/aws-file-store.js';
 import { createTrustedBrowserBinaryValidator } from '../tools/browser-cloud/binary-validation.js';
 import { IntercomLoginService } from '../tools/browser-cloud/intercom-login-service.js';
@@ -15,6 +16,9 @@ import { WebsiteLoginTicketStore } from '../tools/browser-cloud/website-login-st
 let instance: CloudBrowserGatewayRuntime | undefined;
 let intercomLogin: IntercomLoginService | undefined;
 let websiteLogin: WebsiteLoginService | undefined;
+export function createConfiguredBrowserFileBroker(store: BrowserFileStore, env: NodeJS.ProcessEnv = process.env): BrowserFileBroker {
+  return new BrowserFileBroker(store, { allowValidatedText: true, validator: createTrustedBrowserBinaryValidator(), scanner: createConfiguredBrowserFileScanner(env) });
+}
 function configured(): CloudBrowserGatewayRuntime {
   if (!cloudBrowserRuntimeStatus().enabled) throw new Error('cloud_browser_not_configured');
   if (!instance) {
@@ -23,11 +27,9 @@ function configured(): CloudBrowserGatewayRuntime {
       bucket: process.env.CLOUD_BROWSER_ARTIFACT_BUCKET, queueUrl: process.env.CLOUD_BROWSER_QUEUE_URL };
     const queue = createSqsBrowserQueue(config);
     const artifacts = createS3BrowserArtifactStore(config);
-    const files = new BrowserFileBroker(createAwsBrowserFileStore(config), {
-      allowValidatedText: true, validator: createTrustedBrowserBinaryValidator(),
-    });
+    const files = createConfiguredBrowserFileBroker(createAwsBrowserFileStore(config));
     const store = new DynamoCloudBrowserSessionStore(config.table, config.region);
-    const transport = new AgentCoreCloudBrowserTransport(config.region, fetch, undefined, undefined, publicWebPolicy, (owner, fileId) => files.forUpload(owner, fileId));
+    const transport = new AgentCoreCloudBrowserTransport(config.region, fetch, undefined, undefined, publicWebPolicy, (owner, fileId, principalHash) => files.forUpload(owner, fileId, principalHash));
     const browser = new CloudBrowserService(store, transport, Date.now, publicWebPolicy);
     intercomLogin = new IntercomLoginService(store, browser, transport, new IntercomProfileProvider({ region:config.region, browserIdentifier:'aws.browser.v1' }), new IntercomLoginTicketStore({ tableName:config.table, region:config.region }));
     websiteLogin = new WebsiteLoginService(store, browser, transport, new IntercomProfileProvider({ region:config.region, browserIdentifier:'aws.browser.v1' }), new WebsiteLoginTicketStore({ tableName:config.table, region:config.region }));

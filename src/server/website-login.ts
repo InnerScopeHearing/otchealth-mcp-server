@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { WebsiteLoginService } from '../tools/browser-cloud/website-login-service.js';
+import { CloudBrowserError } from '../tools/browser-cloud/contract.js';
 import { registerWebsiteLoginPage } from './intercom-login-page.js';
 
 const ORIGIN = 'https://mcp.otchealth.app';
@@ -64,8 +65,28 @@ export function registerWebsiteLoginRoutes(app: FastifyInstance, runtime: () => 
       const result = await runtime().complete(token);
       reply.header('set-cookie', `${COOKIE}-${body.handoff_id}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`);
       return reply.send(result);
-    } catch {
+    } catch (error) {
+      if (error instanceof CloudBrowserError && error.code === 'login_operation_busy') return reply.code(409).send({ error: 'login_operation_busy' });
       return reply.code(409).send({ error: 'website_sign_in_not_confirmed' });
+    }
+  });
+
+  app.post('/browser/connect/resume', { bodyLimit: 256, config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
+    headers(reply);
+    if (!allowed(request)) return reply.code(403).send({ error: 'same_origin_required' });
+    const body = request.body as { handoff_id?: unknown } | undefined;
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 1 || typeof body.handoff_id !== 'string' || !/^[a-f0-9]{32}$/.test(body.handoff_id)) {
+      return reply.code(400).send({ error: 'invalid_login_session' });
+    }
+    const token = tokenFromCookie(request, body.handoff_id);
+    if (!token) return reply.code(400).send({ error: 'invalid_login_session' });
+    try {
+      const result = await runtime().resume(token);
+      // The original HttpOnly cookie and ticket expiry remain authoritative.
+      return reply.send({ ...result, handoff_id: body.handoff_id });
+    } catch (error) {
+      if (error instanceof CloudBrowserError && error.code === 'login_operation_busy') return reply.code(409).send({ error: 'login_operation_busy' });
+      return reply.code(409).send({ error: 'login_link_expired_or_unavailable' });
     }
   });
 }

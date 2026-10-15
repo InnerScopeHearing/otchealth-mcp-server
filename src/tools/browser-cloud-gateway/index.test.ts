@@ -90,6 +90,7 @@ import { requestContext } from "../../server/request-context.js";
 import { redactCloudBrowserInputForLog, registerCloudBrowserTools, shieldCloudBrowserInput, type CloudBrowserGatewayRuntime } from "./index.js";
 import { websitePrincipalHash } from '../browser-cloud/website-login-service.js';
 import { intercomPrincipalHash } from '../browser-cloud/intercom-login-service.js';
+import { BrowserFileBroker, type BrowserFileRecord } from '../browser-cloud/file-broker.js';
 
 for (const [key, value] of Object.entries({
   CIO_SITE_ID: "test",
@@ -133,6 +134,34 @@ test('normal browser lifecycle carries the website connection hash for every eli
       assert.equal(calls.at(-1)?.[4], websitePrincipalHash(lane, 'connection:authorization-1'));
     }
     assert.equal(websitePrincipalHash('coo', 'connection:authorization-1'), intercomPrincipalHash('connection:authorization-1'), 'existing COO profiles remain usable');
+  } finally {
+    for (const [index, key] of keys.entries()) {
+      if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index];
+    }
+  }
+});
+
+test('file staging binds stored bytes to the authenticated connection without accepting a caller hash field', async () => {
+  const keys = ['CLOUD_BROWSER_ENABLED', 'CLOUD_BROWSER_DDB_TABLE', 'CLOUD_BROWSER_QUEUE_URL', 'CLOUD_BROWSER_ARTIFACT_BUCKET', 'READ_ONLY_MODE', 'ENABLE_WRITE_TOOLS'];
+  const previous = keys.map(key => process.env[key]);
+  Object.assign(process.env, { CLOUD_BROWSER_ENABLED: 'true', CLOUD_BROWSER_DDB_TABLE: 't', CLOUD_BROWSER_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/1/q', CLOUD_BROWSER_ARTIFACT_BUCKET: 'b', READ_ONLY_MODE: 'false', ENABLE_WRITE_TOOLS: 'true' });
+  const stored = new Map<string, { record: BrowserFileRecord; body: Uint8Array }>();
+  const files = new BrowserFileBroker({
+    put: async (key, record, body) => { stored.set(key, { record, body }); },
+    get: async key => stored.get(key) ?? null,
+  }, { allowValidatedText: true });
+  const runtime = { browser: {} as never, jobs: {} as never, queue: {} as never, artifacts: {} as never, files } satisfies CloudBrowserGatewayRuntime;
+  const { server, handlers } = fakeServer();
+  registerCloudBrowserTools(server, () => 'a'.repeat(64), runtime);
+  try {
+    const result = await requestContext.run({ callerHash: 'a'.repeat(64), correlationId: 'test', callerAgent: 'cto', authKind: 'oauth', authSubject: 'client', authConnectionId: 'authorization-1' }, () => handlers.get('browser_cloud_file_stage')!({ filename: 'notes.txt', content_type: 'text/plain', body_base64: Buffer.from('owned text').toString('base64'), dry_run: false }));
+    const staged = [...stored.values()][0]!.record;
+    const expected = websitePrincipalHash('cto', 'connection:authorization-1');
+    assert.equal(staged.ownerSubjectHash, expected);
+    assert.equal((result.structuredContent?.result as { file_id?: string }).file_id, staged.id);
+    assert.equal((await files.forUpload('cto', staged.id, expected)).record.id, staged.id);
+    await assert.rejects(files.forUpload('cto', staged.id, websitePrincipalHash('cto', 'connection:authorization-2')), /owner|connection/i);
+    assert.equal(JSON.stringify(result).includes(expected), false, 'connection binding is not added to the public response');
   } finally {
     for (const [index, key] of keys.entries()) {
       if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index];
