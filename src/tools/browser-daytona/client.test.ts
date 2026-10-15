@@ -19,17 +19,17 @@ async function client(options: Record<string, unknown> = {}) {
 }
 function network() {
   const requests: Array<{ url: string; init: RequestInit }> = [];
-  const state = { sandbox: { id: binding.sandboxId, organizationId, state: 'started', public: false }, foreignReceipt: false, status: 200, calls: 0, payloads: [] as any[], pageReceipt: undefined as any };
+  const state = { sandbox: { id: binding.sandboxId, organizationId, state: 'started', public: false }, foreignReceipt: false, status: 200, calls: 0, payloads: [] as any[], pageReceipt: undefined as any, checkpointReady: true, checkpointAfter: 102 };
   const fetchImpl: typeof fetch = async (input, init = {}) => {
     const url = String(input); requests.push({ url, init }); state.calls++;
     assert.equal(new Headers(init.headers).get('authorization'), `Bearer ${token}`);
     if (url.endsWith('/toolbox-proxy-url')) return Response.json({ url: 'https://proxy.daytona.test/toolbox' });
     if (url.endsWith('/process/execute')) {
       assert.equal(init.method, 'POST'); const body = JSON.parse(String(init.body));
-      assert.match(body.command, /^runuser -u otcbrowser -- python3 \/opt\/otchealth-browser\/browser-dispatcher\.py --payload [A-Za-z0-9_-]+$/);
+      assert.match(body.command, /^sudo -n runuser -u otcbrowser -- python3 \/opt\/otchealth-browser\/browser-dispatcher\.py --payload [A-Za-z0-9_-]+$/);
       assert.ok(body.timeout >= 1 && body.timeout <= 18);
       const payload = JSON.parse(Buffer.from(body.command.split(' ').at(-1), 'base64url').toString()); state.payloads.push(payload);
-      const result = payload.op === 'open' || payload.op === 'probe' ? { ready: true, cdpLoopback: true, profileVerified: true } : payload.op === 'release' ? { released: true } : { url: 'https://example.com/', title: 'Example', visibleText: 'Actual fixture page', ...(state.pageReceipt ? { pageReceipt: state.pageReceipt } : {}) };
+      const result = payload.op === 'probe' ? { ready: true, cdpLoopback: true, profileVerified: true, checkpointReady: state.checkpointReady, profileKey: binding.profileKey, profilePath: binding.profilePath, browserPid: 101, supervisorPid: 100, encryptedKeyringUnlocked: state.checkpointReady } : payload.op === 'checkpoint' ? { checkpointed: true, gracefulClosed: true, keyringSessionRetained: true, cdpLoopback: true, profileVerified: true, profileKey: binding.profileKey, profilePath: binding.profilePath, sessionId: payload.sessionId, principalHash: payload.principalHash, browserPidBefore: 101, browserPidAfter: state.checkpointAfter, supervisorPid: 100, tabsReset: true } : payload.op === 'open' ? { ready: true, cdpLoopback: true, profileVerified: true } : payload.op === 'release' ? { released: true } : { url: 'https://example.com/', title: 'Example', visibleText: 'Actual fixture page', ...(state.pageReceipt ? { pageReceipt: state.pageReceipt } : {}) };
       const envelope = { version: 1, ok: true, profileKey: state.foreignReceipt ? 'foreign-profile' : binding.profileKey, profilePath: binding.profilePath, ...(payload.sessionId ? { sessionId: payload.sessionId } : {}), result };
       return Response.json({ exitCode: 0, result: JSON.stringify(envelope) }, { status: state.status });
     }
@@ -45,6 +45,20 @@ test('inspect reads only the exact enrolled sandbox and requires actual started 
   n.state.sandbox.id = 'foreign'; await assert.rejects(c.inspect(binding));
   n.state.sandbox.id = binding.sandboxId; n.state.sandbox.public = true; await assert.rejects(c.openMission(binding, mission.sessionId));
   assert.equal(n.requests.some(r => r.init.method === 'POST'), false);
+});
+test('checkpoint readiness is exact-binding runtime evidence and checkpoint requires trusted mission close/reopen proof', async () => {
+  const n = network(); const c = await client({ fetchImpl: n.fetchImpl });
+  assert.equal(c.capabilities.checkpoint, false, 'constructor presence cannot enable the human alias');
+  const readiness = await c.probe(binding);
+  assert.equal(readiness.checkpointReady, true); assert.equal(readiness.profileKey, binding.profileKey);
+  assert.equal(c.capabilities.checkpoint, false, 'one profile proof must not enable every enrolled profile');
+  n.state.checkpointReady = false; assert.equal((await c.probe(binding)).checkpointReady, false);
+  const before = n.requests.length; await assert.rejects(c.checkpoint(binding)); assert.equal(n.requests.length, before);
+  await c.checkpoint(binding, mission);
+  assert.equal(n.state.payloads.at(-1).op, 'checkpoint'); assert.equal(n.state.payloads.at(-1).sessionId, mission.sessionId);
+  assert.equal(n.state.payloads.at(-1).principalHash, binding.ownerSubjectHash);
+  n.state.checkpointAfter = 101; await assert.rejects(c.checkpoint(binding, mission));
+  const count = n.requests.length; await assert.rejects(c.checkpoint(binding, { ...mission, ownerSubjectHash: 'c'.repeat(64) })); assert.equal(n.requests.length, count);
 });
 test('foreign and missing organizations cannot reach any toolbox command', async () => {
   for (const org of ['22222222-2222-2222-2222-222222222222', undefined]) {

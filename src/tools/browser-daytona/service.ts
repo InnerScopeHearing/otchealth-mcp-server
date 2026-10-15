@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { CloudBrowserAction } from '../browser-cloud/contract.js';
 import { validateCloudBrowserAction } from '../browser-cloud/actions.js';
-import { DaytonaBrowserError, type DaytonaBinding, type DaytonaBrowserStore, type DaytonaMission, type DaytonaProvider } from './contract.js';
+import { DaytonaBrowserError, type DaytonaBinding, type DaytonaBrowserStore, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness } from './contract.js';
 import { assertDaytonaBinding, assertDaytonaMission } from './store.js';
 const HASH = /^[a-f0-9]{64}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -71,7 +71,7 @@ export class DaytonaBrowserService {
   }
   async snapshot(caller: string, id: string, principal?: string): Promise<unknown> { return this.execute(caller, id, { type: 'snapshot' }, 20, principal); }
   async savePersistentProfile(caller: string, id: string, principal?: string): Promise<void> {
-    await this.locked(caller, id, principal, async (binding, session, lock) => { await this.active(binding, session); session.effectUnknown = true; await this.store.saveSessionUnderLock(session, lock); await this.provider.checkpoint(binding); session.effectUnknown = false; await this.store.saveSessionUnderLock(session, lock); });
+    await this.locked(caller, id, principal, async (binding, session, lock) => { await this.active(binding, session); session.effectUnknown = true; await this.store.saveSessionUnderLock(session, lock); await this.provider.checkpoint(binding, session); session.effectUnknown = false; await this.store.saveSessionUnderLock(session, lock); });
   }
   async stop(caller: string, id: string, principal?: string): Promise<void> {
     await this.locked(caller, id, principal, async (binding, session, lock) => {
@@ -89,6 +89,15 @@ export class DaytonaBrowserService {
   }
   async discover(caller: string, principal?: string, profileKey?: string): Promise<{ profileId: string; allowedHosts: string[]; persistent: true; provider: 'daytona' }> {
     if (!principal) return fail('owner_forbidden'); const binding = await this.binding(caller, profileKey ?? daytonaProfileKey(caller, principal), principal); return { profileId: binding.profileKey, allowedHosts: [], persistent: true, provider: 'daytona' };
+  }
+  /** No mission, lease, or resource creation. Call before routing a full human-enabled alias. */
+  async readiness(caller: string, profileKey: string, principal?: string): Promise<DaytonaRuntimeReadiness> {
+    const binding = await this.binding(caller, profileKey, principal);
+    if (!this.provider.probe) return fail('daytona_checkpoint_unavailable');
+    const proof = await this.provider.probe(binding);
+    if (!proof || proof.ready !== true || proof.profileKey !== binding.profileKey || proof.profilePath !== binding.profilePath || typeof proof.checkpointReady !== 'boolean') return fail('daytona_runtime_invalid');
+    return { ready: true, profileKey: binding.profileKey, profilePath: binding.profilePath, checkpointReady: proof.checkpointReady,
+      ...(proof.browserPid === undefined ? {} : { browserPid: proof.browserPid }), ...(proof.supervisorPid === undefined ? {} : { supervisorPid: proof.supervisorPid }) };
   }
   async getViewerGrant(caller: string, id: string, principal?: string, requestedSeconds = 300): Promise<{ url: string; expiresAt: number; grantHandle: string }> {
     if (!Number.isSafeInteger(requestedSeconds) || requestedSeconds < 1 || requestedSeconds > 300) return fail('invalid_duration');
@@ -115,7 +124,7 @@ export class DaytonaBrowserService {
     return this.locked(caller, id, principal, async (binding, session, lock) => {
       await this.active(binding, session, true); if (!session.viewerGrantHandle || !session.sensitiveOutputSuppressed) return fail('viewer_unavailable');
       session.effectUnknown = true; await this.store.saveSessionUnderLock(session, lock); const receipt = await this.provider.revokeViewerGrant(binding, session.viewerGrantHandle); if (receipt.human_input_revoked !== true) return fail('viewer_revocation_unknown');
-      await this.provider.checkpoint(binding); delete session.viewerGrantHandle; delete session.viewerExpiresAt; session.sensitiveOutputSuppressed = false; session.effectUnknown = false; await this.store.saveSessionUnderLock(session, lock); return { status: 'saved', human_input_revoked: true };
+      await this.provider.checkpoint(binding, session); delete session.viewerGrantHandle; delete session.viewerExpiresAt; session.sensitiveOutputSuppressed = false; session.effectUnknown = false; await this.store.saveSessionUnderLock(session, lock); return { status: 'saved', human_input_revoked: true };
     });
   }
 }

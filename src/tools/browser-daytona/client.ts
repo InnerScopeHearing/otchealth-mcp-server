@@ -1,7 +1,8 @@
 import type { CloudBrowserAction, CloudBrowserExecutionResult } from '../browser-cloud/contract.js';
 import type { BrowserPageReceipt } from '../browser-cloud/page-controls.js';
 import { validateCloudBrowserAction } from '../browser-cloud/actions.js';
-import { DaytonaBrowserError, type DaytonaBinding, type DaytonaMission, type DaytonaProvider } from './contract.js';
+import { DaytonaBrowserError, type DaytonaBinding, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness } from './contract.js';
+export type { DaytonaRuntimeReadiness } from './contract.js';
 import { assertDaytonaBinding, assertDaytonaMission } from './store.js';
 
 type ViewerGrant = { url: string; expiresAt: number; grantHandle: string };
@@ -80,7 +81,7 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
   async inspect(binding: DaytonaBinding): Promise<{ sandboxId: string; state: 'started' | 'stopped' | 'other'; public: boolean }> {
     assertDaytonaBinding(binding); return this.bounded(context => this.inspectWith(context, binding));
   }
-  private async runtime(binding: DaytonaBinding, op: 'probe' | 'open' | 'execute' | 'release', sessionId?: string, action?: CloudBrowserAction, principalHash?: string, timeoutSeconds = 18): Promise<unknown> {
+  private async runtime(binding: DaytonaBinding, op: 'probe' | 'open' | 'execute' | 'release' | 'checkpoint', sessionId?: string, action?: CloudBrowserAction, principalHash?: string, timeoutSeconds = 18): Promise<unknown> {
     assertDaytonaBinding(binding); if (sessionId !== undefined && !UUID.test(sessionId)) return fail('owner_forbidden');
     return this.bounded(async context => {
       const state = await this.inspectWith(context, binding); if (state.state !== 'started' || state.public !== false) return fail('daytona_not_ready');
@@ -91,7 +92,7 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
       const timeoutMs = Math.min(14000, timeoutSeconds * 1000, context.remaining() - 5000); if (timeoutMs < 1000) return fail('daytona_provider_timeout');
       const payload = { version: 1, op, profileKey: binding.profileKey, profilePath: binding.profilePath, timeoutMs: Math.floor(timeoutMs), ...(sessionId ? { sessionId } : {}), ...(action ? { action } : {}), principalHash: principalHash ?? binding.ownerSubjectHash };
       const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
-      const command = `runuser -u otcbrowser -- python3 /opt/otchealth-browser/browser-dispatcher.py --payload ${encoded}`;
+      const command = `sudo -n runuser -u otcbrowser -- python3 /opt/otchealth-browser/browser-dispatcher.py --payload ${encoded}`;
       const response = await this.json(context, `${base.href.replace(/\/+$/, '')}/${encodeURIComponent(binding.sandboxId)}/process/execute`, { method: 'POST', body: JSON.stringify({ command, timeout: Math.ceil(timeoutMs / 1000) }) });
       if ((response.exitCode ?? response.code) !== 0 || typeof response.result !== 'string' || response.result.length > 100000) return fail('daytona_runtime_unavailable');
       let parsed: unknown; try { parsed = JSON.parse(response.result); } catch { return fail('daytona_runtime_invalid'); } const receipt = record(parsed);
@@ -103,7 +104,15 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     });
   }
   /** Read-only local runtime readiness, never browser/resource launch. */
-  async probe(binding: DaytonaBinding): Promise<void> { await this.runtime(binding, 'probe'); }
+  async probe(binding: DaytonaBinding): Promise<DaytonaRuntimeReadiness> {
+    const result = record(await this.runtime(binding, 'probe'));
+    const pid = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+    if (result.checkpointReady === true) {
+      if (result.profileKey !== binding.profileKey || result.profilePath !== binding.profilePath || result.encryptedKeyringUnlocked !== true || !pid(result.browserPid) || !pid(result.supervisorPid)) return fail('daytona_runtime_invalid');
+      return { ready: true, profileKey: binding.profileKey, profilePath: binding.profilePath, checkpointReady: true, browserPid: result.browserPid, supervisorPid: result.supervisorPid };
+    }
+    return { ready: true, profileKey: binding.profileKey, profilePath: binding.profilePath, checkpointReady: false };
+  }
   async openMission(binding: DaytonaBinding, logicalSessionId: string): Promise<void> { await this.runtime(binding, 'open', logicalSessionId); }
   async execute(binding: DaytonaBinding, session: DaytonaMission, action: CloudBrowserAction, timeoutSeconds: number, principalHash: string): Promise<CloudBrowserExecutionResult> {
     assertDaytonaBinding(binding); assertDaytonaMission(session);
@@ -128,7 +137,13 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     if (['tab_create', 'tab_select', 'tab_close'].includes(checked.type) && !pageReceipt || checked.type === 'tab_create' && !pageReceipt?.createdTargetId) return fail('daytona_runtime_invalid');
     return { observation: { url: result.url as string | null, title: result.title as string | null, visibleText: result.visibleText }, ...(pageReceipt ? { pageReceipt } : {}) };
   }
-  async checkpoint(binding: DaytonaBinding): Promise<void> { assertDaytonaBinding(binding); return fail('daytona_checkpoint_unavailable'); }
+  async checkpoint(binding: DaytonaBinding, session?: DaytonaMission): Promise<void> {
+    assertDaytonaBinding(binding); if (!session) return fail('owner_forbidden'); assertDaytonaMission(session);
+    if (session.owner !== binding.owner || session.ownerSubjectHash !== binding.ownerSubjectHash || session.profileKey !== binding.profileKey || session.sandboxId !== binding.sandboxId || session.phase !== 'ACTIVE' || session.expiresAt <= Date.now()) return fail('owner_forbidden');
+    const result = record(await this.runtime(binding, 'checkpoint', session.sessionId, undefined, binding.ownerSubjectHash));
+    const pid = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+    if (result.checkpointed !== true || result.gracefulClosed !== true || result.keyringSessionRetained !== true || result.cdpLoopback !== true || result.profileVerified !== true || result.tabsReset !== true || result.profileKey !== binding.profileKey || result.profilePath !== binding.profilePath || result.sessionId !== session.sessionId || result.principalHash !== binding.ownerSubjectHash || !pid(result.browserPidBefore) || !pid(result.browserPidAfter) || result.browserPidBefore === result.browserPidAfter || !pid(result.supervisorPid)) return fail('daytona_checkpoint_unverified');
+  }
   async releaseMission(binding: DaytonaBinding, session: DaytonaMission): Promise<void> {
     assertDaytonaBinding(binding); assertDaytonaMission(session);
     if (session.profileKey !== binding.profileKey || session.sandboxId !== binding.sandboxId || session.owner !== binding.owner || session.ownerSubjectHash !== binding.ownerSubjectHash) return fail('owner_forbidden');

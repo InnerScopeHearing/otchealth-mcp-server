@@ -6,6 +6,7 @@ import base64
 import fcntl
 import hashlib
 import http.client
+import importlib.util
 import ipaddress
 import json
 import math
@@ -498,16 +499,74 @@ def execute(cdp, state, action):
     return {'completed': True, 'selectedTargetId': state['selected']}
 
 
+def control_request(payload, deadline, expected_pid=None):
+    """Only the fixed owned local supervisor; no caller-selected socket or operation."""
+    module_path = Path(__file__).with_name('checkpoint-control.py')
+    if not module_path.is_file() or module_path.is_symlink(): fail('checkpoint_unavailable')
+    spec = importlib.util.spec_from_file_location('otc_checkpoint_control', module_path)
+    if not spec or not spec.loader: fail('checkpoint_unavailable')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    remaining = min(14000, int((deadline - time.monotonic()) * 1000))
+    if remaining < 1: fail('provider_timeout')
+    request = {'version': 1, 'op': 'checkpoint' if expected_pid is not None else 'status',
+               'profileKey': payload['profileKey'], 'profilePath': payload['profilePath'], 'timeoutMs': remaining}
+    if expected_pid is not None:
+        request.update(sessionId=payload['sessionId'], principalHash=payload['principalHash'], expectedBrowserPid=expected_pid)
+    try:
+        return module.request_control(payload['profilePath'], request, deadline)
+    except module.ControlError:
+        fail('checkpoint_unavailable' if expected_pid is None else 'checkpoint_unknown')
+
+
+def checkpoint(receipt, state, payload, deadline, old_pid):
+    if not integer(old_pid, 1, 2 ** 31): fail('checkpoint_unavailable')
+    if not isinstance(payload.get('principalHash'), str): fail('mission_not_owned')
+    if state['uncertain']: fail('effect_unknown')
+    state['uncertain'] = True
+    receipt.write(state)
+    result = control_request(payload, deadline, old_pid)
+    flags = ('checkpointed', 'gracefulClosed', 'keyringSessionRetained', 'cdpLoopback', 'profileVerified')
+    if not isinstance(result, dict) or any(result.get(flag) is not True for flag in flags): fail('checkpoint_unverified')
+    for name in ('profileKey', 'profilePath', 'sessionId', 'principalHash'):
+        if result.get(name) != payload[name]: fail('checkpoint_unverified')
+    after = result.get('browserPidAfter')
+    if result.get('browserPidBefore') != old_pid or not integer(after, 1, 2 ** 31) or after == old_pid or not integer(result.get('supervisorPid'), 1, 2 ** 31): fail('checkpoint_unverified')
+    if verify_runtime(payload['profilePath']) != after: fail('checkpoint_unverified')
+    # Chrome target IDs do not survive restart. Never alias an old ID to a new tab.
+    cdp = Cdp(deadline)
+    try:
+        targets = cdp.command('Target.getTargets').get('targetInfos', [])
+        blanks = [target.get('targetId') for target in targets if isinstance(target, dict) and target.get('type') == 'page' and target.get('url') == 'about:blank' and isinstance(target.get('targetId'), str) and TARGET.fullmatch(target['targetId'])]
+        target = blanks[0] if blanks else cdp.command('Target.createTarget', {'url': 'about:blank'}).get('targetId')
+        if not isinstance(target, str) or not TARGET.fullmatch(target): fail('checkpoint_unverified')
+        if not blanks:
+            info = cdp.command('Target.getTargetInfo', {'targetId': target}).get('targetInfo', {})
+            if info.get('type') != 'page' or info.get('url') != 'about:blank': fail('checkpoint_unverified')
+        state['selected'], state['owned'], state['uncertain'] = target, [target], False
+        receipt.write(state)
+        return {**result, 'tabsReset': True}
+    finally: cdp.close()
+
+
 def dispatch(payload):
+    deadline = time.monotonic() + payload['timeoutMs'] / 1000
     profile = safe_directory(Path(payload['profilePath']))
     safe_directory(profile.parent)
     safe_directory(ROOT)
-    verify_runtime(str(profile))  # Before any HTTP, WebSocket, or browser command.
+    browser_pid = verify_runtime(str(profile))  # Before any HTTP, WebSocket, or browser command.
     if payload['op'] == 'probe':
-        cdp = Cdp(time.monotonic() + payload['timeoutMs'] / 1000)
+        cdp = Cdp(deadline)
         try: cdp.command('Target.getTargets')
         finally: cdp.close()
-        return {'ready': True, 'cdpLoopback': True, 'profileVerified': True}
+        result = {'ready': True, 'cdpLoopback': True, 'profileVerified': True, 'checkpointReady': False}
+        try:
+            status = control_request(payload, deadline)
+            if status.get('checkpointReady') is True and status.get('encryptedKeyringUnlocked') is True and status.get('cdpLoopback') is True and status.get('profileVerified') is True and status.get('profileKey') == payload['profileKey'] and status.get('profilePath') == payload['profilePath'] and status.get('browserPid') == browser_pid and integer(status.get('supervisorPid'), 1, 2 ** 31):
+                result.update(checkpointReady=True, profileKey=payload['profileKey'], profilePath=payload['profilePath'], encryptedKeyringUnlocked=True, browserPid=browser_pid, supervisorPid=status['supervisorPid'])
+        except DispatchError:
+            pass  # Ordinary browser capability is not encrypted warm-checkpoint readiness.
+        return result
     with Receipt(profile.parent) as receipt:
         op, session_id, principal = payload['op'], payload['sessionId'], payload.get('principalHash')
         if op == 'release':
@@ -515,14 +574,14 @@ def dispatch(payload):
             receipt.release()
             return {'released': True, 'browserStopped': False}
         if op == 'checkpoint':
-            receipt.require(session_id, principal)
-            fail('checkpoint_unavailable')
+            state = receipt.require(session_id, principal)
+            return checkpoint(receipt, state, payload, deadline, browser_pid)
         state = receipt.read()
         if op == 'open' and state: fail('mission_busy')
         if op == 'execute':
             state = receipt.require(session_id, principal)
             if state['uncertain']: fail('effect_unknown')
-        cdp = Cdp(time.monotonic() + payload['timeoutMs'] / 1000)
+        cdp = Cdp(deadline)
         try:
             if op == 'open':
                 targets = cdp.command('Target.getTargets').get('targetInfos', [])

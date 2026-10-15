@@ -29,11 +29,23 @@ export interface DaytonaMission {
   viewerExpiresAt?: number;
 }
 
+/** Ephemeral proof for one exact enrolled profile, never a global readiness flag. */
+export interface DaytonaRuntimeReadiness {
+  ready: true;
+  profileKey: string;
+  profilePath: string;
+  checkpointReady: boolean;
+  browserPid?: number;
+  supervisorPid?: number;
+}
+
 export interface DaytonaProvider {
+  probe?(binding: DaytonaBinding): Promise<DaytonaRuntimeReadiness>;
   inspect(binding: DaytonaBinding): Promise<{ sandboxId: string; state: 'started' | 'stopped' | 'other'; public: boolean }>;
   openMission(binding: DaytonaBinding, logicalSessionId: string): Promise<void>;
   execute(binding: DaytonaBinding, session: DaytonaMission, action: CloudBrowserAction, timeoutSeconds: number, principalHash: string): Promise<unknown>;
-  checkpoint(binding: DaytonaBinding): Promise<void>;
+  /** Trusted current mission is required by concrete lifecycle providers across replicas. */
+  checkpoint(binding: DaytonaBinding, session?: DaytonaMission): Promise<void>;
   /** Detach this logical mission only. Never stop/delete the retained desktop. */
   releaseMission(binding: DaytonaBinding, session: DaytonaMission): Promise<void>;
   viewerGrant(binding: DaytonaBinding, expiresSeconds: number): Promise<{ url: string; expiresAt: number; grantHandle: string }>;

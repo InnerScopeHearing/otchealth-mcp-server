@@ -166,6 +166,64 @@ class DispatcherTests(unittest.TestCase):
                 with self.assertRaises(dispatcher.DispatchError) as error: dispatcher.dispatch(payload)
                 self.assertEqual(error.exception.code, 'effect_unknown')
 
+    def test_checkpoint_is_exact_mission_fenced_and_resets_only_new_owned_blank_targets(self):
+        self.assertTrue(hasattr(dispatcher, 'control_request'), 'trusted local supervisor checkpoint is missing')
+        class Cdp:
+            def __init__(self, _): pass
+            def close(self): pass
+            def command(self, method, params=None, session=None):
+                if method == 'Target.getTargets': return {'targetInfos': [{'type': 'page', 'targetId': 'NEWBLANK', 'url': 'about:blank'}]}
+                return {}
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); base.chmod(0o700); profile = base / 'chromium'; profile.mkdir(mode=0o700)
+            payload = {**self.payload, 'profilePath': str(profile), 'op': 'checkpoint'}; payload.pop('action')
+            with dispatcher.Receipt(base) as receipt:
+                receipt.write({'sessionId': payload['sessionId'], 'principalHash': payload['principalHash'], 'selected': 'OLDPAGE', 'owned': ['OLDPAGE'], 'uncertain': False})
+            calls = []
+            def control(request, deadline, expected_pid=None):
+                calls.append(request)
+                with dispatcher.Receipt(base) as receipt:
+                    self.fail('Dispatcher must hold the exact mission receipt lock throughout checkpoint')
+            def confirmed(request, deadline, expected_pid=None):
+                calls.append(request)
+                self.assertEqual(request['sessionId'], payload['sessionId']); self.assertEqual(request['principalHash'], payload['principalHash'])
+                with open(base / 'mission.json') as stream: self.assertTrue(json.load(stream)['uncertain'])
+                self.assertEqual(expected_pid, 101)
+                return {'checkpointed': True, 'gracefulClosed': True, 'keyringSessionRetained': True, 'browserPidBefore': 101, 'browserPidAfter': 102, 'supervisorPid': 100, 'profileKey': payload['profileKey'], 'profilePath': str(profile), 'sessionId': payload['sessionId'], 'principalHash': payload['principalHash'], 'cdpLoopback': True, 'profileVerified': True}
+            with patch.object(dispatcher, 'safe_directory', side_effect=lambda p: Path(p)), patch.object(dispatcher, 'verify_runtime', side_effect=[101, 102]), patch.object(dispatcher, 'Cdp', Cdp), patch.object(dispatcher, 'control_request', side_effect=confirmed):
+                result = dispatcher.dispatch(payload)
+            self.assertTrue(result['checkpointed']); self.assertTrue(result['tabsReset'])
+            with dispatcher.Receipt(base) as receipt:
+                state = receipt.require(payload['sessionId'], payload['principalHash'])
+                self.assertEqual(state['owned'], ['NEWBLANK']); self.assertEqual(state['selected'], 'NEWBLANK'); self.assertFalse(state['uncertain'])
+            self.assertEqual(len(calls), 1)
+
+    def test_unknown_checkpoint_retains_fence_and_cannot_replay(self):
+        self.assertTrue(hasattr(dispatcher, 'control_request'), 'trusted local supervisor checkpoint is missing')
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); base.chmod(0o700); profile = base / 'chromium'; profile.mkdir(mode=0o700)
+            payload = {**self.payload, 'profilePath': str(profile), 'op': 'checkpoint'}; payload.pop('action')
+            with dispatcher.Receipt(base) as receipt: receipt.write({'sessionId': payload['sessionId'], 'principalHash': payload['principalHash'], 'selected': 'PAGE1', 'owned': ['PAGE1'], 'uncertain': False})
+            with patch.object(dispatcher, 'safe_directory', side_effect=lambda p: Path(p)), patch.object(dispatcher, 'verify_runtime', return_value=101), patch.object(dispatcher, 'control_request', side_effect=dispatcher.DispatchError('checkpoint_unknown')) as control:
+                with self.assertRaises(dispatcher.DispatchError): dispatcher.dispatch(payload)
+                with self.assertRaises(dispatcher.DispatchError) as error: dispatcher.dispatch(payload)
+                self.assertEqual(error.exception.code, 'effect_unknown'); self.assertEqual(control.call_count, 1)
+            with dispatcher.Receipt(base) as receipt: self.assertTrue(receipt.read()['uncertain'])
+
+    def test_probe_checkpoint_readiness_is_real_exact_profile_status_not_global(self):
+        class Cdp:
+            def __init__(self, _): pass
+            def close(self): pass
+            def command(self, *args): return {}
+        payload = {name: value for name, value in self.payload.items() if name not in ('sessionId', 'action')}
+        payload['op'] = 'probe'
+        status = {'profileKey': payload['profileKey'], 'profilePath': payload['profilePath'], 'checkpointReady': True, 'browserPid': 101, 'supervisorPid': 100, 'cdpLoopback': True, 'profileVerified': True, 'encryptedKeyringUnlocked': True}
+        with patch.object(dispatcher, 'safe_directory', side_effect=lambda p: Path(p)), patch.object(dispatcher, 'verify_runtime', return_value=101), patch.object(dispatcher, 'Cdp', Cdp), patch.object(dispatcher, 'control_request', return_value=status):
+            result = dispatcher.dispatch(payload)
+            self.assertTrue(result['checkpointReady']); self.assertEqual(result['browserPid'], 101)
+            status['profileKey'] = 'foreign-profile'
+            self.assertFalse(dispatcher.dispatch(payload)['checkpointReady'])
+
     def test_snapshot_rejects_private_subframes_and_populated_blank_page(self):
         class Cdp:
             def __init__(self, private): self.private = private
