@@ -391,7 +391,7 @@ export class DynamoCloudBrowserSessionStore implements CloudBrowserStore {
     if (!credentials) throw new CloudBrowserError('capture_storage_unavailable', 'Browser capture storage is unavailable.');
     const host = `${bucket}.s3.${this.region}.amazonaws.com`;
     const payload = Buffer.from(artifact.body);
-    const signed = signRequest({ method: 'PUT', host, path: `/${key}`, region: this.region, service: 's3', credentials, body: payload, extraHeaders: { 'content-type': artifact.contentType, 'if-none-match': '*', 'x-amz-server-side-encryption': 'AES256', 'x-amz-meta-sha256': sha256 } });
+    const signed = signRequest({ method: 'PUT', host, path: `/${key}`, region: this.region, service: 's3', credentials, body: payload, extraHeaders: { 'content-type': artifact.contentType, 'if-none-match': '*', 'x-amz-server-side-encryption': 'AES256', 'x-amz-meta-sha256': sha256, 'x-amz-content-sha256': sha256 } });
     let version: string | null;
     try {
       const response = await this.fetchImpl(`https://${host}${canonicalUri(`/${key}`)}`, { method: 'PUT', headers: signed.headers, body: payload, redirect: 'error', signal: AbortSignal.timeout(10_000) });
@@ -422,7 +422,7 @@ export class DynamoCloudBrowserSessionStore implements CloudBrowserStore {
     const credentials = await resolveAwsCredentials();
     if (!credentials) throw new CloudBrowserError('capture_storage_unavailable', 'Browser capture storage is unavailable.');
     const host = `${bucket}.s3.${this.region}.amazonaws.com`;
-    const signed = signRequest({ method: 'GET', host, path: `/${metadata.storageKey}`, query: { versionId: metadata.storageVersion }, region: this.region, service: 's3', credentials, extraHeaders: {} });
+    const signed = signRequest({ method: 'GET', host, path: `/${metadata.storageKey}`, query: { versionId: metadata.storageVersion }, region: this.region, service: 's3', credentials, extraHeaders: { 'x-amz-content-sha256': createHash('sha256').update(new Uint8Array()).digest('hex') } });
     try {
       const response = await this.fetchImpl(`https://${host}${canonicalUri(`/${metadata.storageKey}`)}?versionId=${encodeURIComponent(metadata.storageVersion)}`, { method: 'GET', headers: signed.headers, redirect: 'error', signal: AbortSignal.timeout(10_000) });
       const declared = Number(response.headers.get('content-length') ?? '0');
