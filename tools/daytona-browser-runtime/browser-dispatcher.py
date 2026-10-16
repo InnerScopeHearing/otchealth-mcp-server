@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path
 import re
+import select
 import signal
 import socket
 import stat
@@ -232,7 +233,10 @@ def verify_runtime(profile_path, proc_root=Path('/proc')):
         for line in (proc_root / 'net/tcp').read_text().splitlines()[1:]:
             row = line.split()
             if len(row) > 9 and row[1] == '0100007F:2406' and row[3] == '0A': sockets.add(row[9])
-        owned = {os.readlink(fd) for fd in (candidates[0] / 'fd').iterdir()}
+        owned = set()
+        for fd in (candidates[0] / 'fd').iterdir():
+            try: owned.add(os.readlink(fd))
+            except FileNotFoundError: continue  # A descriptor may close between readdir and readlink.
         if len(sockets) != 1 or not any('socket:[' + inode + ']' in owned for inode in sockets):
             fail('runtime_not_ready')
     except OSError: fail('runtime_not_ready')
@@ -420,19 +424,93 @@ def current_url(cdp, session):
     return url
 
 
-def snapshot(cdp, session, target):
+def authentication_node(node):
+    """Detect sensitive auth controls from structural AX metadata only."""
+    role = node.get('role', {}).get('value', '') if isinstance(node.get('role'), dict) else ''
+    if role in ('password', 'PasswordText'):
+        return True
+    properties = node.get('properties', [])
+    for prop in properties if isinstance(properties, list) else []:
+        if not isinstance(prop, dict): continue
+        name = prop.get('name')
+        value = prop.get('value', {}).get('value') if isinstance(prop.get('value'), dict) else None
+        if name == 'protected' and value is True:
+            return True
+        if name in ('autocomplete', 'htmlInputType', 'inputType') and isinstance(value, str):
+            if value.strip().lower() in ('password', 'current-password', 'new-password', 'one-time-code'):
+                return True
+    return False
+
+
+def editable_node(node):
+    role = node.get('role', {}).get('value', '') if isinstance(node.get('role'), dict) else ''
+    if isinstance(role, str) and role.lower() in ('textbox', 'text field', 'textfield', 'searchbox', 'combobox', 'password', 'passwordtext'):
+        return True
+    properties = node.get('properties', [])
+    if not isinstance(properties, list): return False
+    return any(isinstance(prop, dict) and prop.get('name') in ('editable', 'settable')
+               and isinstance(prop.get('value'), dict) and prop['value'].get('value') is True
+               for prop in properties)
+
+
+AUTH_FIELD_SELECTORS = (
+    ('password', 'input[type="password" i]', True),
+    ('current_password', 'input[autocomplete~="current-password" i]', True),
+    ('new_password', 'input[autocomplete~="new-password" i]', True),
+    ('one_time_code', 'input[autocomplete~="one-time-code" i]', True),
+    ('username', 'input[autocomplete~="username" i]', False),
+    ('email', 'input[type="email" i]', False),
+    ('text', 'input[type="text" i]', False),
+    ('tel', 'input[type="tel" i]', False),
+    ('submit', 'form button[type="submit" i], form button:not([type]), form input[type="submit" i]', False),
+)
+
+
+def authentication_fields(cdp, session):
+    """Return only counts for fixed structural selectors; never read DOM values or labels."""
+    cdp.command('DOM.enable', {}, session)
+    document = cdp.command('DOM.getDocument', {'depth': 0}, session)
+    root = document.get('root') if isinstance(document, dict) else None
+    node_id = root.get('nodeId') if isinstance(root, dict) else None
+    if not integer(node_id, 1, 2 ** 31): fail('provider_protocol_error')
+    found, auth_detected = [], False
+    for kind, selector, sensitive in AUTH_FIELD_SELECTORS:
+        result = cdp.command('DOM.querySelectorAll', {'nodeId': node_id, 'selector': selector}, session)
+        node_ids = result.get('nodeIds') if isinstance(result, dict) else None
+        if not isinstance(node_ids, list) or len(node_ids) > 4096 or any(not integer(item, 1, 2 ** 31) for item in node_ids):
+            fail('provider_protocol_error')
+        if not node_ids: continue
+        auth_detected = auth_detected or sensitive
+        found.append({'kind': kind, 'selector': selector, 'count': len(node_ids)})
+    return auth_detected, found
+
+
+def snapshot(cdp, session, target, reject_auth=False):
     url = current_url(cdp, session)
-    info = cdp.command('Target.getTargetInfo', {'targetId': target}).get('targetInfo', {})
-    title = info.get('title', '')
     nodes = cdp.command('Accessibility.getFullAXTree', {}, session).get('nodes', [])
     if not isinstance(nodes, list): fail('provider_protocol_error')
+    ax_auth = any(isinstance(node, dict) and authentication_node(node) for node in nodes)
+    has_editable = any(isinstance(node, dict) and editable_node(node) for node in nodes)
+    dom_auth, input_fields = authentication_fields(cdp, session) if (ax_auth or has_editable) else (False, [])
+    auth_detected = ax_auth or dom_auth
+    if auth_detected and reject_auth: fail('sensitive_output_suppressed')
+    if auth_detected:
+        if current_url(cdp, session) != url: fail('navigation_changed')
+        parts = urlsplit(url)
+        origin = f'{parts.scheme}://{parts.netloc}' if parts.scheme in ('http', 'https') and parts.netloc else ''
+        structure = '\n'.join(f"{field['kind']} ({field['count']}): {field['selector']}" for field in input_fields)
+        if any(field['count'] > 1 for field in input_fields):
+            structure += ('\n' if structure else '') + 'Multiple matching fields or submit controls; selector disambiguation required.'
+        visible = 'Authentication required.' + (('\n' + structure) if structure else '')
+        return {'url': origin, 'title': '', 'visibleText': visible,
+                'authenticationRequired': True}
+    info = cdp.command('Target.getTargetInfo', {'targetId': target}).get('targetInfo', {})
+    title = info.get('title', '')
     names = []
     for node in nodes:
         if not isinstance(node, dict): continue
         role = node.get('role', {}).get('value', '')
         properties = node.get('properties', [])
-        if role in ('password', 'PasswordText') or any(p.get('name') == 'protected' and p.get('value', {}).get('value') is True for p in properties if isinstance(p, dict)):
-            fail('sensitive_output_suppressed')
         if node.get('ignored') or role not in ('StaticText', 'heading', 'link', 'button'): continue
         name = node.get('name', {}).get('value')
         if isinstance(name, str): names.append(name[:2000])
@@ -655,7 +733,7 @@ def perform_action(cdp, state, payload, profile):
         before_url = current_url(cdp, attached_session)
         try:
             if kind == 'capture':
-                snapshot(cdp, attached_session, target)
+                snapshot(cdp, attached_session, target, reject_auth=True)
                 result = transfers.capture_pdf(cdp, attached_session, payload['action']['request']) if payload['action']['request']['type'] == 'pdf' else transfers.capture_png(cdp, attached_session)
             else:
                 descriptor = payload['upload']
@@ -773,7 +851,7 @@ def dispatch_v2(payload, deadline, profile, browser_pid):
                     if action['type'] == 'tab_close': preserve_retained_browser(cdp, [action['targetId']])
                     if action['type'] == 'press_key' and action['key'] in ('KeyC', 'KeyV') and action.get('modifiers') in (2, 4, 6):
                         target, attached = selected(cdp, mission)
-                        observed = snapshot(cdp, attached, target)  # Private frames and protected/password AX guard.
+                        observed = snapshot(cdp, attached, target, reject_auth=True)  # Private frames and protected/auth AX guard.
                         clipboard = trusted_clipboard()
                         try: private = clipboard.handle_clipboard(cdp, attached, action, mission.get('clipboardText', ''))
                         except clipboard.ClipboardError as error: fail(error.code)
@@ -854,7 +932,7 @@ def dispatch(payload):
                 before_url = current_url(cdp, attached_session)
                 try:
                     if kind == 'capture':
-                        snapshot(cdp, attached_session, target)  # Same private-frame/password-output guards.
+                        snapshot(cdp, attached_session, target, reject_auth=True)  # Same private-frame/password-output guards.
                         result = transfers.capture_pdf(cdp, attached_session, payload['action']['request']) if payload['action']['request']['type'] == 'pdf' else transfers.capture_png(cdp, attached_session)
                     else:
                         descriptor = payload['upload']
@@ -889,6 +967,148 @@ def unique_object(pairs):
     return result
 
 
+def decode_public_input(encoded):
+    if not isinstance(encoded, str) or not re.fullmatch(r'[A-Za-z0-9_-]+={0,2}', encoded) or len(encoded) > 32768:
+        fail('invalid_private_input')
+    try:
+        decoded = base64.b64decode(encoded + '=' * (-len(encoded) % 4), altchars=b'-_', validate=True)
+        value = json.loads(decoded, object_pairs_hook=unique_object)
+    except (ValueError, UnicodeError):
+        fail('invalid_private_input')
+    expected = {'version', 'op', 'profileKey', 'profilePath', 'timeoutMs',
+                'sessionId', 'principalHash', 'runtimeProtocol', 'actionType'}
+    if not isinstance(value, dict) or value.keys() != expected:
+        fail('invalid_private_input')
+    action_type = value.get('actionType')
+    if action_type not in ('type', 'select', 'dialog'):
+        fail('invalid_private_input')
+    payload = {key: item for key, item in value.items() if key != 'actionType'}
+    placeholder = {'type': action_type}
+    if action_type == 'type': placeholder.update(selector='#private-input', text='x')
+    elif action_type == 'select': placeholder.update(selector='#private-input', value='x')
+    else: placeholder.update(accept=False)
+    try:
+        validate_payload({**payload, 'action': placeholder})
+    except DispatchError:
+        fail('invalid_private_input')
+    return value, action_type
+
+
+def private_owner_preflight(payload, deadline):
+    """Read-only, exact-owner check before allowing a caller to send private input."""
+    profile = safe_directory(Path(payload['profilePath']))
+    safe_directory(profile.parent)
+    safe_directory(ROOT)
+    module = trusted_registry()
+    with module.Registry(profile.parent, deadline) as receipt:
+        value = receipt.load()
+        module.require_automation(value, payload['sessionId'], payload['principalHash'])
+    return True
+
+
+def read_private_input_line(fd, deadline):
+    data = bytearray()
+    while b'\n' not in data:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0: fail('provider_timeout')
+        if not select.select([fd], [], [], remaining)[0]: fail('provider_timeout')
+        chunk = os.read(fd, min(4096, 8193 - len(data)))
+        if not chunk: fail('invalid_private_input')
+        data.extend(chunk)
+        if len(data) > 8192: fail('invalid_private_input')
+    if data[-1] != 0x0a or data.count(b'\n') != 1:
+        fail('invalid_private_input')
+    # Inspect only already-readable bytes; interactive session stdin may stay open.
+    if select.select([fd], [], [], 0)[0]:
+        try: trailing = os.read(fd, 8193)
+        except BlockingIOError: trailing = b''
+        if trailing: fail('invalid_private_input')
+    return bytes(data[:-1])
+
+
+def private_input_response(encoded, nonce, input_fd, ready_stream):
+    """Receive one TLS-forwarded action privately, dispatch only after exact validation."""
+    started = time.monotonic()
+    if not isinstance(nonce, str) or not re.fullmatch(r'[0-9a-f]{32}', nonce):
+        return {'version': 1, 'ok': False, 'code': 'invalid_private_input'}
+    try:
+        metadata, action_type = decode_public_input(encoded)
+        deadline = started + metadata['timeoutMs'] / 1000
+        if time.monotonic() >= deadline:
+            return {'version': 1, 'ok': False, 'code': 'provider_timeout', 'beforeEffect': True}
+        public_payload = {key: value for key, value in metadata.items() if key != 'actionType'}
+        if private_owner_preflight(public_payload, deadline) is not True:
+            fail('private_input_rejected')
+    except DispatchError:
+        if 'deadline' in locals() and time.monotonic() >= deadline:
+            return {'version': 1, 'ok': False, 'code': 'provider_timeout', 'beforeEffect': True}
+        return {'version': 1, 'ok': False, 'code': 'private_input_rejected'}
+    except Exception:
+        # Ownership failures and malformed public metadata share one non-oracular response.
+        return {'version': 1, 'ok': False, 'code': 'private_input_rejected'}
+    remaining_ms = int((deadline - time.monotonic()) * 1000)
+    if remaining_ms <= 0:
+        return {'version': 1, 'ok': False, 'code': 'provider_timeout', 'beforeEffect': True}
+
+    ready = {'version': 1, 'event': 'input_ready', 'nonce': nonce,
+             'sessionId': metadata['sessionId'], 'profileKey': metadata['profileKey'],
+             'profilePath': metadata['profilePath'], 'principalHash': metadata['principalHash']}
+    try:
+        ready_stream.write(json.dumps(ready, separators=(',', ':')) + '\n')
+        ready_stream.flush()
+        line = read_private_input_line(input_fd, deadline)
+        try:
+            request = json.loads(line, object_pairs_hook=unique_object)
+        except (ValueError, UnicodeError):
+            fail('invalid_private_input')
+        if not isinstance(request, dict) or request.keys() != {'nonce', 'payload'} or request['nonce'] != nonce:
+            fail('invalid_private_input')
+        payload = request['payload']
+        if not isinstance(payload, dict) or not isinstance(payload.get('action'), dict):
+            fail('invalid_private_input')
+        if payload['action'].get('type') != action_type:
+            fail('invalid_private_input')
+        projection = {key: value for key, value in payload.items() if key != 'action'}
+        projection['actionType'] = action_type
+        if projection != metadata:
+            fail('invalid_private_input')
+        validate_payload(payload)
+        if payload['op'] != 'execute' or payload.get('runtimeProtocol') != 2 or action_type not in ('type', 'select', 'dialog'):
+            fail('invalid_private_input')
+    except DispatchError as error:
+        if error.code == 'provider_timeout':
+            return {'version': 1, 'ok': False, 'code': 'provider_timeout', 'beforeEffect': True}
+        return {'version': 1, 'ok': False, 'code': 'invalid_private_input'}
+    except Exception:
+        return {'version': 1, 'ok': False, 'code': 'invalid_private_input'}
+    remaining_ms = int((deadline - time.monotonic()) * 1000)
+    if remaining_ms <= 0:
+        return {'version': 1, 'ok': False, 'code': 'provider_timeout', 'beforeEffect': True}
+    payload['timeoutMs'] = min(payload['timeoutMs'], remaining_ms)
+
+    # Keep the action result private: post-action observations could reflect the
+    # submitted input. Dispatch is authorized again under the mission lock.
+    previous_alarm = signal.signal(signal.SIGALRM, lambda *_: fail('provider_timeout'))
+    signal.setitimer(signal.ITIMER_REAL, max(0.001, (deadline - time.monotonic())))
+    try:
+        dispatch(payload)
+        response = {'version': 1, 'ok': True, 'profileKey': payload['profileKey'],
+                    'profilePath': payload['profilePath'],
+                    'result': {'inputProcessed': True, 'actionType': action_type},
+                    'sessionId': payload['sessionId']}
+        return response
+    except DispatchError as error:
+        response = {'version': 1, 'ok': False, 'code': error.code}
+        if error.before_effect and error.code in ('mission_busy', 'human_active', 'other_missions_active'):
+            response['beforeEffect'] = True
+        return response
+    except Exception:
+        return {'version': 1, 'ok': False, 'code': 'provider_operation_failed'}
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_alarm)
+
+
 def run_payload(encoded):
     try:
         if not isinstance(encoded, str) or not re.fullmatch(r'[A-Za-z0-9_-]+={0,2}', encoded) or len(encoded) > 32768: fail('invalid_payload')
@@ -919,8 +1139,12 @@ def run_payload(encoded):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--payload', required=True)
+    parser.add_argument('--private-stdin')
     args = parser.parse_args()
-    result = run_payload(args.payload)
+    if args.private_stdin is None:
+        result = run_payload(args.payload)
+    else:
+        result = private_input_response(args.payload, args.private_stdin, sys.stdin.fileno(), sys.stdout)
     print(json.dumps(result, separators=(',', ':')))
     return 0 if result['ok'] or result.get('beforeEffect') is True else 1
 

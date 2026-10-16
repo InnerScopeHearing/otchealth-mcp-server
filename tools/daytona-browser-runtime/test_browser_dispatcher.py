@@ -1,5 +1,6 @@
 import base64
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,18 @@ spec = importlib.util.spec_from_file_location('browser_dispatcher', SCRIPT)
 dispatcher = importlib.util.module_from_spec(spec) if spec and SCRIPT.exists() else None
 if dispatcher:
     spec.loader.exec_module(dispatcher)
+
+
+def private_input_call(encoded, nonce, data, ready, close_writer=False):
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, data)
+        if close_writer:
+            os.close(write_fd); write_fd = -1
+        return dispatcher.private_input_response(encoded, nonce, read_fd, ready)
+    finally:
+        os.close(read_fd)
+        if write_fd >= 0: os.close(write_fd)
 
 
 class DispatcherTests(unittest.TestCase):
@@ -74,6 +87,8 @@ class DispatcherTests(unittest.TestCase):
                 if method == 'Page.getFrameTree': return {'frameTree': {'frame': {'url': self.url}}}
                 if method == 'Target.getTargetInfo': return {'targetInfo': {'title': 'Actual title'}}
                 if method == 'Accessibility.getFullAXTree': return {'nodes': [{'role': {'value': 'StaticText'}, 'name': {'value': 'real text' * 3000}}]}
+                if method == 'DOM.getDocument': return {'root': {'nodeId': 1}}
+                if method == 'DOM.querySelectorAll': return {'nodeIds': []}
                 return {}
         cdp = Cdp('https://example.com/')
         with patch.object(dispatcher, 'allow_url'):
@@ -90,6 +105,126 @@ class DispatcherTests(unittest.TestCase):
             with self.assertRaises(dispatcher.DispatchError) as error:
                 dispatcher.verify_runtime(self.payload['profilePath'], Path(directory))
             self.assertEqual(error.exception.code, 'runtime_not_ready')
+
+    def test_runtime_ignores_only_proc_fd_that_vanishes_during_readlink(self):
+        if os.getuid() == 0:
+            self.skipTest('verify_runtime intentionally refuses root')
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory); pid = proc / '123'; (pid / 'fd').mkdir(parents=True)
+            (pid / 'cmdline').write_bytes(("/usr/bin/chrome\0--user-data-dir=" + self.payload['profilePath'] +
+                "\0--remote-debugging-address=127.0.0.1\0--remote-debugging-port=9222\0").encode())
+            (pid / 'fd' / '3').touch(); (pid / 'fd' / '4').touch()
+            (proc / 'net').mkdir()
+            (proc / 'net' / 'tcp').write_text(
+                'sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n'
+                '0: 0100007F:2406 00000000:0000 0A 00000000:00000000 00:00000000 00000000 1000 0 12345\n')
+            def readlink(path):
+                path = Path(path)
+                if path == pid / 'exe': return '/usr/bin/chrome'
+                if path == pid / 'fd' / '3': raise FileNotFoundError('raced descriptor close')
+                if path == pid / 'fd' / '4': return 'socket:[12345]'
+                raise OSError('unexpected path')
+            with patch.object(dispatcher.os, 'getuid', return_value=os.getuid()), \
+                 patch.object(dispatcher.os, 'readlink', side_effect=readlink):
+                self.assertEqual(dispatcher.verify_runtime(self.payload['profilePath'], proc), 123)
+
+    def test_snapshot_returns_fixed_authentication_signal_without_page_content(self):
+        class Cdp:
+            def command(self, method, params=None, session=None):
+                if method == 'Page.getFrameTree':
+                    return {'frameTree': {'frame': {'url': 'https://example.com/login?token=do-not-return'}}}
+                if method == 'Target.getTargetInfo': return {'targetInfo': {'title': 'Secret account title'}}
+                if method == 'Accessibility.getFullAXTree':
+                    return {'nodes': [
+                        {'role': {'value': 'StaticText'}, 'name': {'value': 'Private descendant'}},
+                        {'role': {'value': 'textbox'}, 'name': {'value': 'Password label'}},
+                        {'role': {'value': 'StaticText'}, 'name': {'value': 'Another private descendant'}},
+                    ]}
+                if method == 'DOM.getDocument': return {'root': {'nodeId': 1}}
+                if method == 'DOM.querySelectorAll':
+                    selector = params['selector']
+                    if selector == 'input[autocomplete~="current-password" i]': return {'nodeIds': [2]}
+                    if selector.startswith('form button['): return {'nodeIds': [3, 4]}
+                    return {'nodeIds': []}
+                return {}
+        with patch.object(dispatcher, 'allow_url'):
+            result = dispatcher.snapshot(Cdp(), 'ATTACHED', 'PAGE1')
+        self.assertEqual(result['authenticationRequired'], True)
+        self.assertEqual(result['url'], 'https://example.com')
+        self.assertEqual(result['title'], '')
+        self.assertEqual(result['visibleText'],
+            'Authentication required.\ncurrent_password (1): input[autocomplete~="current-password" i]'
+            '\nsubmit (2): form button[type="submit" i], form button:not([type]), form input[type="submit" i]'
+            '\nMultiple matching fields or submit controls; selector disambiguation required.')
+        serialized = json.dumps(result)
+        for secret in ('token=', 'do-not-return', 'Secret account title', 'Private descendant',
+                       'Password label', 'Another private descendant'):
+            self.assertNotIn(secret, serialized)
+        with patch.object(dispatcher, 'allow_url'), self.assertRaises(dispatcher.DispatchError) as error:
+            dispatcher.snapshot(Cdp(), 'ATTACHED', 'PAGE1', reject_auth=True)
+        self.assertEqual(error.exception.code, 'sensitive_output_suppressed')
+
+    def test_private_input_protocol_validates_owner_and_payload_before_dispatch(self):
+        nonce = 'a' * 32
+        payload = {**self.payload, 'runtimeProtocol': 2,
+                   'action': {'type': 'type', 'selector': '#password', 'text': 'do-not-log'}}
+        metadata = {key: value for key, value in payload.items() if key != 'action'}
+        metadata['actionType'] = payload['action']['type']
+        encoded = base64.urlsafe_b64encode(json.dumps(metadata).encode()).decode().rstrip('=')
+        private = json.dumps({'nonce': nonce, 'payload': payload}).encode() + b'\n'
+        ready = io.StringIO()
+        with patch.object(dispatcher, 'private_owner_preflight', return_value=True) as owner, \
+             patch.object(dispatcher, 'dispatch', return_value={'typed': True}) as dispatch:
+            result = private_input_call(encoded, nonce, private, ready)
+        self.assertEqual(json.loads(ready.getvalue()), {
+            'version': 1, 'event': 'input_ready', 'nonce': nonce,
+            'sessionId': payload['sessionId'], 'profileKey': payload['profileKey'],
+            'profilePath': payload['profilePath'], 'principalHash': payload['principalHash']})
+        owner.assert_called_once()
+        dispatch.assert_called_once()
+        dispatched = dispatch.call_args.args[0]
+        self.assertEqual({key: value for key, value in dispatched.items() if key != 'timeoutMs'},
+                         {key: value for key, value in payload.items() if key != 'timeoutMs'})
+        self.assertGreater(dispatched['timeoutMs'], 0)
+        self.assertLessEqual(dispatched['timeoutMs'], payload['timeoutMs'])
+        self.assertTrue(result['ok'])
+        self.assertNotIn('do-not-log', json.dumps(result))
+
+    def test_private_input_protocol_never_dispatches_bad_or_unowned_payload(self):
+        nonce = 'b' * 32
+        payload = {**self.payload, 'runtimeProtocol': 2,
+                   'action': {'type': 'type', 'selector': '#password', 'text': 'do-not-log'}}
+        metadata = {key: value for key, value in payload.items() if key != 'action'}
+        metadata['actionType'] = payload['action']['type']
+        encoded = base64.urlsafe_b64encode(json.dumps(metadata).encode()).decode().rstrip('=')
+        good_line = json.dumps({'nonce': nonce, 'payload': payload}).encode() + b'\n'
+        for owner_ok, line in ((False, good_line), (True, good_line[:-1]),
+                               (True, json.dumps({'nonce': nonce, 'payload': {**payload, 'principalHash': 'c' * 64}}).encode() + b'\n'),
+                               (True, good_line + b'{}\n')):
+            ready = io.StringIO()
+            with self.subTest(owner_ok=owner_ok, line=line[-8:]), \
+                 patch.object(dispatcher, 'private_owner_preflight', return_value=owner_ok), \
+                 patch.object(dispatcher, 'dispatch') as dispatch:
+                result = private_input_call(encoded, nonce, line, ready,
+                                            close_writer=(not line.endswith(b'\n') or not owner_ok))
+            dispatch.assert_not_called()
+            self.assertFalse(result['ok'])
+            self.assertNotIn('do-not-log', json.dumps(result))
+
+    def test_private_input_deadline_bounds_wait_and_dispatch_budget(self):
+        nonce = 'c' * 32
+        payload = {**self.payload, 'runtimeProtocol': 2, 'timeoutMs': 1,
+                   'action': {'type': 'type', 'selector': '#password', 'text': 'do-not-log'}}
+        metadata = {key: value for key, value in payload.items() if key != 'action'}
+        metadata['actionType'] = payload['action']['type']
+        encoded = base64.urlsafe_b64encode(json.dumps(metadata).encode()).decode().rstrip('=')
+        ready = io.StringIO()
+        with patch.object(dispatcher, 'private_owner_preflight', return_value=True), \
+             patch.object(dispatcher, 'dispatch') as dispatch:
+            result = private_input_call(encoded, nonce, b'', ready)
+        self.assertEqual(result['code'], 'provider_timeout')
+        self.assertTrue(result['beforeEffect'])
+        dispatch.assert_not_called()
 
     def test_transport_cli_invalid_payload_has_sanitized_error(self):
         result = dispatcher.run_payload(base64.urlsafe_b64encode(json.dumps({'secret': 'do-not-echo'}).encode()).decode())

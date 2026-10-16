@@ -50,7 +50,7 @@ timeout 90s docker run --rm --platform "$PLATFORM" --network none \
       const pprof = require("@datadog/pprof");
       if (typeof pprof.time?.start !== "function") throw Error("Datadog native profiler module did not load");
       // Dedicated browser image bytes: begin
-      const expectedRoleHelper = "cbd15ea480ccce50d95a32283d90204d1b2aad24ba29454c23c73342c1fe3bed";
+      const expectedRoleHelper = "62ee69b6c51685248ee45c3c51a8abbc3386918a76fb57ede8a1da4dd77782d6";
       const expectedLegacyHelperPin = "b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51";
       const roleHelperBytes = fs.readFileSync("/app/tools/daytona-browser-runtime/role-browser-helper.py");
       const roleHelperDigest = createHash("sha256").update(roleHelperBytes).digest("hex");

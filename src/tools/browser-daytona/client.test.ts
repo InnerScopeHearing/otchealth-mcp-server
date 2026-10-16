@@ -11,6 +11,8 @@ import { DaytonaViewerNotMintedError, type DaytonaBinding, type DaytonaMission }
 
 const binding: DaytonaBinding = { provider: 'daytona', owner: 'cto', ownerSubjectHash: 'a'.repeat(64), sandboxId: 'sandbox-one', profileKey: 'profile-one', profilePath: '/home/otcbrowser/.local/share/otchealth-browser/profile-one/chromium', readinessReceiptSha256: 'b'.repeat(64) };
 const mission: DaytonaMission = { provider: 'daytona', sessionId: '12345678-1234-4234-8234-123456789abc', owner: 'cto', ownerSubjectHash: binding.ownerSubjectHash, profileKey: binding.profileKey, sandboxId: binding.sandboxId, expiresAt: Date.now() + 180000, actionsUsed: 1, actionBudget: 25, effectUnknown: true, phase: 'ACTIVE' };
+const wefunderBinding: DaytonaBinding = { ...binding, owner: 'wefunder-campaign-director', ownerSubjectHash: 'e'.repeat(64), profileKey: 'wefunder-campaign-director-' + 'e'.repeat(64), profilePath: '/home/otcbrowser/.local/share/otchealth-browser/wefunder-campaign-director-' + 'e'.repeat(64) + '/chromium' };
+const wefunderMission: DaytonaMission = { ...mission, owner: wefunderBinding.owner, ownerSubjectHash: wefunderBinding.ownerSubjectHash, profileKey: wefunderBinding.profileKey, runtimeProtocol: 2 };
 const token = 'server-only-secret-not-for-output';
 const organizationId = '501db94e-10ee-4bc8-9cca-23c793c67524';
 const sharedBinding = { ...binding, profileKey: `cto-${binding.ownerSubjectHash}`, sharedProfileKey: 'company-browser' as const, profilePath: '/home/otcbrowser/.local/share/otchealth-browser/company-browser/chromium' };
@@ -254,6 +256,90 @@ test('open and typed execution use fixed toolbox recipes and validate exact runt
   await c.releaseMission(binding, mission);
   assert.equal(n.state.payloads.at(-1).principalHash, binding.ownerSubjectHash);
   n.state.foreignReceipt = true; await assert.rejects(c.openMission(binding, mission.sessionId));
+});
+test('WeFunder type, select, and dialog input travel only through suppressed private process stdin', async () => {
+  const n = network(), privateRequests: Array<{ url: string; init: RequestInit }> = [];
+  let publicPayload: any, ready: any, submitted: any, finalReceipt: any;
+  const fetchImpl: typeof fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url.includes('/process/session')) {
+      privateRequests.push({ url, init });
+      if (url.endsWith('/process/session')) return Response.json({ sessionId: JSON.parse(String(init.body)).sessionId });
+      if (url.endsWith('/exec')) {
+        const exec = JSON.parse(String(init.body));
+        assert.equal(exec.runAsync, true); assert.equal(exec.suppressInputEcho, true);
+        const match = String(exec.command).match(/^sudo -n runuser -u otcbrowser -- python3 -I \/opt\/otchealth-browser\/browser-dispatcher\.py --payload ([A-Za-z0-9_-]+) --private-stdin ([a-f0-9]{32})$/);
+        assert.ok(match, 'public command uses fixed private-stdin invocation');
+        publicPayload = JSON.parse(Buffer.from(match[1], 'base64url').toString());
+        ready = { version: 1, event: 'input_ready', nonce: match[2], sessionId: wefunderMission.sessionId, profileKey: wefunderBinding.profileKey, profilePath: wefunderBinding.profilePath, principalHash: wefunderBinding.ownerSubjectHash };
+        finalReceipt = { version: 1, ok: true, profileKey: wefunderBinding.profileKey, profilePath: wefunderBinding.profilePath, sessionId: wefunderMission.sessionId, result: { inputProcessed: true, actionType: publicPayload.actionType } };
+        return Response.json({ cmdId: '12345678-1234-4234-8234-123456789abc' });
+      }
+      if (url.endsWith('/logs')) return Response.json({ stdout: submitted ? JSON.stringify(ready) + '\n' + JSON.stringify(finalReceipt) + '\n' : JSON.stringify(ready) + '\n' });
+      if (url.endsWith('/input')) { submitted = JSON.parse(JSON.parse(String(init.body)).data); return Response.json({}); }
+      return Response.json({ exitCode: submitted ? 0 : null });
+    }
+    return n.fetchImpl(input, init);
+  };
+  const c = await client({ fetchImpl });
+  const secret = 'private-marker-not-for-command-or-receipt';
+  for (const action of [
+    { type: 'type', selector: '#password', text: secret },
+    { type: 'select', selector: '#security-question', value: secret },
+    { type: 'dialog', accept: true, promptText: secret },
+  ] as any[]) {
+    submitted = undefined;
+    const result = await c.execute(wefunderBinding, wefunderMission, action, 10, wefunderBinding.ownerSubjectHash) as any;
+    assert.equal(result.observation, null);
+    assert.equal(submitted.nonce, ready.nonce); assert.deepEqual(submitted.payload.action, action);
+    assert.equal(publicPayload.op, 'execute'); assert.equal(publicPayload.runtimeProtocol, 2);
+    assert.equal(publicPayload.actionType, action.type); assert.equal('action' in publicPayload, false);
+    assert.equal(JSON.stringify(privateRequests.filter(r => r.url.endsWith('/exec'))).includes(secret), false);
+    assert.equal(JSON.stringify(privateRequests.filter(r => r.url.endsWith('/logs'))).includes(secret), false);
+  }
+  assert.equal(privateRequests.filter(r => r.url.endsWith('/input')).length, 3);
+});
+test('WeFunder private actions refuse legacy runtime protocol before provider calls', async () => {
+  const n = network(), c = await client({ fetchImpl: n.fetchImpl });
+  const legacy = { ...wefunderMission }; delete (legacy as any).runtimeProtocol;
+  await assert.rejects(c.execute(wefunderBinding, legacy, { type: 'type', selector: '#password', text: 'private' }, 10, wefunderBinding.ownerSubjectHash), (error: any) => error.code === 'daytona_action_unsupported');
+  assert.equal(n.requests.length, 0);
+});
+test('WeFunder private input lost acknowledgement never resends the exact input', async () => {
+  const n = network(); let inputAttempts = 0; let command = ''; let submitted: any;
+  const fetchImpl: typeof fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url.includes('/process/session')) {
+      if (url.endsWith('/process/session')) return Response.json({ sessionId: JSON.parse(String(init.body)).sessionId });
+      if (url.endsWith('/exec')) {
+        const exec = JSON.parse(String(init.body)); command = exec.command;
+        const encoded = command.match(/--payload ([A-Za-z0-9_-]+)/)?.[1]; assert.ok(encoded);
+        const payload = JSON.parse(Buffer.from(encoded!, 'base64url').toString());
+        const nonce = command.match(/--private-stdin ([a-f0-9]{32})$/)?.[1]; assert.ok(nonce);
+        return Response.json({ cmdId: '22345678-1234-4234-8234-123456789abc', payload, nonce });
+      }
+      if (url.endsWith('/logs')) {
+        const launch = privateRequestsLaunch;
+        const ready = { version: 1, event: 'input_ready', nonce: launch.nonce, sessionId: wefunderMission.sessionId, profileKey: wefunderBinding.profileKey, profilePath: wefunderBinding.profilePath, principalHash: wefunderBinding.ownerSubjectHash };
+        return Response.json({ stdout: JSON.stringify(ready) + '\n' + (submitted ? JSON.stringify({ version: 1, ok: false, code: 'provider_action_failed' }) + '\n' : '') });
+      }
+      if (url.endsWith('/input')) { inputAttempts++; submitted = JSON.parse(JSON.parse(String(init.body)).data); throw new Error('ack lost'); }
+      return Response.json({ exitCode: submitted ? 1 : null });
+    }
+    return n.fetchImpl(input, init);
+  };
+  let privateRequestsLaunch: any;
+  const wrapped: typeof fetch = async (input, init = {}) => {
+    const response = await fetchImpl(input, init);
+    if (String(input).endsWith('/exec')) privateRequestsLaunch = await response.clone().json();
+    return response;
+  };
+  const c = await client({ fetchImpl: wrapped });
+  const secret = 'must-never-be-replayed';
+  await assert.rejects(c.execute(wefunderBinding, wefunderMission, { type: 'type', selector: '#password', text: secret }, 10, wefunderBinding.ownerSubjectHash));
+  assert.equal(inputAttempts, 1);
+  assert.equal(command.includes(secret), false);
+  assert.equal(inputAttempts, 1, 'unknown input acknowledgement does not trigger a resend');
 });
 test('only exact allowlisted dispatcher failures are projected and oversized stdout has a distinct safe code', async () => {
   const n = network(), c = await client({ fetchImpl: n.fetchImpl });
@@ -501,6 +587,7 @@ class Cdp:
   if method=='Target.closeTarget': return {'success':True}
   if method=='DOM.getDocument': return {'root':{'nodeId':1}}
   if method=='DOM.querySelector': return {'nodeId':2}
+  if method=='DOM.querySelectorAll': return {'nodeIds':[]}
   return {}
 def directory(path):
  return profile if str(path).endswith('/chromium') else root
