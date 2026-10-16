@@ -7,6 +7,8 @@ import { promisify } from 'node:util';
 const MAX_BINARY_BYTES = 10 * 1024 * 1024;
 const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 const MAX_STDOUT_BYTES = 32 * 1024;
+// Stream bodies are omitted; bound the complete decoded object inventory separately.
+const MAX_PDF_JSON_BYTES = 4 * 1024 * 1024;
 const TOOL_TIMEOUT_MS = 5_000;
 const MAX_IMAGE_PIXELS = 16_000_000;
 
@@ -69,6 +71,82 @@ function validInput(input: BrowserBinaryValidationInput): boolean {
     ['application/pdf', 'image/png', 'image/jpeg'].includes(input.contentType);
 }
 
+function dictionary(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function assertPdfHasNoAttachments(output: string): void {
+  if (Buffer.byteLength(output, 'utf8') > MAX_PDF_JSON_BYTES) throw new Error('invalid binary');
+  const document: unknown = JSON.parse(output);
+  if (!dictionary(document) || document.version !== 2 || !dictionary(document.attachments) ||
+      Object.keys(document.attachments).length !== 0 || !Array.isArray(document.qpdf) || document.qpdf.length !== 2 ||
+      !dictionary(document.qpdf[0]) || document.qpdf[0].jsonversion !== 2 ||
+      !dictionary(document.qpdf[1]) || !dictionary(document.qpdf[1].trailer)) throw new Error('invalid binary');
+
+  const objects = document.qpdf[1];
+  let remainingReferenceSteps = 100_000;
+  // JSON2 preserves indirect values. Resolve only the fields inspected below,
+  // not arbitrary graph edges: ordinary PDF page/parent references contain cycles.
+  const resolve = (input: unknown): unknown => {
+    let value = input;
+    const seen = new Set<string>();
+    while (typeof value === 'string' && /^[1-9][0-9]* [0-9]+ R$/.test(value)) {
+      if (seen.size >= 32 || seen.has(value) || remainingReferenceSteps-- <= 0) throw new Error('invalid binary');
+      seen.add(value);
+      const object = objects[`obj:${value}`];
+      if (!dictionary(object)) throw new Error('invalid binary');
+      if (Object.hasOwn(object, 'value') && !Object.hasOwn(object, 'stream')) value = object.value;
+      else if (dictionary(object.stream) && dictionary(object.stream.dict) && !Object.hasOwn(object, 'value')) value = object.stream.dict;
+      else throw new Error('invalid binary');
+    }
+    return value;
+  };
+  const trailer = objects.trailer;
+  if (!dictionary(trailer) || !dictionary(trailer.value)) throw new Error('invalid binary');
+  const catalog = resolve(trailer.value['/Root']);
+  if (!dictionary(catalog)) throw new Error('invalid binary');
+  const fileKeys = ['/F', '/UF', '/DOS', '/Mac', '/Unix'];
+  const hasFilename = (value: Record<string, unknown>): boolean => fileKeys.some(key => {
+    const filename = resolve(value[key]);
+    return typeof filename === 'string' && /^(?:u:|b:)/.test(filename);
+  });
+  const hasEmbeddedFileMap = (value: Record<string, unknown>): boolean => {
+    const embeddedFiles = resolve(value['/EF']);
+    return dictionary(embeddedFiles) && fileKeys.some(key => Object.hasOwn(embeddedFiles, key));
+  };
+  const isFileSpecification = (input: unknown): boolean => {
+    const value = resolve(input);
+    return dictionary(value) && (resolve(value['/Type']) === '/Filespec' || hasFilename(value) || hasEmbeddedFileMap(value));
+  };
+
+  // qpdf decodes escaped names and inventories orphan objects too. Match actual
+  // dictionary roles/value shapes, not arbitrary resource aliases such as /Font /AF.
+  // This refuses embedded/associated files and portfolios; it is not an AV verdict.
+  const pending: unknown[] = [objects];
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (Array.isArray(value)) {
+      for (const child of value) pending.push(child);
+    } else if (dictionary(value)) {
+      const type = resolve(value['/Type']);
+      if (type === '/EmbeddedFile' || resolve(value['/Subtype']) === '/FileAttachment') throw new Error('invalid binary');
+      if (value === catalog || type === '/Catalog') {
+        if (Object.hasOwn(value, '/Collection')) throw new Error('invalid binary');
+        const names = resolve(value['/Names']);
+        if (dictionary(names) && Object.hasOwn(names, '/EmbeddedFiles')) throw new Error('invalid binary');
+      }
+      const associatedFiles = resolve(value['/AF']);
+      if (Array.isArray(associatedFiles) && (value === catalog ||
+          ['/Catalog', '/Page', '/Pages', '/Annot', '/StructElem', '/XObject'].includes(String(type)) ||
+          associatedFiles.some(isFileSpecification))) throw new Error('invalid binary');
+      if (Object.hasOwn(value, '/EF')) {
+        if (type === '/Filespec' || hasFilename(value) || hasEmbeddedFileMap(value)) throw new Error('invalid binary');
+      }
+      for (const child of Object.values(value)) pending.push(child);
+    }
+  }
+}
+
 /**
  * Creates the server-only structural validator used by browser captures and staged binary uploads.
  * Structural completeness does not scan for malware and must not be described as an antivirus verdict.
@@ -104,6 +182,11 @@ export function createTrustedBrowserBinaryValidator(options: TrustedBrowserBinar
               !Number.isSafeInteger(pageCount) || pageCount < 1 || pageCount > 100) {
             throw new Error('invalid binary');
           }
+          const inspection = await runTool('prlimit', [
+            '--as=536870912:536870912', '--cpu=4:4', '--', 'qpdf', '--json=2',
+            '--json-key=attachments', '--json-key=qpdf', '--json-stream-data=none', filePath,
+          ], TOOL_TIMEOUT_MS, MAX_PDF_JSON_BYTES);
+          assertPdfHasNoAttachments(inspection.stdout);
           return { complete: true, pageCount };
         }
 

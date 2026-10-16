@@ -99,6 +99,13 @@ function textContent(body: Uint8Array): string | null {
   }
 }
 
+function textContainsPdfSignature(contentType: string, body: Uint8Array): boolean {
+  if (contentType !== 'text/plain' && contentType !== 'text/csv') return false;
+  // Policy: PDF magic is not permitted anywhere in size-bounded text/CSV bytes.
+  // Readers can recover headers after arbitrary prefixes, not just within the first 1024 bytes.
+  return Buffer.from(body).indexOf('%PDF-', 0, 'ascii') >= 0;
+}
+
 function pngHasBasicStructure(body: Uint8Array): boolean {
   if (body.length < 8 || !PNG_SIGNATURE.every((byte, index) => body[index] === byte)) return false;
   let offset = 8;
@@ -153,7 +160,7 @@ function jpegHasBasicStructure(body: Uint8Array): boolean {
 }
 
 function supportedContent(contentType: string, body: Uint8Array): boolean {
-  if (contentType === 'text/csv' || contentType === 'text/plain') return textContent(body) !== null;
+  if (contentType === 'text/csv' || contentType === 'text/plain') return !textContainsPdfSignature(contentType, body) && textContent(body) !== null;
   if (contentType === 'application/pdf') {
     const text = new TextDecoder('latin1').decode(body);
     return body.length >= 12 && /^%PDF-(?:1\.[0-7]|2\.0)(?:\r?\n|$)/.test(text) && text.trimEnd().endsWith('%%EOF');
@@ -249,6 +256,18 @@ export class BrowserFileBroker {
     const stored = await this.load(owner, fileId, principalHash);
     if (!stored) fail('owner_forbidden', 'File is unavailable to this owner.');
     if (stored.record.status !== 'ready' || (this.options.scanner && stored.record.scanReceipt === undefined)) fail('file_not_ready', 'File is not cleared for browser transfer.');
+    // Recheck pre-policy ready text records using their integrity-checked bytes, not caller MIME alone.
+    if (textContainsPdfSignature(stored.record.contentType, stored.body)) fail('file_not_ready', 'File is not cleared for browser transfer.');
+    // Apply current PDF container policy to the exact integrity-checked bytes,
+    // including records staged before a validator update. No old ready bit can bypass it.
+    if (stored.record.contentType === 'application/pdf') {
+      let complete = false;
+      try {
+        const verdict = await this.options.validator?.validate({ contentType: stored.record.contentType, body: new Uint8Array(stored.body) });
+        complete = verdict?.complete === true;
+      } catch { /* Current policy failures remain closed without parser diagnostics. */ }
+      if (!complete) fail('file_not_ready', 'File is not cleared for browser transfer.');
+    }
     return { record: cloneRecord(stored.record), body: new Uint8Array(stored.body) };
   }
 
