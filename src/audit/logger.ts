@@ -1,6 +1,7 @@
 import pino, { type Logger } from 'pino';
 import { randomUUID, createHash } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
+import { currentParentCorrelationId } from '../server/request-context.js';
 
 function fallbackNodeEnv(v: string | undefined): 'development' | 'production' | 'test' {
   if (v === 'development' || v === 'production' || v === 'test') return v;
@@ -132,11 +133,17 @@ function inputFieldCount(input: unknown): number {
   return 0;
 }
 
+function parentCorrelationFields(): Record<string, string> {
+  const correlationId = currentParentCorrelationId();
+  return correlationId ? { mcp_request_correlation_id: correlationId } : {};
+}
+
 /** Content-minimized structured start fields, exported for synthetic privacy tests. */
 export function toolCallStartLogFields(entry: ToolCallLogStart): Record<string, unknown> {
   return {
     type: 'tool_call_start',
     correlation_id: entry.correlation_id,
+    ...parentCorrelationFields(),
     tool: entry.tool,
     caller_hash: entry.caller_hash,
     input_field_count: inputFieldCount(entry.input),
@@ -150,6 +157,7 @@ export function toolCallEndLogFields(entry: ToolCallLogEnd): Record<string, unkn
   const payload: Record<string, unknown> = {
     type: 'tool_call_end',
     correlation_id: entry.correlation_id,
+    ...parentCorrelationFields(),
     tool: entry.tool,
     caller_hash: entry.caller_hash,
     outcome: entry.outcome,

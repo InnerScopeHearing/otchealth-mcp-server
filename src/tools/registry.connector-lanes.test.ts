@@ -393,7 +393,10 @@ test('(d) cro connector gets its fixed seat surface plus bounded company GitHub 
 
 test('(e) Wefunder Campaign Director gets exact-source migration tools with owner-bound cloud browsing and without private-data grants', () => {
   const set = connectorToolset(testEnv(), 'wefunder-campaign-director');
-  assert.deepEqual([...set].sort(), [...WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
+  const deniedBridge = new Set(['chat_action_submit', 'chat_action_status', 'chat_action_result']);
+  assert.deepEqual([...set].sort(), [...WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS]
+    .filter(name => !deniedBridge.has(name)).sort());
+  for (const name of deniedBridge) assert.equal(set.has(name), false, `Denied bridge must not be advertised: ${name}`);
   assert.ok(set.has('browser_broker_preflight'));
   assert.ok(set.has('browser_broker_inspect_public'));
   for (const required of ['catalog_probe', 'hyperagent_list_agents', 'hyperagent_list_threads',

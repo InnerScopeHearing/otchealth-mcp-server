@@ -45,6 +45,8 @@ export function isOAuthGrantType(value: unknown): value is OAuthGrantType {
 export interface RequestContext {
   callerHash: string;
   correlationId: string;
+  /** Stable correlation for the enclosing MCP HTTP request, distinct from each tool-call ID. */
+  parentCorrelationId?: string;
   callerAgent: string;
   /** True for Claude Chat (DCR) connector requests -> advertise a curated toolset, not the full catalog. */
   connectorSurface?: boolean;
@@ -72,6 +74,12 @@ export function currentCallerHash(): string {
 
 export function currentCorrelationId(): string {
   return requestContext.getStore()?.correlationId ?? 'unknown';
+}
+
+/** Parent HTTP/MCP correlation; missing outside a correlated MCP request. */
+export function currentParentCorrelationId(): string | undefined {
+  const value = requestContext.getStore()?.parentCorrelationId;
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(value) ? value : undefined;
 }
 
 /** The agent identity derived from the caller's OAuth token (per-agent client), or '' if unknown. */

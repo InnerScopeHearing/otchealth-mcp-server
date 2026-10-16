@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { toolCallEndLogFields, toolCallStartLogFields } from './logger.js';
+import { requestContext } from '../server/request-context.js';
 
 test('tool-call start logs retain correlation metadata and counts but never argument content', () => {
   const fields = toolCallStartLogFields({
@@ -78,5 +79,36 @@ test('tool-call end metadata distinguishes successful counts, zero results, upst
     type: 'tool_call_end', correlation_id: 'corr', tool: 'search', caller_hash: 'caller',
     outcome: 'rejected', latency_ms: 7, error_code: 'rate_limited', status_code: 429,
   });
+});
+
+test('tool log projectors link the parent request separately and omit missing or hostile parent IDs', () => {
+  const start = {
+    correlation_id: 'tool-call-id', tool: 'synthetic_search', caller_hash: 'caller-hash', input: {}, read_only_mode: true,
+  };
+  const end = {
+    correlation_id: 'tool-call-id', tool: 'synthetic_search', caller_hash: 'caller-hash', outcome: 'error' as const, latency_ms: 1,
+  };
+  const context = { callerHash: 'caller', correlationId: 'route-parent', callerAgent: '' };
+
+  const linked = requestContext.run({ ...context, parentCorrelationId: 'route-parent' }, () => ({
+    start: toolCallStartLogFields(start), end: toolCallEndLogFields(end),
+  }));
+  assert.equal(linked.start.mcp_request_correlation_id, 'route-parent');
+  assert.equal(linked.end.mcp_request_correlation_id, 'route-parent');
+  assert.equal(linked.start.correlation_id, 'tool-call-id');
+  assert.equal(linked.end.correlation_id, 'tool-call-id');
+
+  const missing = requestContext.run(context, () => ({
+    start: toolCallStartLogFields(start), end: toolCallEndLogFields(end),
+  }));
+  assert.equal(missing.start.mcp_request_correlation_id, undefined);
+  assert.equal(missing.end.mcp_request_correlation_id, undefined);
+
+  const hostile = requestContext.run({ ...context, parentCorrelationId: 'https://example.invalid/?token=SYNTHETIC_SECRET' }, () => ({
+    start: toolCallStartLogFields(start), end: toolCallEndLogFields(end),
+  }));
+  assert.equal(hostile.start.mcp_request_correlation_id, undefined);
+  assert.equal(hostile.end.mcp_request_correlation_id, undefined);
+  assert.equal(JSON.stringify(hostile).includes('SYNTHETIC_SECRET'), false);
 });
 

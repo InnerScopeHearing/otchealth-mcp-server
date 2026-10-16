@@ -2,18 +2,22 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createServer, connect as connectNet } from 'node:net';
 import test from 'node:test';
+import { logger } from '../../audit/logger.js';
 
 const api = await import('./clamav-scanner.js').catch(() => ({})) as Record<string, any>;
 const now = Date.UTC(2026, 9, 15, 21, 0, 0);
 const version = 'ClamAV 1.4.3/27832/Thu Oct 15 20:00:00 2026';
-async function fixture(verdict: string | null, versionText: string | string[] = version) {
+async function fixture(verdict: string | null, versionText: string | string[] | null = version) {
   const seen: Buffer[] = [];
   let versionReads = 0;
   const server = createServer(socket => {
     const chunks: Buffer[] = [];
     socket.on('data', bytes => {
       chunks.push(bytes); const data = Buffer.concat(chunks);
-      if (data.subarray(0, 9).toString() === 'zVERSION\0') { socket.end(`${Array.isArray(versionText) ? versionText[versionReads++] : versionText}\0`); return; }
+      if (data.subarray(0, 9).toString() === 'zVERSION\0') {
+        if (versionText !== null) socket.end(`${Array.isArray(versionText) ? versionText[versionReads++] : versionText}\0`);
+        return;
+      }
       if (data.subarray(0, 10).toString() !== 'zINSTREAM\0') return;
       let offset = 10; const body: Buffer[] = [];
       while (offset + 4 <= data.length) {
@@ -90,4 +94,47 @@ test('cannot report clean after its absolute deadline even if the event loop del
     } });
     assert.equal((await scanner.scan({ filename: 'safe.txt', contentType: 'text/plain', body: Buffer.from('safe') })).verdict, 'error');
   } finally { await f.close(); }
+});
+
+test('scanner failures emit bounded content-free observations and preserve the generic fail-closed verdict', async t => {
+  const seen: Record<string, unknown>[] = [];
+  const spy = (await import('node:test')).mock.method(logger, 'warn', (fields: Record<string, unknown>) => { seen.push(fields); });
+  t.after(() => spy.mock.restore());
+
+  const stale = await fixture('stream: OK', 'ClamAV 1.4.3/1/Mon Oct 12 20:00:00 2026');
+  try {
+    const result = await api.createClamAvBrowserFileScanner(stale.options).scan({
+      filename: 'private-name-SYNTHETIC_SECRET.txt', contentType: 'text/plain', body: Buffer.from('private-body-SYNTHETIC_SECRET'),
+    });
+    assert.deepEqual(result, { verdict: 'error' });
+  } finally { await stale.close(); }
+
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].type, 'browser_file_scanner_failure');
+  assert.equal(seen[0].stage, 'signature_before_scan');
+  assert.equal(seen[0].reason, 'signature_stale');
+  assert.equal(seen[0].outcome, 'quarantined');
+  assert.equal(seen[0].signature_age_ms, 262800000);
+  assert.equal(typeof seen[0].duration_ms, 'number');
+  const serialized = JSON.stringify(seen);
+  for (const forbidden of ['SYNTHETIC_SECRET', 'private-name', 'private-body', 'filename', 'sha256', 'caller', 'Error']) {
+    assert.equal(serialized.includes(forbidden), false, `observation leaked ${forbidden}`);
+  }
+});
+
+test('timeout observations omit signature age when no signature timestamp was obtained', async t => {
+  const seen: Record<string, unknown>[] = [];
+  const spy = (await import('node:test')).mock.method(logger, 'warn', (fields: Record<string, unknown>) => { seen.push(fields); });
+  t.after(() => spy.mock.restore());
+  const f = await fixture(null, null);
+  try {
+    const result = await api.createClamAvBrowserFileScanner({ ...f.options, timeoutMs: 50 }).scan({
+      filename: 'safe.txt', contentType: 'text/plain', body: Buffer.from('safe'),
+    });
+    assert.deepEqual(result, { verdict: 'error' });
+  } finally { await f.close(); }
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].stage, 'signature_before_scan');
+  assert.equal(seen[0].reason, 'timeout');
+  assert.equal(Object.hasOwn(seen[0], 'signature_age_ms'), false);
 });

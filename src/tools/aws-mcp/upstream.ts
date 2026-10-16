@@ -25,6 +25,8 @@ import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { AwsCredentials } from '../../search/sigv4.js';
 import { AwsReaderUnavailableError, type ReaderIdentity } from './credentials.js';
+import { logToolPhase, type ToolTimingOutcome } from '../../audit/tool-timing.js';
+import { awsMcpActionOutcome, awsMcpErrorOutcome } from './phase-timing.js';
 import { redactCredentialShapes, stripControlChars } from './output.js';
 import {
   AWS_MCP_ENDPOINT,
@@ -271,6 +273,7 @@ async function withUpstreamSession<T>(
 ): Promise<{ value: T; identity: ReaderIdentity | undefined }> {
   const deadlineMs = deps.deadlineMs ?? AWS_MCP_DEADLINE_MS;
   const startedAt = Date.now();
+  const phases: Partial<Record<'queue' | 'credentials' | 'initialize' | 'operation' | 'shutdown', { durationMs: number; outcome: ToolTimingOutcome }>> = {};
   const remainingMs = (): number => Math.max(0, deadlineMs - (Date.now() - startedAt));
   const abort = new AbortController();
   let deadlineHit = false;
@@ -280,28 +283,50 @@ async function withUpstreamSession<T>(
   }, deadlineMs);
 
   let oversized = false;
+  let credentialDurationMs = 0;
+  let credentialOutcome: ToolTimingOutcome = 'success';
+  let activePhase: 'queue' | 'credentials' | 'initialize' | 'operation' | undefined;
+  let terminalErrorCode: string | undefined;
   let transport: StreamableHTTPClientTransport | undefined;
   let client: Client | undefined;
   let release: (() => void) | undefined;
   try {
-    release = await (deps.limiter ?? defaultLimiter).acquire(Math.min(AWS_MCP_QUEUE_WAIT_MS, deadlineMs));
+    activePhase = 'queue';
+    const queueStarted = Date.now();
+    try {
+      release = await (deps.limiter ?? defaultLimiter).acquire(Math.min(AWS_MCP_QUEUE_WAIT_MS, deadlineMs));
+      phases.queue = { durationMs: Date.now() - queueStarted, outcome: 'success' };
+    } catch (err) {
+      phases.queue = { durationMs: Date.now() - queueStarted, outcome: 'rejected' };
+      throw err;
+    }
 
     // Only the three signing fields are ever handed to the signer; the identity stays here.
     let identity: ReaderIdentity | undefined;
     const signingCredentials = async (): Promise<AwsCredentials> => {
-      const credentials = await deps.getCredentials(sessionHint);
-      if (credentials.roleArn && credentials.roleSessionName) {
-        identity = { roleArn: credentials.roleArn, roleSessionName: credentials.roleSessionName };
+      const credentialStarted = Date.now();
+      try {
+        const credentials = await deps.getCredentials(sessionHint);
+        if (credentials.roleArn && credentials.roleSessionName) {
+          identity = { roleArn: credentials.roleArn, roleSessionName: credentials.roleSessionName };
+        }
+        return {
+          accessKeyId: credentials.accessKeyId,
+          secretAccessKey: credentials.secretAccessKey,
+          sessionToken: credentials.sessionToken,
+        };
+      } catch (err) {
+        credentialOutcome = 'error';
+        throw err;
+      } finally {
+        credentialDurationMs += Date.now() - credentialStarted;
       }
-      return {
-        accessKeyId: credentials.accessKeyId,
-        secretAccessKey: credentials.secretAccessKey,
-        sessionToken: credentials.sessionToken,
-      };
     };
 
     // Fail closed before any request leaves for the AWS MCP Server.
+    activePhase = 'credentials';
     await signingCredentials();
+    phases.credentials = { durationMs: credentialDurationMs, outcome: credentialOutcome };
 
     const signingFetch = createSigningFetch({
       scope: deps.scope ?? resolveSigningScope(),
@@ -323,15 +348,54 @@ async function withUpstreamSession<T>(
       },
     });
     client = new Client({ name: 'otchealth-gateway-aws-bridge', version: '1.0.0' }, { capabilities: {} });
-    await client.connect(transport, { signal: abort.signal, timeout: Math.max(1, remainingMs()) });
-    const value = await operation(client, { signal: abort.signal, remainingMs });
-    return { value, identity };
+    activePhase = 'initialize';
+    const initializeStarted = Date.now();
+    try {
+      await client.connect(transport, { signal: abort.signal, timeout: Math.max(1, remainingMs()) });
+      phases.initialize = { durationMs: Date.now() - initializeStarted, outcome: 'success' };
+    } catch (err) {
+      phases.initialize = { durationMs: Date.now() - initializeStarted, outcome: 'error' };
+      throw err;
+    }
+    activePhase = 'operation';
+    const operationStarted = Date.now();
+    try {
+      const value = await operation(client, { signal: abort.signal, remainingMs });
+      const actionFailed = !!value && typeof value === 'object' && (value as { isError?: unknown }).isError === true;
+      phases.operation = { durationMs: Date.now() - operationStarted, outcome: awsMcpActionOutcome(actionFailed) };
+      return { value, identity };
+    } catch (err) {
+      phases.operation = { durationMs: Date.now() - operationStarted, outcome: 'error' };
+      throw err;
+    }
   } catch (err) {
-    throw mapUpstreamError(err, { oversized, deadlineHit });
+    const mapped = mapUpstreamError(err, { oversized, deadlineHit });
+    terminalErrorCode = mapped instanceof AwsMcpBridgeError ? mapped.code : undefined;
+    if (activePhase === 'credentials' && credentialDurationMs > 0) {
+      phases.credentials = { durationMs: credentialDurationMs, outcome: 'error' };
+    }
+    const failedPhase = activePhase;
+    if (failedPhase && !phases[failedPhase]) {
+      const outcome = awsMcpErrorOutcome(terminalErrorCode, failedPhase);
+      phases[failedPhase] = {
+        durationMs: failedPhase === 'credentials' ? credentialDurationMs : Date.now() - startedAt,
+        outcome,
+      };
+    } else if (failedPhase === 'operation' && phases.operation) {
+      phases.operation.outcome = awsMcpErrorOutcome(terminalErrorCode, 'operation');
+    }
+    throw mapped;
   } finally {
     clearTimeout(timer);
+    const shutdownStarted = Date.now();
     await shutdown(transport, client);
+    phases.shutdown = { durationMs: Date.now() - shutdownStarted, outcome: 'unknown' };
     release?.();
+    if (credentialDurationMs > 0) phases.credentials = { durationMs: credentialDurationMs, outcome: credentialOutcome };
+    for (const [phase, timing] of Object.entries(phases)) {
+      if (!timing) continue;
+      logToolPhase({ phase: phase as 'queue' | 'credentials' | 'initialize' | 'operation' | 'shutdown', durationMs: timing.durationMs, outcome: timing.outcome, errorCode: timing.outcome === 'success' ? undefined : terminalErrorCode });
+    }
   }
 }
 

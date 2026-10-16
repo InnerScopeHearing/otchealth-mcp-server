@@ -26,6 +26,28 @@ const def = {
 };
 const baselineDef = { ...def, name: 'catalog_probe' };
 
+const wefunderDeniedBridgeNames = [
+  'chat_action_submit',
+  'chat_action_status',
+  'chat_action_result',
+] as const;
+const wefunderPublicSurfaceNames = [
+  ...wefunderDeniedBridgeNames,
+  'catalog_probe',
+  'browser_cloud_session_start',
+  'browser_cloud_session_action',
+  'browser_cloud_session_snapshot',
+  'browser_cloud_session_stop',
+] as const;
+
+function registerSyntheticSurface(server: McpServer, lane: string): void {
+  requestContext.run({ callerHash: `${lane}-test`, correlationId: lane, callerAgent: lane, connectorSurface: true }, () => {
+    for (const name of wefunderPublicSurfaceNames) {
+      registerTool(server, { ...def, name }, () => `${lane}-test`);
+    }
+  });
+}
+
 async function publicTools(server: McpServer): Promise<unknown[]> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'caller-surface-contract-test', version: '1' });
@@ -61,4 +83,29 @@ test('captured contract equals the public SDK tools/list after role filtering an
   assert.deepEqual(croPublic, croCaptured);
   assert.deepEqual(croCaptured.map((tool) => tool.name), ['catalog_probe']);
   assert.ok(!croCaptured.some((tool) => tool.name === def.name), 'CTO-only tool must not appear on the CRO surface');
+});
+
+test('WeFunder public SDK tools/list hides only the denied chat-action bridge and preserves its company browser lane', async () => {
+  const makeServer = () => new McpServer({ name: 'surface-test', version: '1' }, { capabilities: { tools: { listChanged: true } } });
+  const wefunder = makeServer();
+  const cto = makeServer();
+  registerSyntheticSurface(wefunder, 'wefunder-campaign-director');
+  registerSyntheticSurface(cto, 'cto');
+
+  const wefunderNames = (await publicTools(wefunder)).map((tool) => (tool as { name: string }).name);
+  assert.deepEqual(wefunderNames, [
+    'browser_cloud_session_action',
+    'browser_cloud_session_snapshot',
+    'browser_cloud_session_start',
+    'browser_cloud_session_stop',
+    'catalog_probe',
+  ]);
+  for (const denied of wefunderDeniedBridgeNames) {
+    assert.equal(wefunderNames.includes(denied), false, `${denied} must not appear in WeFunder tools/list`);
+  }
+
+  const ctoNames = (await publicTools(cto)).map((tool) => (tool as { name: string }).name);
+  for (const name of wefunderDeniedBridgeNames) {
+    assert.ok(ctoNames.includes(name), `CTO's existing ${name} binding must remain advertised`);
+  }
 });

@@ -99,6 +99,7 @@ export function registerMcpRoutes(app: FastifyInstance): void {
       {
         callerHash: ctx.caller_hash,
         correlationId,
+        parentCorrelationId: correlationId,
         callerAgent: ctx.caller_agent,
         connectorSurface: ctx.connector_surface,
         m365StaticAuth: ctx.m365_static_auth,
