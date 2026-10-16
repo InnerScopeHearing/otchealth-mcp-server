@@ -39,6 +39,7 @@ const fileBrokerApi = await import('./file-broker.js').catch((error: unknown) =>
 const BrowserFileBroker = fileBrokerApi?.BrowserFileBroker as BrokerConstructor | undefined;
 
 const textBody = new TextEncoder().encode('name,value\nexample,1\n');
+const attachmentPdf = Buffer.from('JVBERi0xLjQKJSBwcm9vZjIwMjYxMDE2IHN5bnRoZXRpYyBFSUNBUiBhdHRhY2htZW50IG9ubHkKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgL05hbWVzIDw8IC9FbWJlZGRlZEZpbGVzIDw8IC9OYW1lcyBbKGVpY2FyLmNvbSkgNSAwIFJdID4+ID4+ID4+CmVuZG9iagoyIDAgb2JqCjw8IC9UeXBlIC9QYWdlcyAvS2lkcyBbMyAwIFJdIC9Db3VudCAxID4+CmVuZG9iagozIDAgb2JqCjw8IC9UeXBlIC9QYWdlIC9QYXJlbnQgMiAwIFIgL01lZGlhQm94IFswIDAgNzIgNzJdIC9Db250ZW50cyA0IDAgUiA+PgplbmRvYmoKNCAwIG9iago8PCAvTGVuZ3RoIDQgPj4Kc3RyZWFtCnEKUQplbmRzdHJlYW0KZW5kb2JqCjUgMCBvYmoKPDwgL1R5cGUgL0ZpbGVzcGVjIC9GIChlaWNhci5jb20pIC9VRiAoZWljYXIuY29tKSAvRUYgPDwgL0YgNiAwIFIgPj4gPj4KZW5kb2JqCjYgMCBvYmoKPDwgL1R5cGUgL0VtYmVkZGVkRmlsZSAvU3VidHlwZSAvYXBwbGljYXRpb24jMkZvY3RldC1zdHJlYW0gL1BhcmFtcyA8PCAvU2l6ZSA2OCA+PiAvTGVuZ3RoIDY4ID4+CnN0cmVhbQpYNU8hUCVAQVBbNFxQWlg1NChQXik3Q0MpN30kRUlDQVItU1RBTkRBUkQtQU5USVZJUlVTLVRFU1QtRklMRSEkSCtIKgplbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA3CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDA1NyAwMDAwMCBuIAowMDAwMDAwMTY3IDAwMDAwIG4gCjAwMDAwMDAyMjQgMDAwMDAgbiAKMDAwMDAwMDMwOSAwMDAwMCBuIAowMDAwMDAwMzYxIDAwMDAwIG4gCjAwMDAwMDA0NDggMDAwMDAgbiAKdHJhaWxlcgo8PCAvU2l6ZSA3IC9Sb290IDEgMCBSID4+CnN0YXJ0eHJlZgo2NDYKJSVFT0YK', 'base64');
 const sha = (body: Uint8Array): string => createHash('sha256').update(body).digest('hex');
 const pngChunk = (type: string, data: number[]): number[] => [
   (data.length >>> 24) & 0xff, (data.length >>> 16) & 0xff, (data.length >>> 8) & 0xff, data.length & 0xff,
@@ -184,6 +185,51 @@ test('rejects MIME and content mismatches plus embedded NUL in otherwise plain t
   await assert.rejects(files.stage('cfo', { filename: 'data.csv', contentType: 'text/csv', body: new Uint8Array([0x61, 0, 0x62]) }));
 });
 
+test('rejects the exact attachment PDF declared as text or CSV before scanner or storage effects', async () => {
+  assert.equal(attachmentPdf.byteLength, 849);
+  assert.equal(sha(attachmentPdf), '32e92e9124c9d5b57ed8580a8ceb4a351c656c19d29f806d1dafb5faf261635e');
+  for (const [contentType, extension] of [['text/plain', 'txt'], ['text/csv', 'csv']] as const) {
+    for (const prefix of [Buffer.alloc(0), Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('prefix\n'), Buffer.alloc(1023, 0x20)]) {
+      const store = new MemoryFileStore();
+      let scans = 0;
+      const scanner: BrowserFileScanner = { scan: async ({ body }) => { scans += 1; return receipt(body, 1_800_000_000_000); } };
+      const { broker: files } = broker(store, scanner);
+      await assert.rejects(files.stage('cfo', { filename: `attachment.${extension}`, contentType, body: Buffer.concat([prefix, attachmentPdf]) }, 'a'.repeat(64)), /match|content type/i);
+      assert.equal(scans, 0);
+      assert.equal(store.rows.size, 0);
+    }
+  }
+});
+
+test('blocks integrity-valid old-ready text records containing a PDF before returning transfer bytes', async () => {
+  const now = 1_800_000_000_000;
+  const id = '00000000-0000-4000-8000-000000000001';
+  const principal = 'a'.repeat(64);
+  for (const [contentType, extension] of [['text/plain', 'txt'], ['text/csv', 'csv']] as const) {
+    for (const prefix of [Buffer.alloc(0), Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('prefix\n'), Buffer.alloc(1023, 0x20)]) {
+      const store = new MemoryFileStore();
+      const body = Buffer.concat([prefix, attachmentPdf]);
+      const record = { id, owner: 'cfo', ownerSubjectHash: principal, filename: `old.${extension}`, contentType, byteLength: body.byteLength, sha256: sha(body), status: 'ready' as const, expiresAt: now + 3_600_000, scanReceipt: receipt(body, now) };
+      await store.put(`browser-files/cfo/${id}`, record, body);
+      const { broker: files } = broker(store);
+      await assert.rejects(files.forUpload('cfo', id, principal), /not cleared/i);
+      await assert.rejects(files.forUpload('cfo', id, 'b'.repeat(64)), /owner/i);
+    }
+  }
+});
+
+test('ordinary text and CSV remain ready and transferable with unchanged exact bytes', async () => {
+  for (const [contentType, filename, body] of [
+    ['text/plain', 'readme.txt', Buffer.from('Ordinary text about PDF documents and %PDF markers.\n')],
+    ['text/csv', 'data.csv', textBody],
+  ] as const) {
+    const { broker: files } = broker();
+    const staged = await files.stage('cfo', { filename, contentType, body }, 'a'.repeat(64));
+    assert.equal(staged.status, 'ready');
+    assert.deepEqual((await files.forUpload('cfo', staged.id, 'a'.repeat(64))).body, new Uint8Array(body));
+  }
+});
+
 test('binary signatures and a clean scanner alone remain quarantined', async () => {
   const { broker: files } = broker();
   const pdf = new TextEncoder().encode('%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF');
@@ -276,7 +322,7 @@ test('real parser preserves the exact ordinary PDF with a clean AV receipt', { s
 
 test('real parser quarantines the exact synthetic attachment PDF despite a clean AV receipt and blocks old-ready transfer', { skip: !qpdfAvailable }, async () => {
   // Public synthetic gateway regression: exact 849-byte PDF with a standard EICAR test attachment.
-  const body = Buffer.from('JVBERi0xLjQKJSBwcm9vZjIwMjYxMDE2IHN5bnRoZXRpYyBFSUNBUiBhdHRhY2htZW50IG9ubHkKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgL05hbWVzIDw8IC9FbWJlZGRlZEZpbGVzIDw8IC9OYW1lcyBbKGVpY2FyLmNvbSkgNSAwIFJdID4+ID4+ID4+CmVuZG9iagoyIDAgb2JqCjw8IC9UeXBlIC9QYWdlcyAvS2lkcyBbMyAwIFJdIC9Db3VudCAxID4+CmVuZG9iagozIDAgb2JqCjw8IC9UeXBlIC9QYWdlIC9QYXJlbnQgMiAwIFIgL01lZGlhQm94IFswIDAgNzIgNzJdIC9Db250ZW50cyA0IDAgUiA+PgplbmRvYmoKNCAwIG9iago8PCAvTGVuZ3RoIDQgPj4Kc3RyZWFtCnEKUQplbmRzdHJlYW0KZW5kb2JqCjUgMCBvYmoKPDwgL1R5cGUgL0ZpbGVzcGVjIC9GIChlaWNhci5jb20pIC9VRiAoZWljYXIuY29tKSAvRUYgPDwgL0YgNiAwIFIgPj4gPj4KZW5kb2JqCjYgMCBvYmoKPDwgL1R5cGUgL0VtYmVkZGVkRmlsZSAvU3VidHlwZSAvYXBwbGljYXRpb24jMkZvY3RldC1zdHJlYW0gL1BhcmFtcyA8PCAvU2l6ZSA2OCA+PiAvTGVuZ3RoIDY4ID4+CnN0cmVhbQpYNU8hUCVAQVBbNFxQWlg1NChQXik3Q0MpN30kRUlDQVItU1RBTkRBUkQtQU5USVZJUlVTLVRFU1QtRklMRSEkSCtIKgplbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA3CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDA1NyAwMDAwMCBuIAowMDAwMDAwMTY3IDAwMDAwIG4gCjAwMDAwMDAyMjQgMDAwMDAgbiAKMDAwMDAwMDMwOSAwMDAwMCBuIAowMDAwMDAwMzYxIDAwMDAwIG4gCjAwMDAwMDA0NDggMDAwMDAgbiAKdHJhaWxlcgo8PCAvU2l6ZSA3IC9Sb290IDEgMCBSID4+CnN0YXJ0eHJlZgo2NDYKJSVFT0YK', 'base64');
+  const body = attachmentPdf;
   assert.equal(body.byteLength, 849);
   assert.equal(sha(body), '32e92e9124c9d5b57ed8580a8ceb4a351c656c19d29f806d1dafb5faf261635e');
   const validator = createTrustedBrowserBinaryValidator();

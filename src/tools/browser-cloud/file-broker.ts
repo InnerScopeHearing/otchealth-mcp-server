@@ -99,6 +99,14 @@ function textContent(body: Uint8Array): string | null {
   }
 }
 
+function textContainsPdfSignature(contentType: string, body: Uint8Array): boolean {
+  if (contentType !== 'text/plain' && contentType !== 'text/csv') return false;
+  // PDF readers may recognize a header after a BOM or other leading bytes.
+  // Include four trailing bytes so a signature starting at byte 1023 cannot straddle the bound.
+  const offset = Buffer.from(body.subarray(0, 1028)).indexOf('%PDF-', 0, 'ascii');
+  return offset >= 0 && offset < 1024;
+}
+
 function pngHasBasicStructure(body: Uint8Array): boolean {
   if (body.length < 8 || !PNG_SIGNATURE.every((byte, index) => body[index] === byte)) return false;
   let offset = 8;
@@ -153,7 +161,7 @@ function jpegHasBasicStructure(body: Uint8Array): boolean {
 }
 
 function supportedContent(contentType: string, body: Uint8Array): boolean {
-  if (contentType === 'text/csv' || contentType === 'text/plain') return textContent(body) !== null;
+  if (contentType === 'text/csv' || contentType === 'text/plain') return !textContainsPdfSignature(contentType, body) && textContent(body) !== null;
   if (contentType === 'application/pdf') {
     const text = new TextDecoder('latin1').decode(body);
     return body.length >= 12 && /^%PDF-(?:1\.[0-7]|2\.0)(?:\r?\n|$)/.test(text) && text.trimEnd().endsWith('%%EOF');
@@ -249,6 +257,8 @@ export class BrowserFileBroker {
     const stored = await this.load(owner, fileId, principalHash);
     if (!stored) fail('owner_forbidden', 'File is unavailable to this owner.');
     if (stored.record.status !== 'ready' || (this.options.scanner && stored.record.scanReceipt === undefined)) fail('file_not_ready', 'File is not cleared for browser transfer.');
+    // Recheck pre-policy ready text records using their integrity-checked bytes, not caller MIME alone.
+    if (textContainsPdfSignature(stored.record.contentType, stored.body)) fail('file_not_ready', 'File is not cleared for browser transfer.');
     // Apply current PDF container policy to the exact integrity-checked bytes,
     // including records staged before a validator update. No old ready bit can bypass it.
     if (stored.record.contentType === 'application/pdf') {
