@@ -34,6 +34,7 @@ import {
 } from '../audit/logger.js';
 import { applyGuardrail, type ComplianceWarning } from '../compliance/guardrail.js';
 import { recordTool, deriveService } from '../catalog/catalog.js';
+import { lazyCallerSurfaceEntry, type CallerSurfaceTool } from './catalog/caller-surface-fingerprint.js';
 import { requiredRoleFor, roleAllows } from '../catalog/governance.js';
 import { currentCallerAgent, isConnectorSurface, isM365StaticAuth } from '../server/request-context.js';
 import { shouldOffload, offloadResult, extractResultSummary, mayOffloadToolResult } from './result-store.js';
@@ -913,6 +914,44 @@ interface AliasCandidate {
 }
 const aliasCandidatesByServer = new WeakMap<McpServer, Map<string, AliasCandidate[]>>();
 
+// Exact, post-filter registration contracts owned by one request's McpServer. Values are built
+// from the same projected config passed to the SDK and the SDK's public Zod-to-JSON-Schema
+// converter; no global catalog or SDK-private registry is consulted.
+const callerToolsByServer = new WeakMap<McpServer, Map<string, () => CallerSurfaceTool>>();
+
+function callerToolsFor(server: McpServer): Map<string, () => CallerSurfaceTool> {
+  let tools = callerToolsByServer.get(server);
+  if (!tools) {
+    tools = new Map<string, () => CallerSurfaceTool>();
+    callerToolsByServer.set(server, tools);
+  }
+  return tools;
+}
+
+export function callerSurfaceToolsFor(server: McpServer): CallerSurfaceTool[] {
+  return [...(callerToolsByServer.get(server)?.values() ?? [])]
+    .map((getTool) => getTool())
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function captureCallerTool(server: McpServer, name: string, config: Record<string, unknown>, inputShape: ZodRawShape, outputShape: ZodRawShape): void {
+  callerToolsFor(server).set(name, lazyCallerSurfaceEntry(() => {
+    const entry: CallerSurfaceTool = {
+      name,
+      title: config.title,
+      description: config.description,
+      inputSchema: toJsonSchemaCompat(z.object(inputShape), { strictUnions: true, pipeStrategy: 'input' }),
+      annotations: config.annotations,
+      execution: { taskSupport: 'forbidden' },
+      _meta: config._meta,
+    };
+    if (config.outputSchema) {
+      entry.outputSchema = toJsonSchemaCompat(z.object(outputShape), { strictUnions: true, pipeStrategy: 'output' });
+    }
+    return entry;
+  }));
+}
+
 function aliasCandidatesFor(server: McpServer): Map<string, AliasCandidate[]> {
   let candidates = aliasCandidatesByServer.get(server);
   if (!candidates) {
@@ -961,6 +1000,7 @@ export function finalizeM365Aliases(server: McpServer, callerHashProvider: () =>
     // cannot affect any other in-flight request or caller.
     const primaryHandle = primaryHandlesByServer.get(server)?.get(canonicalName);
     primaryHandle?.remove();
+    callerToolsFor(server).delete(canonicalName);
   }
 }
 
@@ -1755,6 +1795,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       }
     },
   );
+  captureCallerTool(server, def.name, toolConfig, inputShape, outputShape);
 
   // M365 PREFIX-STRIP COMPAT SHIM (2026-07-26, WIDENED + HARDENED 2026-07-28): M365 Copilot's own
   // tool-calling orchestrator has been observed splitting a registered tool name on its first

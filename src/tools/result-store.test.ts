@@ -23,6 +23,13 @@ const {
   compactResultJsonWritesEnabled,
 } = await import('./result-store.js');
 const { handleGatewayFetchResult } = await import('./gateway-fetch-result.js');
+const { resultProjectionLogFields } = await import('../audit/result-projection.js');
+
+async function captureResultProjection<T>(run: (log: (measurement: Parameters<typeof resultProjectionLogFields>[0]) => void) => Promise<T>) {
+  const events: Parameters<typeof resultProjectionLogFields>[0][] = [];
+  const value = await run((measurement) => events.push(measurement));
+  return { value, events: events.map(resultProjectionLogFields) };
+}
 
 async function withCompactJsonMode<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
   const previous = process.env[COMPACT_RESULT_JSON_MODE_ENV];
@@ -41,6 +48,62 @@ test('compact serialization writes require exact opt-in and default off', async 
   await withCompactJsonMode('off', async () => assert.equal(compactResultJsonWritesEnabled(), false));
   await withCompactJsonMode('ON', async () => assert.equal(compactResultJsonWritesEnabled(), false));
   await withCompactJsonMode('on', async () => assert.equal(compactResultJsonWritesEnabled(), true));
+});
+
+test('successful result offload logs original UTF-8 bytes and initial preview bytes without content', async () => {
+  const store = fakeResultStore();
+  const fullText = 'oversized synthetic result '.repeat(2000);
+  const { value: outcome, events } = await captureResultProjection((logProjection) =>
+    offloadResult(fullText, { payload: fullText }, 'corr_synthetic', '9'.repeat(64), { ...store.deps, logProjection }));
+  assert.ok(outcome);
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0], {
+    type: 'result_projection',
+    outcome: 'offloaded',
+    size_class: '40KiB-64KiB',
+    original_bytes: Buffer.byteLength(fullText, 'utf8'),
+    initial_return_bytes: Buffer.byteLength(outcome.preview, 'utf8'),
+  });
+  assert.equal(JSON.stringify(events).includes(fullText.slice(0, 30)), false);
+});
+
+test('storage failure logs fail_open and returns null so the caller keeps the inline result', async () => {
+  const store = fakeResultStore();
+  const fullText = 'large synthetic inline fallback '.repeat(1800);
+  const failingDeps = {
+    ...store.deps,
+    upsertDoc: async () => { throw new Error('private storage detail'); },
+  };
+  const { value: outcome, events } = await captureResultProjection((logProjection) =>
+    offloadResult(fullText, { payload: fullText }, 'corr_synthetic', '8'.repeat(64), { ...failingDeps, logProjection }));
+  assert.equal(outcome, null);
+  assert.deepEqual(events, [{
+    type: 'result_projection',
+    outcome: 'fail_open',
+    size_class: '40KiB-64KiB',
+    original_bytes: Buffer.byteLength(fullText, 'utf8'),
+    initial_return_bytes: Buffer.byteLength(fullText, 'utf8'),
+  }]);
+  assert.equal(JSON.stringify(events).includes('private storage detail'), false);
+});
+
+test('successful fetch logs retrieved page bytes and fixed pagination counts', async () => {
+  const store = fakeResultStore();
+  const data = { payload: 'r'.repeat(PAGE_CHARS + 50) };
+  const outcome = await offloadResult(JSON.stringify(data), data, 'corr_synthetic', '7'.repeat(64), store.deps);
+  assert.ok(outcome);
+  const { value: fetched, events } = await captureResultProjection((logProjection) =>
+    fetchStoredResult(outcome.resultId, 0, '7'.repeat(64), { ...store.deps, logProjection }));
+  assert.equal(fetched.found, true);
+  assert.deepEqual(events[0], {
+    type: 'result_projection',
+    outcome: 'retrieved',
+    size_class: 'under-40KiB',
+    original_bytes: Buffer.byteLength(JSON.stringify(data, null, 2), 'utf8'),
+    returned_bytes: Buffer.byteLength(fetched.chunk!, 'utf8'),
+    page: 0,
+    pages: 2,
+  });
 });
 
 test('extractResultSummary: Xero list envelope -> pagination + array lengths, nothing else copied', () => {

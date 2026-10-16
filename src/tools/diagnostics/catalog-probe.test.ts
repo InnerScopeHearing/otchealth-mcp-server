@@ -59,6 +59,45 @@ test('catalog_probe surfaces the current request context (caller_agent / m365 / 
   assert.ok('is_connector_surface' in rc);
 });
 
+test('legacy no-argument catalog_probe adds scoped freshness data while labeling the historical global count', async () => {
+  const { server, handlers } = fakeServer();
+  registerCatalogProbe(server, () => 'caller-hash');
+  const result = (await handlers.catalog_probe!({})) as {
+    structuredContent: { result: { tool_registry_scope: string; caller_surface_tool_count: number; caller_surface_fingerprint: string } };
+  };
+  const data = result.structuredContent.result;
+  assert.equal(data.tool_registry_scope, 'global_catalog');
+  assert.equal(data.caller_surface_tool_count, 1);
+  assert.match(data.caller_surface_fingerprint, /^[a-f0-9]{64}$/);
+});
+
+test('catalog_probe discovery is scoped, bounded, and names-only unless schema is explicitly requested', async () => {
+  const { server, handlers } = fakeServer();
+  registerCatalogProbe(server, () => 'caller-hash');
+  const result = (await handlers.catalog_probe!({ discovery_query: 'catalog probe', discovery_limit: 10 })) as {
+    structuredContent: { result: { discovery: { matches: Array<Record<string, unknown>>; totalMatches: number; truncated: boolean } } };
+  };
+  const discovery = result.structuredContent.result.discovery;
+  assert.deepEqual(discovery.matches.map(({ name }) => name), ['catalog_probe']);
+  assert.equal(discovery.totalMatches, 1);
+  assert.equal(discovery.truncated, false);
+  assert.ok((discovery.matches[0]?.description as string).length <= 160);
+  assert.equal('inputSchema' in discovery.matches[0]!, false);
+
+  const withSchema = (await handlers.catalog_probe!({ discovery_query: 'catalog_probe', include_schema: true })) as {
+    structuredContent: { result: { discovery: { matches: Array<Record<string, unknown>>; schema_included: boolean } } };
+  };
+  assert.equal(withSchema.structuredContent.result.discovery.schema_included, true);
+  assert.equal('inputSchema' in withSchema.structuredContent.result.discovery.matches[0]!, true);
+
+  const broadSchema = (await handlers.catalog_probe!({ discovery_query: 'catalog probe', include_schema: true })) as {
+    structuredContent: { result: { discovery: { matches: Array<Record<string, unknown>>; schema_included: boolean; schema_omitted_reason: string } } };
+  };
+  assert.deepEqual(broadSchema.structuredContent.result.discovery.matches, []);
+  assert.equal(broadSchema.structuredContent.result.discovery.schema_included, false);
+  assert.equal(broadSchema.structuredContent.result.discovery.schema_omitted_reason, 'exact_tool_name_required');
+});
+
 test('catalog_probe reports itself as present in the known_tools_present probe list (self-registration sanity check)', async () => {
   const { server, handlers } = fakeServer();
   registerCatalogProbe(server, () => 'caller-hash');
