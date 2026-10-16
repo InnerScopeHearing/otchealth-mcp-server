@@ -249,6 +249,16 @@ export class BrowserFileBroker {
     const stored = await this.load(owner, fileId, principalHash);
     if (!stored) fail('owner_forbidden', 'File is unavailable to this owner.');
     if (stored.record.status !== 'ready' || (this.options.scanner && stored.record.scanReceipt === undefined)) fail('file_not_ready', 'File is not cleared for browser transfer.');
+    // Apply current PDF container policy to the exact integrity-checked bytes,
+    // including records staged before a validator update. No old ready bit can bypass it.
+    if (stored.record.contentType === 'application/pdf') {
+      let complete = false;
+      try {
+        const verdict = await this.options.validator?.validate({ contentType: stored.record.contentType, body: new Uint8Array(stored.body) });
+        complete = verdict?.complete === true;
+      } catch { /* Current policy failures remain closed without parser diagnostics. */ }
+      if (!complete) fail('file_not_ready', 'File is not cleared for browser transfer.');
+    }
     return { record: cloneRecord(stored.record), body: new Uint8Array(stored.body) };
   }
 

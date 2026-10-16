@@ -7,6 +7,8 @@ import { promisify } from 'node:util';
 const MAX_BINARY_BYTES = 10 * 1024 * 1024;
 const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 const MAX_STDOUT_BYTES = 32 * 1024;
+// Stream bodies are omitted; bound the complete decoded object inventory separately.
+const MAX_PDF_JSON_BYTES = 4 * 1024 * 1024;
 const TOOL_TIMEOUT_MS = 5_000;
 const MAX_IMAGE_PIXELS = 16_000_000;
 
@@ -69,6 +71,37 @@ function validInput(input: BrowserBinaryValidationInput): boolean {
     ['application/pdf', 'image/png', 'image/jpeg'].includes(input.contentType);
 }
 
+function dictionary(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function assertPdfHasNoAttachments(output: string): void {
+  if (Buffer.byteLength(output, 'utf8') > MAX_PDF_JSON_BYTES) throw new Error('invalid binary');
+  const document: unknown = JSON.parse(output);
+  if (!dictionary(document) || document.version !== 2 || !dictionary(document.attachments) ||
+      Object.keys(document.attachments).length !== 0 || !Array.isArray(document.qpdf) || document.qpdf.length !== 2 ||
+      !dictionary(document.qpdf[0]) || document.qpdf[0].jsonversion !== 2 ||
+      !dictionary(document.qpdf[1]) || !dictionary(document.qpdf[1].trailer)) throw new Error('invalid binary');
+
+  // qpdf decodes escaped PDF names and includes every object (not only the named
+  // attachment tree). Inspect dictionaries, never substrings in document text.
+  // This policy refuses embedded/associated files and portfolios; it is not an AV verdict.
+  const pending: unknown[] = [document.qpdf[1]];
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (Array.isArray(value)) {
+      for (const child of value) pending.push(child);
+    } else if (dictionary(value)) {
+      for (const [key, child] of Object.entries(value)) {
+        if (['/EF', '/AF', '/EmbeddedFiles', '/Collection'].includes(key) ||
+            (key === '/Type' && child === '/EmbeddedFile') ||
+            (key === '/Subtype' && child === '/FileAttachment')) throw new Error('invalid binary');
+        pending.push(child);
+      }
+    }
+  }
+}
+
 /**
  * Creates the server-only structural validator used by browser captures and staged binary uploads.
  * Structural completeness does not scan for malware and must not be described as an antivirus verdict.
@@ -104,6 +137,11 @@ export function createTrustedBrowserBinaryValidator(options: TrustedBrowserBinar
               !Number.isSafeInteger(pageCount) || pageCount < 1 || pageCount > 100) {
             throw new Error('invalid binary');
           }
+          const inspection = await runTool('prlimit', [
+            '--as=536870912:536870912', '--cpu=4:4', '--', 'qpdf', '--json=2',
+            '--json-key=attachments', '--json-key=qpdf', '--json-stream-data=none', filePath,
+          ], TOOL_TIMEOUT_MS, MAX_PDF_JSON_BYTES);
+          assertPdfHasNoAttachments(inspection.stdout);
           return { complete: true, pageCount };
         }
 

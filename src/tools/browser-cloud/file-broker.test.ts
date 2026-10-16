@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+import { createTrustedBrowserBinaryValidator } from './binary-validation.js';
 import type { BrowserFileScanReceipt } from './file-broker.js';
 
 type FileStatus = 'quarantined' | 'ready' | 'partial';
@@ -59,6 +61,8 @@ class MemoryFileStore implements BrowserFileStore {
 const receipt = (body: Uint8Array, now: number): BrowserFileScanReceipt => ({ verdict: 'clean', scanner: 'clamav', sha256: sha(body), byteLength: body.byteLength, scannedAt: now, engineVersion: '1.4.3', signatureVersion: '27832', signaturesUpdatedAt: now - 1000 });
 const cleanScanner: BrowserFileScanner = { scan: async ({ body }) => receipt(body, 1_800_000_000_000) };
 const NO_SCANNER = Symbol('no scanner');
+const qpdfAvailable = spawnSync('qpdf', ['--version'], { stdio: 'ignore' }).status === 0 &&
+  spawnSync('prlimit', ['--version'], { stdio: 'ignore' }).status === 0;
 function broker(store = new MemoryFileStore(), scanner: BrowserFileScanner | undefined | typeof NO_SCANNER = cleanScanner, now: number | (() => number) = 1_800_000_000_000, validator?: BrowserFileValidator) {
   assert.ok(BrowserFileBroker, 'file broker capability missing');
   const nowFn = typeof now === 'function' ? now : () => now;
@@ -226,6 +230,69 @@ test('missing, throwing, or negative binary validation stays quarantined', async
   assert.equal((await throwing.broker.stage('cfo', { filename: 'doc.pdf', contentType: 'application/pdf', body: pdf })).status, 'quarantined');
   const negative = broker(new MemoryFileStore(), cleanScanner, 1_800_000_000_000, { validate: async () => ({ complete: false }) });
   assert.equal((await negative.broker.stage('cfo', { filename: 'doc.pdf', contentType: 'application/pdf', body: pdf })).status, 'quarantined');
+});
+
+test('PDF transfers revalidate current policy after owner and hash checks, including previously ready records', async () => {
+  const pdf = new TextEncoder().encode('%PDF-1.7\n%%EOF');
+  const store = new MemoryFileStore();
+  let allowed = true;
+  let calls = 0;
+  const validator: BrowserFileValidator = { validate: async () => { calls += 1; if (!allowed) throw new Error('private attachment details'); return { complete: true }; } };
+  const { broker: files } = broker(store, cleanScanner, 1_800_000_000_000, validator);
+  const staged = await files.stage('cfo', { filename: 'existing.pdf', contentType: 'application/pdf', body: pdf }, 'a'.repeat(64));
+  assert.equal(staged.status, 'ready');
+  assert.equal(calls, 1);
+  assert.deepEqual((await files.forUpload('cfo', staged.id, 'a'.repeat(64))).body, pdf);
+  assert.equal(calls, 2);
+  allowed = false;
+  await assert.rejects(files.forUpload('cfo', staged.id, 'a'.repeat(64)), /not cleared/i);
+  assert.equal(calls, 3);
+  await assert.rejects(files.forUpload('cfo', staged.id, 'b'.repeat(64)), /owner/i);
+  assert.equal(calls, 3, 'foreign principal never reaches the parser');
+  store.rows.get(store.keys[0]!)!.body[0] ^= 1;
+  await assert.rejects(files.forUpload('cfo', staged.id, 'a'.repeat(64)), /integrity/i);
+  assert.equal(calls, 3, 'corrupted bytes never reach the parser');
+});
+
+test('previously ready PDFs cannot transfer without current positive validation', async () => {
+  const body = new TextEncoder().encode('%PDF-1.7\n%%EOF');
+  for (const validator of [undefined, { validate: async () => ({ complete: false }) }]) {
+    const store = new MemoryFileStore();
+    const staged = await broker(store, cleanScanner, 1_800_000_000_000, { validate: async () => ({ complete: true }) }).broker.stage('cfo', { filename: 'existing.pdf', contentType: 'application/pdf', body });
+    const { broker: files } = broker(store, cleanScanner, 1_800_000_000_000, validator);
+    await assert.rejects(files.forUpload('cfo', staged.id), /not cleared/i);
+  }
+});
+
+test('real parser preserves the exact ordinary PDF with a clean AV receipt', { skip: !qpdfAvailable }, async () => {
+  const body = Buffer.from('JVBERi0xLjQKJSBwcm9vZjIwMjYxMDE2IHN5bnRoZXRpYyBvbmx5CjEgMCBvYmoKPDwgL1R5cGUgL0NhdGFsb2cgL1BhZ2VzIDIgMCBSID4+CmVuZG9iagoyIDAgb2JqCjw8IC9UeXBlIC9QYWdlcyAvS2lkcyBbMyAwIFJdIC9Db3VudCAxID4+CmVuZG9iagozIDAgb2JqCjw8IC9UeXBlIC9QYWdlIC9QYXJlbnQgMiAwIFIgL01lZGlhQm94IFswIDAgNzIgNzJdIC9Db250ZW50cyA0IDAgUiA+PgplbmRvYmoKNCAwIG9iago8PCAvTGVuZ3RoIDQgPj4Kc3RyZWFtCnEKUQplbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA1CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDA0MCAwMDAwMCBuIAowMDAwMDAwMDg5IDAwMDAwIG4gCjAwMDAwMDAxNDYgMDAwMDAgbiAKMDAwMDAwMDIzMSAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDUgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjI4MwolJUVPRgo=', 'base64');
+  assert.equal(body.byteLength, 446);
+  assert.equal(sha(body), 'd567cb68ae0ab27533326f9a113bd4a1146a6672037ea78a06d57fa705197a7b');
+  const { broker: files } = broker(new MemoryFileStore(), cleanScanner, 1_800_000_000_000, createTrustedBrowserBinaryValidator());
+  const staged = await files.stage('cfo', { filename: 'proof20261016-clean.pdf', contentType: 'application/pdf', body }, 'a'.repeat(64));
+  assert.equal(staged.status, 'ready');
+  assert.deepEqual((await files.forUpload('cfo', staged.id, 'a'.repeat(64))).body, new Uint8Array(body));
+});
+
+test('real parser quarantines the exact synthetic attachment PDF despite a clean AV receipt and blocks old-ready transfer', { skip: !qpdfAvailable }, async () => {
+  // Public synthetic gateway regression: exact 849-byte PDF with a standard EICAR test attachment.
+  const body = Buffer.from('JVBERi0xLjQKJSBwcm9vZjIwMjYxMDE2IHN5bnRoZXRpYyBFSUNBUiBhdHRhY2htZW50IG9ubHkKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgL05hbWVzIDw8IC9FbWJlZGRlZEZpbGVzIDw8IC9OYW1lcyBbKGVpY2FyLmNvbSkgNSAwIFJdID4+ID4+ID4+CmVuZG9iagoyIDAgb2JqCjw8IC9UeXBlIC9QYWdlcyAvS2lkcyBbMyAwIFJdIC9Db3VudCAxID4+CmVuZG9iagozIDAgb2JqCjw8IC9UeXBlIC9QYWdlIC9QYXJlbnQgMiAwIFIgL01lZGlhQm94IFswIDAgNzIgNzJdIC9Db250ZW50cyA0IDAgUiA+PgplbmRvYmoKNCAwIG9iago8PCAvTGVuZ3RoIDQgPj4Kc3RyZWFtCnEKUQplbmRzdHJlYW0KZW5kb2JqCjUgMCBvYmoKPDwgL1R5cGUgL0ZpbGVzcGVjIC9GIChlaWNhci5jb20pIC9VRiAoZWljYXIuY29tKSAvRUYgPDwgL0YgNiAwIFIgPj4gPj4KZW5kb2JqCjYgMCBvYmoKPDwgL1R5cGUgL0VtYmVkZGVkRmlsZSAvU3VidHlwZSAvYXBwbGljYXRpb24jMkZvY3RldC1zdHJlYW0gL1BhcmFtcyA8PCAvU2l6ZSA2OCA+PiAvTGVuZ3RoIDY4ID4+CnN0cmVhbQpYNU8hUCVAQVBbNFxQWlg1NChQXik3Q0MpN30kRUlDQVItU1RBTkRBUkQtQU5USVZJUlVTLVRFU1QtRklMRSEkSCtIKgplbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA3CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDA1NyAwMDAwMCBuIAowMDAwMDAwMTY3IDAwMDAwIG4gCjAwMDAwMDAyMjQgMDAwMDAgbiAKMDAwMDAwMDMwOSAwMDAwMCBuIAowMDAwMDAwMzYxIDAwMDAwIG4gCjAwMDAwMDA0NDggMDAwMDAgbiAKdHJhaWxlcgo8PCAvU2l6ZSA3IC9Sb290IDEgMCBSID4+CnN0YXJ0eHJlZgo2NDYKJSVFT0YK', 'base64');
+  assert.equal(body.byteLength, 849);
+  assert.equal(sha(body), '32e92e9124c9d5b57ed8580a8ceb4a351c656c19d29f806d1dafb5faf261635e');
+  const validator = createTrustedBrowserBinaryValidator();
+  const principal = 'a'.repeat(64);
+  const { broker: files } = broker(new MemoryFileStore(), cleanScanner, 1_800_000_000_000, validator);
+  const staged = await files.stage('cfo', { filename: 'proof20261016-attachment.pdf', contentType: 'application/pdf', body }, principal);
+  assert.equal(staged.status, 'quarantined');
+  assert.equal((staged as typeof staged & { scanReceipt: BrowserFileScanReceipt }).scanReceipt.sha256, sha(body), 'the AV clean result is preserved, not relabeled infected');
+  await assert.rejects(files.forUpload('cfo', staged.id, principal), /not cleared/i);
+
+  const store = new MemoryFileStore();
+  const old = broker(store, cleanScanner, 1_800_000_000_000, { validate: async () => ({ complete: true }) }).broker;
+  const previouslyReady = await old.stage('cfo', { filename: 'proof20261016-old.pdf', contentType: 'application/pdf', body }, principal);
+  assert.equal(previouslyReady.status, 'ready');
+  const current = broker(store, cleanScanner, 1_800_000_000_000, validator).broker;
+  await assert.rejects(current.forUpload('cfo', previouslyReady.id, principal), /not cleared/i);
 });
 
 test('get is owner-bound and returns metadata without file bytes', async () => {
