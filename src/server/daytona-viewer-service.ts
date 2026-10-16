@@ -9,7 +9,7 @@ export interface DaytonaViewerMission {
 export interface DaytonaViewerGrant { url: string; expiresAt: number; grantHandle: string }
 export interface DaytonaViewerMissionBoundary {
   loadSession(id: string): Promise<DaytonaViewerMission | null>;
-  getViewerGrant(owner: string, id: string, principal: string, seconds: number): Promise<DaytonaViewerGrant>;
+  getViewerGrant(owner: string, id: string, principal: string, seconds: number, notAfter: number): Promise<DaytonaViewerGrant>;
   resumeViewerGrant(owner: string, id: string, principal: string, handle: string): Promise<DaytonaViewerGrant>;
   completeHumanInput(owner: string, id: string, principal: string): Promise<{ status: 'saved'; human_input_revoked: true }>;
   // Must resolve only after positive owned-grant revocation AND confirmed logical
@@ -73,7 +73,7 @@ export class DaytonaViewerHandoffService implements DaytonaViewerService {
     const { hash, row } = await this.claim(token, 'NEW', 'ISSUING');
     const seconds = Math.min(300, Math.floor((row.expiresAt - this.now()) / 1000));
     if (seconds < 1) throw new Error('viewer_unavailable');
-    const grant = await this.missions.getViewerGrant(row.owner, row.sessionId, row.principalHash, seconds);
+    const grant = await this.missions.getViewerGrant(row.owner, row.sessionId, row.principalHash, seconds, row.expiresAt);
     const view = this.view(grant, row);
     row.grantHandle = grant.grantHandle; row.grantExpiresAt = grant.expiresAt;
     await this.commit(hash, row, 'EXCHANGED');

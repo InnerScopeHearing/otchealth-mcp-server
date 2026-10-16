@@ -1,9 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { toJsonSchemaCompat } from '@modelcontextprotocol/sdk/server/zod-json-schema-compat.js';
 import type { CloudBrowserCdp } from './actions.js';
 const implementation = await import('./actions.js').catch((error: NodeJS.ErrnoException) => { if (error.code === 'ERR_MODULE_NOT_FOUND') return undefined; throw error; });
 const executeCloudBrowserInteraction = implementation?.executeCloudBrowserInteraction;
 const validateCloudBrowserAction = implementation?.validateCloudBrowserAction;
+
+test('generated tab-create URL pattern accepts complete HTTP URLs in full-match connector validators', () => {
+  assert.ok(implementation);
+  type Variant = { properties?: { type?: { const?: string }; url?: { pattern?: string } } };
+  const schema = toJsonSchemaCompat(implementation.cloudBrowserActionSchema, { strictUnions: true, pipeStrategy: 'input' }) as { anyOf?: Variant[]; oneOf?: Variant[] };
+  const pattern = (schema.anyOf ?? schema.oneOf ?? []).find(variant => variant.properties?.type?.const === 'tab_create')?.properties?.url?.pattern;
+  assert.equal(typeof pattern, 'string');
+  const fullMatch = new RegExp('^(?:' + pattern + ')$');
+  for (const url of ['https://www.linkedin.com/', 'http://example.com/path?public=test']) {
+    assert.equal(fullMatch.test(url), true);
+    assert.equal(implementation.cloudBrowserActionSchema.safeParse({ type: 'tab_create', url }).success, true);
+  }
+  for (const url of ['https://', 'file:///tmp/public', 'javascript:alert(1)']) {
+    assert.equal(implementation.cloudBrowserActionSchema.safeParse({ type: 'tab_create', url }).success, false);
+  }
+});
 
 class RecordingCdp implements CloudBrowserCdp {
   readonly calls: Array<{ method: string; params: Record<string, unknown> }> = [];

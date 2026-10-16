@@ -90,3 +90,8 @@ export class DaytonaBrowserError extends Error {
     super(message); this.name = 'DaytonaBrowserError';
   }
 }
+
+/** Trusted negative receipt: deadline elapsed BEFORE invoking any viewer port. */
+export class DaytonaViewerNotMintedError extends DaytonaBrowserError {
+  constructor() { super('viewer_deadline_expired_before_mint'); }
+}

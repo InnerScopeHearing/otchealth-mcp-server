@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { CloudBrowserAction } from '../browser-cloud/contract.js';
 import { validateCloudBrowserAction } from '../browser-cloud/actions.js';
-import { DaytonaBrowserError, type DaytonaBinding, type DaytonaBrowserStore, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness } from './contract.js';
+import { DaytonaBrowserError, DaytonaViewerNotMintedError, type DaytonaBinding, type DaytonaBrowserStore, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness } from './contract.js';
 import { assertDaytonaBinding, assertDaytonaMission } from './store.js';
 const HASH = /^[a-f0-9]{64}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -137,17 +137,37 @@ export class DaytonaBrowserService {
       ...(proof.runtimeProtocol === 2 ? { runtimeProtocol: 2, multiMissionReady: proof.multiMissionReady } : {}),
       ...(proof.browserPid === undefined ? {} : { browserPid: proof.browserPid }), ...(proof.supervisorPid === undefined ? {} : { supervisorPid: proof.supervisorPid }) };
   }
-  async getViewerGrant(caller: string, id: string, principal?: string, requestedSeconds = 300): Promise<{ url: string; expiresAt: number; grantHandle: string }> {
-    if (!Number.isSafeInteger(requestedSeconds) || requestedSeconds < 1 || requestedSeconds > 300) return fail('invalid_duration');
+  async getViewerGrant(caller: string, id: string, principal?: string, requestedSeconds = 300, notAfter?: number): Promise<{ url: string; expiresAt: number; grantHandle: string }> {
+    if (!Number.isSafeInteger(requestedSeconds) || requestedSeconds < 1 || requestedSeconds > 300 || (notAfter !== undefined && (!Number.isSafeInteger(notAfter) || notAfter <= this.now()))) return fail('invalid_duration');
     return this.locked(caller, id, principal, async (binding, session, lock) => {
-      await this.active(binding, session); const seconds = Math.min(requestedSeconds, Math.floor((session.expiresAt - this.now()) / 1000)); if (seconds < 1) return fail('session_expired');
+      await this.active(binding, session);
+      // Relative seconds computed before readiness/pause can outlive a shorter
+      // handoff ticket. Preserve that original absolute cap through minting.
+      const grantDeadline = Math.min(session.expiresAt, notAfter ?? session.expiresAt);
+      const seconds = Math.min(requestedSeconds, Math.floor((grantDeadline - this.now()) / 1000)); if (seconds < 1) return fail('session_expired');
       if (session.runtimeProtocol === 2 && (!this.provider.pauseAutomation || !this.provider.resumeAutomation)) return fail('daytona_handoff_unavailable');
       session.sensitiveOutputSuppressed = true; session.effectUnknown = true; await this.store.saveSessionUnderLock(session, lock);
       if (session.runtimeProtocol === 2) {
         try { const paused = await this.provider.pauseAutomation!(binding, session); if (paused.paused !== true) return fail('daytona_pause_unconfirmed'); }
         catch (error) { if (beforeEffectBusy(session, error)) { session.sensitiveOutputSuppressed = false; session.effectUnknown = false; await this.store.saveSessionUnderLock(session, lock); } throw error; }
       }
-      const grant = await this.provider.viewerGrant(binding, seconds, session.expiresAt);
+      let grant: Awaited<ReturnType<DaytonaProvider['viewerGrant']>>;
+      try {
+        if (Math.floor((grantDeadline - this.now()) / 1000) < 1) throw new DaytonaViewerNotMintedError();
+        grant = await this.provider.viewerGrant(binding, seconds, grantDeadline);
+      } catch (error) {
+        if (error instanceof DaytonaViewerNotMintedError) {
+          // No viewer port was invoked. Restore only the acknowledged pause;
+          // an unknown resume or any ordinary mint failure retains the fence.
+          if (session.runtimeProtocol === 2) {
+            const receipt = await this.provider.resumeAutomation!(binding, session);
+            if (receipt.resumed !== true) return fail('daytona_resume_unconfirmed');
+          }
+          session.sensitiveOutputSuppressed = false; session.effectUnknown = false;
+          await this.store.saveSessionUnderLock(session, lock);
+        }
+        throw error;
+      }
       if (!UUID.test(grant.grantHandle)) return fail('viewer_grant_invalid');
       // A UUID alone is not ownership proof. The trusted vault read is bound to
       // this enrollment; a foreign handle must never become a cleanup target.
@@ -160,18 +180,18 @@ export class DaytonaBrowserService {
           const receipt = await this.provider.revokeViewerGrant(binding, grant.grantHandle);
           if (receipt.human_input_revoked === true) {
             session.viewerGrantHandle = grant.grantHandle;
-            session.viewerExpiresAt = Number.isSafeInteger(grant.expiresAt) && grant.expiresAt > 0 ? Math.min(grant.expiresAt, session.expiresAt) : session.expiresAt;
+            session.viewerExpiresAt = Number.isSafeInteger(grant.expiresAt) && grant.expiresAt > 0 ? Math.min(grant.expiresAt, grantDeadline) : grantDeadline;
             await this.store.saveSessionUnderLock(session, lock);
           }
         } catch { /* foreign or unknown handle stays untrusted and fenced */ }
         throw error;
       }
       if (owned.grantHandle !== grant.grantHandle || !Number.isSafeInteger(owned.expiresAt) || owned.expiresAt <= 0) return fail('viewer_grant_invalid');
-      session.viewerGrantHandle = owned.grantHandle; session.viewerExpiresAt = Math.min(owned.expiresAt, session.expiresAt);
+      session.viewerGrantHandle = owned.grantHandle; session.viewerExpiresAt = Math.min(owned.expiresAt, grantDeadline);
       await this.store.saveSessionUnderLock(session, lock);
       try {
         const url = new URL(grant.url);
-        if (grant.url !== owned.url || grant.expiresAt !== owned.expiresAt || url.protocol !== 'https:' || url.username || url.password || !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= this.now() || grant.expiresAt > Math.min(session.expiresAt, this.now() + seconds * 1000)) return fail('viewer_grant_invalid');
+        if (grant.url !== owned.url || grant.expiresAt !== owned.expiresAt || url.protocol !== 'https:' || url.username || url.password || !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= this.now() || grant.expiresAt > Math.min(grantDeadline, this.now() + seconds * 1000)) return fail('viewer_grant_invalid');
       } catch {
         // Keep the durable handle/unknown fence even if cleanup or its ACK is
         // lost. stop() can then retry only the vault's governed revoke path.

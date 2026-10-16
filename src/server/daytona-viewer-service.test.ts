@@ -66,6 +66,24 @@ test('Daytona bearer adapter rejects foreign/expired missions before minting and
   assert.deepEqual(f.calls, []);
 });
 
+test('delayed viewer exchange passes the unchanged absolute ticket deadline to grant creation', async () => {
+  const f = fixture();
+  const started = await f.service.issue('cto', SESSION, PRINCIPAL, 300);
+  const token = new URLConstructor(started.login_url).hash.slice(7);
+  let mints = 0;
+  f.missions.getViewerGrant = async (...args) => {
+    const notAfter = (args as unknown[])[4];
+    assert.equal(notAfter, started.expires_at);
+    mints++; f.advance(1_224);
+    return { url: URL, grantHandle: HANDLE, expiresAt: Math.min(NOW + 301_224, notAfter as number) };
+  };
+  const view = await f.service.exchange(token);
+  assert.equal(view.expires_at, started.expires_at);
+  assert.equal([...f.rows.values()][0]!.expiresAt, started.expires_at);
+  assert.equal([...f.rows.values()][0]!.phase, 'EXCHANGED');
+  assert.equal(mints, 1);
+});
+
 test('Daytona mint ambiguity and lost durable grant receipt retain permanent effect fence and lease without retries', async () => {
   for (const mode of ['provider', 'store']) {
     const f = fixture();

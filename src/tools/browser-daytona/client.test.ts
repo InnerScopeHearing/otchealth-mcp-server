@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
-import type { DaytonaBinding, DaytonaMission } from './contract.js';
+import { DaytonaViewerNotMintedError, type DaytonaBinding, type DaytonaMission } from './contract.js';
 
 const binding: DaytonaBinding = { provider: 'daytona', owner: 'cto', ownerSubjectHash: 'a'.repeat(64), sandboxId: 'sandbox-one', profileKey: 'profile-one', profilePath: '/home/otcbrowser/.local/share/otchealth-browser/profile-one/chromium', readinessReceiptSha256: 'b'.repeat(64) };
 const mission: DaytonaMission = { provider: 'daytona', sessionId: '12345678-1234-4234-8234-123456789abc', owner: 'cto', ownerSubjectHash: binding.ownerSubjectHash, profileKey: binding.profileKey, sandboxId: binding.sandboxId, expiresAt: Date.now() + 180000, actionsUsed: 1, actionBudget: 25, effectUnknown: true, phase: 'ACTIVE' };
@@ -59,6 +59,19 @@ test('inspect reads only the exact enrolled sandbox and requires actual started 
   n.state.sandbox.id = 'foreign'; await assert.rejects(c.inspect(binding));
   n.state.sandbox.id = binding.sandboxId; n.state.sandbox.public = true; await assert.rejects(c.openMission(binding, mission.sessionId));
   assert.equal(n.requests.some(r => r.init.method === 'POST'), false);
+});
+test('expired viewer deadline is a typed no-mint receipt only before invoking the private viewer port', async () => {
+  let calls = 0;
+  let portError: Error = new Error('port failure');
+  const viewer = { mint: async () => { calls++; throw portError; }, read: async () => { throw new Error('unused'); }, revoke: async () => ({ human_input_revoked: true as const }) };
+  const c = await client({ viewer });
+  await assert.rejects(c.viewerGrant(binding, 60, Date.now() - 1), error => error instanceof DaytonaViewerNotMintedError);
+  assert.equal(calls, 0);
+  await assert.rejects(c.viewerGrant(binding, 60, Date.now() + 60_000), error => !(error instanceof DaytonaViewerNotMintedError));
+  assert.equal(calls, 1);
+  portError = new DaytonaViewerNotMintedError();
+  await assert.rejects(c.viewerGrant(binding, 60, Date.now() + 60_000), error => !(error instanceof DaytonaViewerNotMintedError));
+  assert.equal(calls, 2);
 });
 test('checkpoint readiness is exact-binding runtime evidence and checkpoint requires trusted mission close/reopen proof', async () => {
   const n = network(); const c = await client({ fetchImpl: n.fetchImpl });

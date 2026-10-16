@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DaytonaBrowserService } from './service.js';
-import { DaytonaBrowserError, type DaytonaBinding, type DaytonaMission, type DaytonaBrowserStore, type DaytonaProvider } from './contract.js';
+import { DaytonaBrowserError, DaytonaViewerNotMintedError, type DaytonaBinding, type DaytonaMission, type DaytonaBrowserStore, type DaytonaProvider } from './contract.js';
 
 const hash = 'a'.repeat(64);
 const binding: DaytonaBinding = { provider: 'daytona', owner: 'cto', ownerSubjectHash: hash, sandboxId: 'sandbox-one', profileKey: 'profile-one', profilePath: '/home/otcbrowser/.local/share/otchealth-browser/profile-one/chromium', readinessReceiptSha256: 'b'.repeat(64) };
@@ -32,7 +32,7 @@ function fixture() {
     readViewerGrant: async (_b, grantHandle) => ({ url: 'https://6080-synthetic.proxy.daytona.works/', expiresAt: grantExpiry, grantHandle }),
     revokeViewerGrant: async () => { state.revoked++; state.flow.push('revoke'); if (state.revokeFails) throw new Error('unknown revoke'); return { human_input_revoked: true }; },
   };
-  return { service: new DaytonaBrowserService(store, provider, () => now), state, sessions, leases, locks, bindings, store, advance: (ms: number) => { now += ms; } };
+  return { service: new DaytonaBrowserService(store, provider, () => now), state, sessions, leases, locks, bindings, store, provider, advance: (ms: number) => { now += ms; } };
 }
 const code = (expected: string) => (e: unknown) => e instanceof DaytonaBrowserError && e.code === expected;
 test('same tool facade opens only an enrolled private running sandbox and maintains a distinct Daytona mission', async () => {
@@ -102,6 +102,53 @@ test('human control stays suppressed until exact grant revocation precedes check
   assert.deepEqual(h.state.flow, ['revoke', 'checkpoint']); assert.equal(h.sessions.get(opened.sessionId)!.sensitiveOutputSuppressed, false);
   assert.equal(h.state.checkpointSession?.sessionId, opened.sessionId);
   assert.equal(h.sessions.get(opened.sessionId)!.viewerGrantHandle, undefined);
+});
+test('human grant preserves the earlier absolute ticket deadline through delayed pause and mint', async () => {
+  const h = fixture(); h.state.runtimeProtocol = 2;
+  const opened = await h.service.start('cto', 'profile-one', 900, 5, hash);
+  const deadline = 301000, handle = '12345678-1234-1234-1234-123456789abc';
+  h.advance(100);
+  h.provider.pauseAutomation = async () => { h.advance(1_224); return { paused: true }; };
+  h.provider.viewerGrant = async (_binding, seconds, notAfter) => {
+    h.state.grants++; assert.equal(seconds, 299); assert.equal(notAfter, deadline);
+    return { url: 'https://6080-synthetic.proxy.daytona.works/', expiresAt: Math.min(301324, notAfter!), grantHandle: handle };
+  };
+  h.provider.readViewerGrant = async () => ({ url: 'https://6080-synthetic.proxy.daytona.works/', expiresAt: deadline, grantHandle: handle });
+  const grant = await h.service.getViewerGrant('cto', opened.sessionId, hash, 299, deadline);
+  assert.equal(grant.expiresAt, deadline); assert.equal(h.state.grants, 1); assert.equal(h.state.revoked, 0);
+  assert.equal(h.sessions.get(opened.sessionId)!.viewerExpiresAt, deadline);
+  assert.equal(h.sessions.get(opened.sessionId)!.expiresAt, opened.expiresAt);
+});
+test('known ticket expiry during acknowledged human pause resumes before clearing suppression without minting', async () => {
+  const h = fixture(); h.state.runtimeProtocol = 2;
+  const opened = await h.service.start('cto', 'profile-one', 900, 5, hash);
+  h.provider.pauseAutomation = async () => { h.state.flow.push('pause'); h.advance(2000); return { paused: true }; };
+  await assert.rejects(h.service.getViewerGrant('cto', opened.sessionId, hash, 1, 2000));
+  assert.deepEqual(h.state.flow, ['pause', 'resume']); assert.equal(h.state.grants, 0);
+  assert.equal(h.sessions.get(opened.sessionId)!.effectUnknown, false);
+  assert.equal(h.sessions.get(opened.sessionId)!.sensitiveOutputSuppressed, false);
+  await h.service.stop('cto', opened.sessionId, hash); assert.equal(h.state.released, 1);
+});
+test('expiry recovery with an ambiguous automation-resume acknowledgement retains the unknown fence', async () => {
+  const h = fixture(); h.state.runtimeProtocol = 2; h.state.resumeFails = true;
+  const opened = await h.service.start('cto', 'profile-one', 900, 5, hash);
+  h.provider.pauseAutomation = async () => { h.state.flow.push('pause'); h.advance(2000); return { paused: true }; };
+  await assert.rejects(h.service.getViewerGrant('cto', opened.sessionId, hash, 1, 2000));
+  assert.deepEqual(h.state.flow, ['pause', 'resume']); assert.equal(h.state.grants, 0);
+  assert.equal(h.sessions.get(opened.sessionId)!.effectUnknown, true);
+  assert.equal(h.sessions.get(opened.sessionId)!.sensitiveOutputSuppressed, true);
+  await assert.rejects(h.service.stop('cto', opened.sessionId, hash), code('viewer_revocation_unknown'));
+});
+test('only the trusted initial-client no-mint receipt permits resume and clearing; matching generic errors stay fenced', async () => {
+  for (const trusted of [true, false]) {
+    const h = fixture(); h.state.runtimeProtocol = 2;
+    const opened = await h.service.start('cto', 'profile-one', 900, 5, hash);
+    h.provider.viewerGrant = async () => { throw trusted ? new DaytonaViewerNotMintedError() : new DaytonaBrowserError('viewer_deadline_expired_before_mint'); };
+    await assert.rejects(h.service.getViewerGrant('cto', opened.sessionId, hash, 60, 61000));
+    assert.equal(h.state.flow.includes('resume'), trusted);
+    assert.equal(h.sessions.get(opened.sessionId)!.effectUnknown, !trusted);
+    assert.equal(h.sessions.get(opened.sessionId)!.sensitiveOutputSuppressed, !trusted);
+  }
 });
 test('unknown viewer grant or revocation never releases input ownership or retries provider writes', async () => {
   for (const failure of ['grant', 'revoke']) {
