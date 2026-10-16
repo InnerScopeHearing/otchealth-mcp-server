@@ -9,6 +9,7 @@ export type { DaytonaRuntimeReadiness } from './contract.js';
 import { assertDaytonaBinding, assertDaytonaMission } from './store.js';
 import { DaytonaTransferBridge, type DaytonaUploadDescriptor, type DaytonaDirectoryReceipt } from './transfer-bridge.js';
 import { uploadDaytonaControlledFile, type DaytonaStagePayload } from './toolbox-files.js';
+import { randomBytes, randomUUID } from 'node:crypto';
 
 type ViewerGrant = { url: string; expiresAt: number; grantHandle: string };
 /** Trusted server-only vault. Revoke must include actual native VNC disconnection proof. */
@@ -119,6 +120,9 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
   private async processWith(context: Context, base: URL, binding: DaytonaBinding, command: string, timeoutMs: number, binaryCapture = false): Promise<Record<string, unknown>> {
     context.remaining();
     const response = await this.json(context, `${base.href.replace(/\/+$/, '')}/${encodeURIComponent(binding.sandboxId)}/process/execute`, { method: 'POST', body: JSON.stringify({ command, timeout: Math.ceil(timeoutMs / 1000) }) }, binaryCapture ? CAPTURE_JSON_BYTES : ORDINARY_JSON_BYTES);
+    return this.parseProcessResult(response, binaryCapture);
+  }
+  private parseProcessResult(response: Record<string, unknown>, binaryCapture = false): Record<string, unknown> {
     const exitCode = response.exitCode ?? response.code;
     if (typeof response.result === 'string' && response.result.length > (binaryCapture ? CAPTURE_RESULT_CHARS : ORDINARY_RESULT_CHARS)) return fail('daytona_runtime_output_limit');
     if (typeof response.result !== 'string') return fail(exitCode === 0 ? 'daytona_runtime_invalid' : 'daytona_runtime_unavailable');
@@ -135,6 +139,95 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     }
     return record(parsed);
   }
+  private async privateInputWith(context: Context, base: URL, binding: DaytonaBinding, sessionId: string, principalHash: string,
+    payload: Record<string, unknown>, action: Extract<CloudBrowserAction, { type: 'type' | 'select' | 'dialog' }>): Promise<Record<string, unknown>> {
+    const privateSessionId = `otc-input-${randomUUID()}`;
+    const nonce = randomBytes(16).toString('hex');
+    let inputLine = JSON.stringify({ nonce, payload }) + '\n';
+    if (Buffer.byteLength(inputLine, 'utf8') > 8192) return fail('daytona_runtime_invalid');
+    const root = `${base.href.replace(/\/+$/, '')}/${encodeURIComponent(binding.sandboxId)}/process/session`;
+    context.remaining();
+    const token = context.token;
+    if (!token) return fail('daytona_credentials_unavailable');
+    const sessionCreated = await this.fetchImpl(root, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: privateSessionId }), redirect: 'error', signal: context.signal });
+    context.remaining();
+    if (!sessionCreated.ok) { await sessionCreated.body?.cancel().catch(() => undefined); return fail('daytona_provider_unavailable'); }
+    await sessionCreated.body?.cancel().catch(() => undefined);
+
+    const publicPayload: Record<string, unknown> = { ...payload, actionType: action.type };
+    delete publicPayload.action;
+    const encoded = Buffer.from(JSON.stringify(publicPayload)).toString('base64url');
+    if (encoded.length > 32768) return fail('daytona_runtime_invalid');
+    const command = `sudo -n runuser -u otcbrowser -- python3 -I /opt/otchealth-browser/browser-dispatcher.py --payload ${encoded} --private-stdin ${nonce}`;
+    const launch = await this.json(context, `${root}/${encodeURIComponent(privateSessionId)}/exec`, {
+      method: 'POST', body: JSON.stringify({ command, runAsync: true, suppressInputEcho: true }),
+    });
+    if (typeof launch.cmdId !== 'string' || !UUID.test(launch.cmdId)) return fail('daytona_runtime_invalid');
+    const commandPath = `${root}/${encodeURIComponent(privateSessionId)}/command/${encodeURIComponent(launch.cmdId)}`;
+    const readLogs = async (): Promise<string> => {
+      const logs = await this.json(context, `${commandPath}/logs`);
+      if (typeof logs.stdout !== 'string' || logs.stdout.length > ORDINARY_RESULT_CHARS) return fail('daytona_runtime_output_limit');
+      return logs.stdout;
+    };
+    const readyLine = (stdout: string): boolean => {
+      const lines = stdout.split(/\r?\n/).filter(Boolean);
+      if (lines.length !== 1) return false;
+      let value: unknown; try { value = JSON.parse(lines[0]); } catch { return false; }
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+      const ready = value as Record<string, unknown>;
+      return Object.keys(ready).length === 7 && ready.version === 1 && ready.event === 'input_ready' && ready.nonce === nonce
+        && ready.sessionId === sessionId && ready.profileKey === daytonaPhysicalProfileKey(binding) && ready.profilePath === binding.profilePath
+        && ready.principalHash === principalHash;
+    };
+    const readyDeadline = Date.now() + Math.min(5000, Math.max(0, context.remaining() - 1000));
+    let ready = false;
+    while (Date.now() < readyDeadline) {
+      context.remaining();
+      const stdout = await readLogs();
+      if (readyLine(stdout)) { ready = true; break; }
+      const commandStatus = await this.json(context, commandPath);
+      if (commandStatus.exitCode !== null && commandStatus.exitCode !== undefined) return fail('daytona_private_input_unavailable');
+      await new Promise(resolve => setTimeout(resolve, Math.min(150, Math.max(1, readyDeadline - Date.now()))));
+    }
+    if (!ready) return fail('daytona_private_input_unavailable');
+
+    // One private TLS stdin send only. Any uncertain acknowledgement is left to
+    // the durable mission unknown-effect fence; never replay this action.
+    let requestBody = JSON.stringify({ data: inputLine }); inputLine = '';
+    try {
+      const response = await this.fetchImpl(`${commandPath}/input`, {
+        method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: requestBody, redirect: 'error', signal: context.signal,
+      });
+      context.remaining();
+      await response.body?.cancel().catch(() => undefined);
+    } catch {
+      // The send may have reached the process despite a lost HTTP ACK. Reconcile
+      // only this exact command and nonce; never submit a second input.
+    } finally { requestBody = ''; }
+
+    const receiptDeadline = Date.now() + Math.max(0, context.remaining() - 250);
+    while (Date.now() < receiptDeadline) {
+      context.remaining();
+      const status = await this.json(context, commandPath);
+      const stdout = await readLogs();
+      const lines = stdout.split(/\r?\n/).filter(Boolean);
+      if (status.exitCode !== null && status.exitCode !== undefined) {
+        if (lines.length !== 2 || !readyLine(lines[0])) return fail('daytona_runtime_invalid');
+        return this.parseProcessResult({ exitCode: status.exitCode, result: lines[1] });
+      }
+      if (lines.length > 2 || lines.length === 2 && !readyLine(lines[0])) return fail('daytona_runtime_invalid');
+      await new Promise(resolve => setTimeout(resolve, Math.min(150, Math.max(1, receiptDeadline - Date.now()))));
+    }
+    return fail('daytona_provider_timeout');
+  }
+  private privateInputFits(binding: DaytonaBinding, session: DaytonaMission, action: Extract<CloudBrowserAction, { type: 'type' | 'select' | 'dialog' }>, timeoutSeconds: number): boolean {
+    const payload = { version: 1, op: 'execute', profileKey: daytonaPhysicalProfileKey(binding), profilePath: binding.profilePath,
+      timeoutMs: Math.min(14000, timeoutSeconds * 1000), sessionId: session.sessionId, action,
+      principalHash: binding.ownerSubjectHash, runtimeProtocol: 2 };
+    return Buffer.byteLength(`${JSON.stringify({ nonce: '0'.repeat(32), payload })}\n`, 'utf8') <= 8192;
+  }
   private async runtimeWith(context: Context, binding: DaytonaBinding, op: 'probe' | 'open' | 'execute' | 'release' | 'checkpoint' | 'human_pause' | 'human_resume', sessionId?: string, action?: CloudBrowserAction, principalHash?: string, timeoutSeconds = 18, upload?: DaytonaUploadDescriptor, runtimeProtocol?: 2): Promise<unknown> {
     assertDaytonaBinding(binding); if (sessionId !== undefined && !UUID.test(sessionId)) return fail('owner_forbidden');
     const base = await this.toolboxWith(context, binding);
@@ -144,9 +237,14 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     const payload = { version: 1, op, profileKey: physicalKey, profilePath: binding.profilePath, timeoutMs: Math.floor(timeoutMs), ...(sessionId ? { sessionId } : {}), ...(action ? { action } : {}), principalHash: principalHash ?? binding.ownerSubjectHash, ...(upload ? { upload } : {}), ...(runtimeProtocol === 2 ? { runtimeProtocol: 2 } : {}) };
     const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
     if (encoded.length > 32768) return fail('daytona_runtime_invalid');
-    const command = `sudo -n runuser -u otcbrowser -- python3 -I /opt/otchealth-browser/browser-dispatcher.py --payload ${encoded}`;
+    const privateAction = op === 'execute' && binding.owner === 'wefunder-campaign-director'
+      && action && ['type', 'select', 'dialog'].includes(action.type);
+    if (privateAction && (runtimeProtocol !== 2 || !sessionId || !principalHash)) return fail('daytona_action_unsupported');
+    const command = privateAction ? '' : `sudo -n runuser -u otcbrowser -- python3 -I /opt/otchealth-browser/browser-dispatcher.py --payload ${encoded}`;
     const binaryCapture = op === 'execute' && action?.type === 'capture' && (action.request.type === 'pdf' || action.request.type === 'screenshot' && (!action.request.format || action.request.format === 'png'));
-    const receipt = await this.processWith(context, base, binding, command, timeoutMs, binaryCapture);
+    const receipt = privateAction
+      ? await this.privateInputWith(context, base, binding, sessionId!, principalHash!, payload, action as Extract<CloudBrowserAction, { type: 'type' | 'select' | 'dialog' }>)
+      : await this.processWith(context, base, binding, command, timeoutMs, binaryCapture);
     // Only the V2 dispatcher promises these exact negative ACKs were emitted
     // before any effect. Nonzero exits and all other receipts stay unknown.
     if (runtimeProtocol === 2 && upload?.phase !== 'attach' && receipt.version === 1 && receipt.ok === false && receipt.beforeEffect === true && typeof receipt.code === 'string'
@@ -227,12 +325,19 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     this.assertMission(binding, session, principalHash);
     const checked = validateCloudBrowserAction(action);
     if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 120) return fail('invalid_duration');
+    if (binding.owner === 'wefunder-campaign-director' && ['type', 'select', 'dialog'].includes(checked.type) && session.runtimeProtocol !== 2) return fail('daytona_action_unsupported');
+    if (binding.owner === 'wefunder-campaign-director' && ['type', 'select', 'dialog'].includes(checked.type)
+      && !this.privateInputFits(binding, session, checked as Extract<CloudBrowserAction, { type: 'type' | 'select' | 'dialog' }>, timeoutSeconds)) return fail('daytona_runtime_invalid');
     if (checked.type === 'upload' || checked.type === 'upload_directory' || checked.type === 'capture') return this.transfer(binding, session, checked, timeoutSeconds, principalHash);
     if (checked.type === 'navigate' || checked.type === 'tab_create') {
       let url: URL; try { url = new URL(checked.url); } catch { return fail('destination_forbidden'); }
       if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) return fail('destination_forbidden');
     }
     const result = record(await this.runtime(binding, 'execute', session.sessionId, checked, principalHash, timeoutSeconds, session.runtimeProtocol));
+    if (binding.owner === 'wefunder-campaign-director' && ['type', 'select', 'dialog'].includes(checked.type)) {
+      if (Object.keys(result).length !== 2 || result.inputProcessed !== true || result.actionType !== checked.type) return fail('daytona_runtime_invalid');
+      return { observation: null };
+    }
     if ((result.url !== null && (typeof result.url !== 'string' || result.url.length > 2048)) || (result.title !== null && (typeof result.title !== 'string' || result.title.length > 1024)) || typeof result.visibleText !== 'string' || result.visibleText.length > 20000) return fail('daytona_runtime_invalid');
     if (typeof result.url === 'string') { let url: URL; try { url = new URL(result.url); } catch { return fail('daytona_runtime_invalid'); } if (!['https:', 'http:', 'about:'].includes(url.protocol) || (url.protocol === 'about:' && url.href !== 'about:blank') || url.username || url.password) return fail('destination_forbidden'); }
     let pageReceipt: BrowserPageReceipt | undefined;

@@ -10,7 +10,7 @@ const HASH=/^[a-f0-9]{64}$/;
 const MASTER='/otchealth/integrations/daytona/company-keyring-unlock-secret';
 const HELPER='/opt/otchealth-browser/role-browser-helper.py';
 const HELPER_SHA256='b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51';
-const WEFUNDER_HELPER_SHA256='cbd15ea480ccce50d95a32283d90204d1b2aad24ba29454c23c73342c1fe3bed';
+const WEFUNDER_HELPER_SHA256='62ee69b6c51685248ee45c3c51a8abbc3386918a76fb57ede8a1da4dd77782d6';
 const IDLE=600000, GRACE=180000, MONTHLY_WEIGHTED_MS=3100*3600000;
 type Roles=Readonly<Record<string,{sandboxId:string;readinessReceiptSha256:string}>>;
 type Launch={sessionId:string;commandId:string};

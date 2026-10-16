@@ -22,7 +22,7 @@ test('release packages the exact compiled WeFunder helper with its scoped lifecy
   assert.match(dockerfile, /^COPY --chown=app:app tools\/daytona-browser-runtime\/role-browser-helper\.py \.\/tools\/daytona-browser-runtime\/role-browser-helper\.py$/m);
   const helper = await readFile(new URL('../../tools/daytona-browser-runtime/role-browser-helper.py', import.meta.url));
   const helperSha256 = createHash('sha256').update(helper).digest('hex');
-  assert.equal(helperSha256, 'cbd15ea480ccce50d95a32283d90204d1b2aad24ba29454c23c73342c1fe3bed');
+  assert.equal(helperSha256, '62ee69b6c51685248ee45c3c51a8abbc3386918a76fb57ede8a1da4dd77782d6');
   const lifecycle = await readFile(new URL('../tools/browser-daytona/lifecycle.ts', import.meta.url), 'utf8');
   assert.ok(lifecycle.includes(`const WEFUNDER_HELPER_SHA256='${helperSha256}';`));
   assert.ok(lifecycle.includes("const HELPER_SHA256='b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51';"));
