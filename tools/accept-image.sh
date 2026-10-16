@@ -50,14 +50,20 @@ timeout 90s docker run --rm --platform "$PLATFORM" --network none \
       const pprof = require("@datadog/pprof");
       if (typeof pprof.time?.start !== "function") throw Error("Datadog native profiler module did not load");
       // Dedicated browser image bytes: begin
-      const expectedRoleHelper = "b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51";
+      const expectedRoleHelper = "cbd15ea480ccce50d95a32283d90204d1b2aad24ba29454c23c73342c1fe3bed";
+      const expectedLegacyHelperPin = "b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51";
       const roleHelperBytes = fs.readFileSync("/app/tools/daytona-browser-runtime/role-browser-helper.py");
       const roleHelperDigest = createHash("sha256").update(roleHelperBytes).digest("hex");
       if (roleHelperDigest !== expectedRoleHelper) throw Error("image role helper hash mismatch");
       const compiledLifecycleBytes = fs.readFileSync("/app/dist/tools/browser-daytona/lifecycle.js");
-      const compiledHelperPins = [...compiledLifecycleBytes.toString("utf8").matchAll(/^const HELPER_SHA256 = (["\x27])([a-f0-9]{64})\1;$/gm)];
-      if (compiledHelperPins.length !== 1 || compiledHelperPins[0][2] !== expectedRoleHelper) throw Error("image compiled lifecycle helper pin mismatch");
-      console.log(JSON.stringify({role_helper_sha256:roleHelperDigest, compiled_lifecycle_sha256:createHash("sha256").update(compiledLifecycleBytes).digest("hex"), compiled_helper_pin:compiledHelperPins[0][2], provider_calls:0, network:"disabled"}));
+      const compiledLifecycleText = compiledLifecycleBytes.toString("utf8");
+      const legacyHelperPins = [...compiledLifecycleText.matchAll(/^const HELPER_SHA256 = (["\x27])([a-f0-9]{64})\1;$/gm)];
+      const wefunderHelperPins = [...compiledLifecycleText.matchAll(/^const WEFUNDER_HELPER_SHA256 = (["\x27])([a-f0-9]{64})\1;$/gm)];
+      if (legacyHelperPins.length !== 1 || legacyHelperPins[0][2] !== expectedLegacyHelperPin) throw Error("image compiled lifecycle legacy helper pin mismatch");
+      if (wefunderHelperPins.length !== 1 || wefunderHelperPins[0][2] !== expectedRoleHelper) throw Error("image compiled lifecycle WeFunder helper pin mismatch");
+      const fixedRoleAssignment = compiledLifecycleText.replace(/\s+/g, " ").includes("const helperSha256 = binding.owner === \x27wefunder-campaign-director\x27 ? WEFUNDER_HELPER_SHA256 : this.options.helperSha256;");
+      if (!fixedRoleAssignment) throw Error("image compiled lifecycle WeFunder role assignment mismatch");
+      console.log(JSON.stringify({role_helper_sha256:roleHelperDigest, compiled_lifecycle_sha256:createHash("sha256").update(compiledLifecycleBytes).digest("hex"), compiled_helper_pin:legacyHelperPins[0][2], compiled_wefunder_helper_pin:wefunderHelperPins[0][2], provider_calls:0, network:"disabled"}));
       // Dedicated browser image bytes: end
       console.log(JSON.stringify({node: process.versions.node, modules: process.versions.modules, arch: process.arch, glibc: process.report.getReport().header.glibcVersionRuntime, extraCa: extraStats, systemCa: systemStats, datadogElfMachine: machine, nativeProfilerLoaded: true}));
     '\''
