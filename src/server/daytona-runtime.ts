@@ -200,6 +200,9 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
       },
       execute: async (caller, id, action, seconds, principal) => { await approvedSession(caller, id, principal); return service.execute(caller, id, action, seconds, principal); },
       snapshot: async (caller, id, principal) => { await approvedSession(caller, id, principal); return service.snapshot(caller, id, principal); },
+      // Retained own-session status does not wake/probe a desktop or require
+      // live viewer admission. The service validates exact owner and principal.
+      status: service.status.bind(service),
       savePersistentProfile: async (caller, id, principal) => { await approvedSession(caller, id, principal); return service.savePersistentProfile(caller, id, principal); },
       stop: async (caller, id, principal) => {
         const previous = roleLifecycle && env.DAYTONA_AGENT_DESKTOP_TEMPLATES !== undefined ? await store.loadSession(id) : null;
@@ -218,9 +221,19 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
     };
     const tickets = dependencies.createTickets?.() ?? new DynamoDaytonaViewerTicketStore({ tableName: table(), region: region() });
     const missions: DaytonaViewerMissionBoundary = {
-      loadSession: id => store.loadSession(id),
+      loadSession: async id => {
+        const mission = await store.loadSession(id);
+        if (!mission) return null;
+        assertDaytonaMission(mission);
+        if (mission.sessionId !== id) return fail('owner_forbidden');
+        if (mission.phase !== 'CLOSED' || mission.effectUnknown) return mission;
+        const receipt = await service.status(mission.owner, id, mission.ownerSubjectHash);
+        return { ...mission, profileLeaseReleased: receipt.profile_lease_released };
+      },
       getViewerGrant: async (caller, id, principal, seconds, notAfter) => { await grantPreflight(caller, id, principal); return service.getViewerGrant(caller, id, principal, seconds, notAfter); },
-      resumeViewerGrant: async (caller, id, principal, handle) => { await approvedSession(caller, id, principal); return service.resumeViewerGrant(caller, id, principal, handle); }, completeHumanInput: service.completeHumanInput.bind(service), stop: browser.stop,
+      resumeViewerGrant: async (caller, id, principal, handle) => { await approvedSession(caller, id, principal); return service.resumeViewerGrant(caller, id, principal, handle); },
+      renewViewerGrant: async (caller, id, principal, handle, notAfter) => { await approvedSession(caller, id, principal); return service.renewViewerGrant(caller, id, principal, handle, notAfter); },
+      completeHumanInput: service.completeHumanInput.bind(service), stop: browser.stop,
     };
     // Admission must reject an unhealthy target inside owned(), BEFORE the
     // ticket CAS. Another healthy worker cannot strand this ticket in ISSUING
@@ -233,7 +246,13 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
     } });
     const cleanup = new DaytonaViewerHandoffService(tickets, missions);
     const viewers = { issue: async (...args: Parameters<DaytonaViewerHandoffService['issue']>) => { await approvedSession(args[0], args[1], args[2]); return handoff.issue(...args); },
-      exchange: async (token: string) => { requireExpiry(); return handoff.exchange(token); }, resume: async (token: string) => { requireExpiry(); return handoff.resume(token); },
+      prepare: handoff.prepare.bind(handoff),
+      openPrepared: async (...args: Parameters<DaytonaViewerHandoffService['openPrepared']>) => { requireExpiry(); return handoff.openPrepared(...args); },
+      recover: async (...args: Parameters<DaytonaViewerHandoffService['recover']>) => { requireExpiry(); return handoff.recover(...args); },
+      status: cleanup.status.bind(cleanup),
+      reconcile: cleanup.reconcile.bind(cleanup),
+      renew: async (...args: Parameters<DaytonaViewerHandoffService['renew']>) => { requireExpiry(); return handoff.renew(...args); },
+      exchange: async (...args: Parameters<DaytonaViewerHandoffService['exchange']>) => { requireExpiry(); return handoff.exchange(...args); }, resume: async (token: string) => { requireExpiry(); return handoff.resume(token); },
       // Cleanup remains possible after scheduler/config degradation. Health is
       // NOT a human-input-revoked receipt; the core still owns all mission fences.
       complete: cleanup.complete.bind(cleanup), expire: cleanup.expire.bind(cleanup) };

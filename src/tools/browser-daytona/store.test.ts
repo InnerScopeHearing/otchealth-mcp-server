@@ -79,6 +79,17 @@ test('V2 mission protocol is immutable receipt metadata and rejects unsupported 
   for (const runtimeProtocol of [1, 3, '2', null, undefined, true]) assert.throws(() => assertDaytonaMission({ ...mission, runtimeProtocol }));
 });
 
+test('human input completion receipt accepts only the complete exact-owner positive proof', () => {
+  const mission: DaytonaMission = { provider: 'daytona', sessionId: 'mission-one', owner: 'cto', ownerSubjectHash: binding.ownerSubjectHash, profileKey: binding.profileKey, sandboxId: binding.sandboxId, expiresAt: 2000, actionsUsed: 0, actionBudget: 5, effectUnknown: false, phase: 'ACTIVE' };
+  const receipt = { grantHandle: '12345678-1234-1234-1234-123456789abc', completedAt: 1500, human_input_revoked: true, profile_checkpointed: true, automation_resumed: true } as const;
+  assert.doesNotThrow(() => assertDaytonaMission({ ...mission, humanInputReceipt: receipt }));
+  for (const bad of [
+    { ...receipt, human_input_revoked: false }, { ...receipt, profile_checkpointed: undefined },
+    { ...receipt, automation_resumed: false }, { ...receipt, grantHandle: 'not-a-handle' },
+    { ...receipt, completedAt: -1 }, { ...receipt, bearer: 'secret' },
+  ]) assert.throws(() => assertDaytonaMission({ ...mission, humanInputReceipt: bad }));
+});
+
 function migrationFixture() {
   const old = { ...sharedBinding, sandboxId: '11111111-1111-4111-8111-111111111111' };
   const next = { ...old, sandboxId: '22222222-2222-4222-8222-222222222222', readinessReceiptSha256: 'c'.repeat(64) };

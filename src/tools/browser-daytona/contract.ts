@@ -38,6 +38,24 @@ export interface DaytonaMission {
   /** Opaque server grant ID only; the provider retains encrypted token material. */
   viewerGrantHandle?: string;
   viewerExpiresAt?: number;
+  humanInputReceipt?: DaytonaHumanInputReceipt;
+}
+
+export interface DaytonaHumanInputReceipt {
+  grantHandle: string;
+  completedAt: number;
+  human_input_revoked: true;
+  profile_checkpointed: true;
+  automation_resumed: true;
+}
+
+export interface DaytonaMissionStatus {
+  phase: DaytonaMission['phase'];
+  effectUnknown: boolean;
+  expiresAt: number;
+  human_control: 'agent' | 'human' | 'unknown' | 'released';
+  profile_lease_released: boolean;
+  receipt: DaytonaHumanInputReceipt | null;
 }
 
 /** Ephemeral proof for one exact enrolled profile, never a global readiness flag. */

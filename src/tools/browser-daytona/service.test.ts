@@ -98,7 +98,10 @@ test('human control stays suppressed until exact grant revocation precedes check
   assert.ok(grant.url.startsWith('https:')); assert.equal(h.sessions.get(opened.sessionId)!.viewerGrantHandle, grant.grantHandle);
   assert.equal(h.sessions.get(opened.sessionId)!.sensitiveOutputSuppressed, true);
   await assert.rejects(h.service.snapshot('cto', opened.sessionId, hash), code('sensitive_output_suppressed'));
-  assert.deepEqual(await h.service.completeHumanInput('cto', opened.sessionId, hash), { status: 'saved', human_input_revoked: true });
+  const completed = await h.service.completeHumanInput('cto', opened.sessionId, hash);
+  assert.equal(completed.status, 'saved'); assert.equal(completed.human_input_revoked, true);
+  assert.deepEqual(completed.receipt, { grantHandle: grant.grantHandle, completedAt: 1000, human_input_revoked: true, profile_checkpointed: true, automation_resumed: true });
+  assert.deepEqual(h.sessions.get(opened.sessionId)!.humanInputReceipt, completed.receipt);
   assert.deepEqual(h.state.flow, ['revoke', 'checkpoint']); assert.equal(h.sessions.get(opened.sessionId)!.sensitiveOutputSuppressed, false);
   assert.equal(h.state.checkpointSession?.sessionId, opened.sessionId);
   assert.equal(h.sessions.get(opened.sessionId)!.viewerGrantHandle, undefined);
@@ -175,6 +178,98 @@ test('human viewer resume reuses only its original exact handle and expiry witho
   await assert.rejects(h.service.resumeViewerGrant('cto', opened.sessionId, hash, '22222222-2222-2222-2222-222222222222'));
   await assert.rejects(h.service.resumeViewerGrant('cfo', opened.sessionId, hash, grant.grantHandle));
   h.advance(60000); await assert.rejects(h.service.resumeViewerGrant('cto', opened.sessionId, hash, grant.grantHandle));
+});
+
+test('owner status is read-only, sanitized, exact-owner, and available after expiry or closure', async () => {
+  const h = fixture(); const opened = await h.service.start('cto', 'profile-one', 180, 5, hash);
+  const grant = await h.service.getViewerGrant('cto', opened.sessionId, hash, 60);
+  const before = h.state.flow.length;
+  assert.deepEqual(await h.service.status('cto', opened.sessionId, hash), { phase: 'ACTIVE', effectUnknown: false, expiresAt: opened.expiresAt, human_control: 'human', profile_lease_released: false, receipt: null });
+  assert.equal(h.state.flow.length, before);
+  await assert.rejects(h.service.status('cfo', opened.sessionId, hash), code('owner_forbidden'));
+  const completed = await h.service.completeHumanInput('cto', opened.sessionId, hash);
+  assert.deepEqual((await h.service.status('cto', opened.sessionId, hash)).receipt, completed.receipt);
+  await h.service.stop('cto', opened.sessionId, hash);
+  const closed = await h.service.status('cto', opened.sessionId, hash);
+  assert.equal(closed.phase, 'CLOSED'); assert.equal(closed.human_control, 'released'); assert.equal(closed.profile_lease_released, true);
+  assert.deepEqual(closed.receipt, completed.receipt);
+  h.sessions.get(opened.sessionId)!.effectUnknown = true;
+  const unknown = await h.service.status('cto', opened.sessionId, hash);
+  assert.equal(unknown.human_control, 'unknown'); assert.equal(unknown.profile_lease_released, false);
+  h.sessions.get(opened.sessionId)!.sessionId = 'successor';
+  await assert.rejects(h.service.status('cto', opened.sessionId, hash), code('owner_forbidden'));
+  h.sessions.get(opened.sessionId)!.sessionId = opened.sessionId;
+  h.advance(181000);
+  assert.equal((await h.service.status('cto', opened.sessionId, hash)).phase, 'CLOSED');
+  assert.equal(grant.grantHandle, completed.receipt.grantHandle);
+});
+
+test('closed status requires both exact-owner legacy leases to be absent', async () => {
+  const h = fixture(); const opened = await h.service.start('cto', binding.profileKey, 180, 5, hash);
+  const release = h.store.releaseProfileLease.bind(h.store);
+  h.store.releaseProfileLease = async (key, owner) => { if (key === binding.profileKey) return; await release(key, owner); };
+  await h.service.stop('cto', opened.sessionId, hash);
+  const status = await h.service.status('cto', opened.sessionId, hash);
+  assert.equal(status.phase, 'CLOSED'); assert.equal(status.profile_lease_released, false);
+  assert.equal(h.leases.get(binding.profileKey), opened.sessionId);
+
+  const legacy = fixture(); const second = await legacy.service.start('cto', binding.profileKey, 180, 5, hash);
+  const displayKey = [...legacy.leases.keys()].find(key => key.startsWith('display-'))!;
+  const releaseLegacy = legacy.store.releaseProfileLease.bind(legacy.store);
+  legacy.store.releaseProfileLease = async (key, owner) => { if (key === displayKey) return; await releaseLegacy(key, owner); };
+  await legacy.service.stop('cto', second.sessionId, hash);
+  assert.equal(await legacy.store.ownsProfileLease(binding.profileKey, second.sessionId), false);
+  assert.equal((await legacy.service.status('cto', second.sessionId, hash)).profile_lease_released, false);
+});
+
+test('renewing an expired exact viewer grant revokes before remint and retains the paused fence', async () => {
+  const h = fixture(); h.state.runtimeProtocol = 2;
+  const opened = await h.service.start('cto', binding.profileKey, 180, 5, hash);
+  const first = await h.service.getViewerGrant('cto', opened.sessionId, hash, 60);
+  h.advance(60_001);
+  const nextHandle = '22345678-1234-1234-1234-123456789abc';
+  h.provider.viewerGrant = async (_binding, seconds, notAfter) => {
+    h.state.flow.push('mint-renewed'); h.state.grants++; assert.equal(seconds, 88); assert.equal(notAfter, 150000);
+    return { url: 'https://6080-synthetic.proxy.daytona.works/', expiresAt: 150000, grantHandle: nextHandle };
+  };
+  h.provider.readViewerGrant = async (_binding, handle) => ({ url: 'https://6080-synthetic.proxy.daytona.works/', expiresAt: 150000, grantHandle: handle });
+  const renewed = await h.service.renewViewerGrant('cto', opened.sessionId, hash, first.grantHandle, 150000);
+  assert.equal(renewed.grantHandle, nextHandle);
+  assert.deepEqual(h.state.flow, ['pause', 'mint', 'revoke', 'mint-renewed']);
+  assert.equal(h.sessions.get(opened.sessionId)!.viewerGrantHandle, nextHandle);
+  assert.equal(h.sessions.get(opened.sessionId)!.sensitiveOutputSuppressed, true);
+  assert.equal(h.sessions.get(opened.sessionId)!.effectUnknown, false);
+});
+
+test('renewal refuses unknown revoke or mint without clearing suppression or retrying', async () => {
+  for (const failure of ['revoke', 'mint']) {
+    const h = fixture(); h.state.runtimeProtocol = 2;
+    const opened = await h.service.start('cto', binding.profileKey, 180, 5, hash);
+    const grant = await h.service.getViewerGrant('cto', opened.sessionId, hash, 60); h.advance(60_001);
+    if (failure === 'revoke') h.state.revokeFails = true;
+    else h.provider.viewerGrant = async () => { throw new Error('unknown mint'); };
+    await assert.rejects(h.service.renewViewerGrant('cto', opened.sessionId, hash, grant.grantHandle, 70000));
+    assert.equal(h.sessions.get(opened.sessionId)!.effectUnknown, true);
+    assert.equal(h.sessions.get(opened.sessionId)!.sensitiveOutputSuppressed, true);
+    const count = h.state.grants;
+    await assert.rejects(h.service.renewViewerGrant('cto', opened.sessionId, hash, grant.grantHandle, 70000), code('effect_unknown'));
+    assert.equal(h.state.grants, count);
+  }
+});
+
+test('renewal never adopts an unowned minted UUID and returns an unexpired grant without minting', async () => {
+  const h = fixture(); h.state.runtimeProtocol = 2;
+  const opened = await h.service.start('cto', binding.profileKey, 180, 5, hash);
+  const grant = await h.service.getViewerGrant('cto', opened.sessionId, hash, 60);
+  const minted = h.state.grants, flow = [...h.state.flow];
+  assert.deepEqual(await h.service.renewViewerGrant('cto', opened.sessionId, hash, grant.grantHandle, 61000), grant);
+  assert.equal(h.state.grants, minted); assert.deepEqual(h.state.flow, flow);
+  h.advance(60_001);
+  h.provider.viewerGrant = async () => ({ url: 'https://6080-synthetic.proxy.daytona.works/', expiresAt: 120000, grantHandle: '22345678-1234-1234-1234-123456789abc' });
+  h.provider.readViewerGrant = async () => ({ url: 'https://6080-synthetic.proxy.daytona.works/', expiresAt: 120000, grantHandle: '32345678-1234-1234-1234-123456789abc' });
+  await assert.rejects(h.service.renewViewerGrant('cto', opened.sessionId, hash, grant.grantHandle, 150000), code('viewer_grant_invalid'));
+  assert.equal(h.sessions.get(opened.sessionId)!.viewerGrantHandle, undefined, 'unowned minted UUID is never persisted as cleanup authority');
+  assert.equal(h.sessions.get(opened.sessionId)!.effectUnknown, true);
 });
 test('transport wrappers unwrap to the existing gateway observation and target receipt contract', async () => {
   const h = fixture(); const opened = await h.service.start('cto', 'profile-one', 180, 5, hash);
