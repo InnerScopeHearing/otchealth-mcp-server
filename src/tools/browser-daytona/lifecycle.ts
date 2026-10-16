@@ -9,7 +9,7 @@ const UUID=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const HASH=/^[a-f0-9]{64}$/;
 const MASTER='/otchealth/integrations/daytona/company-keyring-unlock-secret';
 const HELPER='/opt/otchealth-browser/role-browser-helper.py';
-const HELPER_SHA256='e39a1e0f9df08ec6db68fea1d696eb6f860cd08878e062be562b463541c1a529';
+const HELPER_SHA256='b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51';
 const IDLE=600000, GRACE=180000, MONTHLY_WEIGHTED_MS=3100*3600000;
 type Roles=Readonly<Record<string,{sandboxId:string;readinessReceiptSha256:string}>>;
 type Launch={sessionId:string;commandId:string};

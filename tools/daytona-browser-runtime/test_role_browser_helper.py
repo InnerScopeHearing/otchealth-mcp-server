@@ -1,4 +1,5 @@
 import importlib.util
+import ast
 import os
 from pathlib import Path
 import socket
@@ -6,11 +7,50 @@ import struct
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 spec=importlib.util.spec_from_file_location('role_helper',Path(__file__).with_name('role-browser-helper.py'))
 helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
 
 class RoleHelperTests(unittest.TestCase):
+ def observed_supervisor(self,responses):
+  source=ast.parse(Path(helper.__file__).read_text())
+  definition=next(node for node in ast.walk(source) if isinstance(node,ast.ClassDef) and node.name=='ObservedSupervisor')
+  calls=[];clock=SimpleNamespace(now=100.0)
+  def sleep(seconds):self.assertGreater(seconds,0);clock.now+=seconds
+  class Base:
+   def listen(self):calls.append('listen')
+   def status(self,deadline):
+    calls.append(('status',deadline))
+    return responses.pop(0) if len(responses)>1 else responses[0]
+  namespace={'base':Base,'time':SimpleNamespace(monotonic=lambda:clock.now,sleep=sleep),'need':helper.need,
+             'event':Mock(),'payload':{'role':'developer','sandboxId':'fixture','operationId':'fixture','profileKey':'company-browser'},'profile':Path('/fixture')}
+  exec(compile(ast.fix_missing_locations(ast.Module(body=[definition],type_ignores=[])),str(helper.__file__),'exec'),namespace)
+  return namespace['ObservedSupervisor'](),calls,clock,namespace
+
+ def test_readiness_reobserves_false_status_without_relaunch_or_unlock(self):
+  ready={'checkpointReady':True,'encryptedKeyringUnlocked':True,'browserPid':101,'supervisorPid':102}
+  supervisor,calls,clock,namespace=self.observed_supervisor([{**ready,'checkpointReady':False},ready])
+  supervisor.listen()
+  self.assertEqual(calls,['listen',('status',105.0),('status',105.0)])
+  self.assertLess(clock.now,105.0);namespace['event'].assert_called_once_with('runtime_ready',role='developer',sandboxId='fixture',operationId='fixture',profileKey='company-browser',profilePath='/fixture/chromium',browserPid=101,supervisorPid=102)
+
+ def test_readiness_never_reports_locked_keyring_or_unverified_browser_ready(self):
+  for proof in ({'checkpointReady':False,'encryptedKeyringUnlocked':True},{'checkpointReady':True,'encryptedKeyringUnlocked':False}):
+   with self.subTest(proof=proof):
+    supervisor,calls,clock,namespace=self.observed_supervisor([proof])
+    with self.assertRaises(ValueError):supervisor.listen()
+    namespace['event'].assert_not_called();self.assertEqual(calls.count('listen'),1)
+    self.assertEqual({call[1] for call in calls if isinstance(call,tuple)},{105.0})
+    self.assertAlmostEqual(clock.now,105.0)
+
+ def test_readiness_status_exception_is_not_retried(self):
+  supervisor,calls,clock,namespace=self.observed_supervisor([])
+  supervisor.status=Mock(side_effect=ValueError('terminal'))
+  with self.assertRaisesRegex(ValueError,'terminal'):supervisor.listen()
+  supervisor.status.assert_called_once();namespace['event'].assert_not_called();self.assertEqual(calls,['listen'])
+
  def test_exact_gnome_op1_wire_no_newline_or_change_operation(self):
   key=b'a'*43
   self.assertEqual(helper.packet(key),struct.pack('>III',55,1,43)+key)

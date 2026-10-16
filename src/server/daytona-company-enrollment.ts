@@ -59,9 +59,18 @@ export function companyEnrollmentTemplate(env: NodeJS.ProcessEnv, allowedSandbox
 export class DaytonaCompanyEnrollment {
   constructor(private readonly template: DaytonaCompanyEnrollmentConfiguration | undefined, private readonly store: DaytonaBrowserStore,
     private readonly provider: DaytonaProvider, private readonly admission: (sandboxId: string) => void | Promise<void>,
-    private readonly withReady?: <T>(binding: DaytonaBinding, run: () => Promise<T>) => Promise<T>) {}
+    private readonly withReady?: <T>(binding: DaytonaBinding, run: () => Promise<T>, maxSeconds?: number) => Promise<T>) {}
   async ensure(caller: string, principal?: string, requestedProfile?: string): Promise<void> {
-    if (!this.template) return;
+    await this.enrolled(caller, principal, requestedProfile);
+  }
+  /** Trusted start composition: one wake admission spans immutable enrollment
+   * and the real service's fresh effect-boundary readiness/ownership checks. */
+  async withEnrolledBinding<T>(caller: string, principal: string, maxSeconds: number, run: (binding: DaytonaBinding) => Promise<T>): Promise<T> {
+    return await this.enrolled(caller, principal, undefined, { maxSeconds, run }) as T;
+  }
+  private async enrolled<T>(caller: string, principal?: string, requestedProfile?: string,
+    continuation?: { maxSeconds: number; run: (binding: DaytonaBinding) => Promise<T> }): Promise<T | void> {
+    if (!this.template) { if (continuation) return fail('daytona_company_enrollment_configuration_invalid'); return; }
     const identity = () => {
       const ctx = requestContext.getStore();
       if (!OWNERS.has(caller) || ctx?.callerAgent !== caller || ctx.authKind !== 'oauth' || typeof ctx.authSubject !== 'string'
@@ -83,12 +92,17 @@ export class DaytonaCompanyEnrollment {
     await this.admission(binding.sandboxId);
     const verify = async () => {
       await this.admission(binding.sandboxId);
-      const inspection = await this.provider.inspect(binding);
-      if (inspection.sandboxId !== binding.sandboxId || inspection.state !== 'started' || inspection.public !== false || !this.provider.probe) return fail('daytona_not_ready');
-      const proof = await this.provider.probe(binding);
-      const pid = (value: unknown) => Number.isSafeInteger(value) && Number(value) > 0 && Number(value) <= 2147483647;
-      if (proof?.ready !== true || proof.profileKey !== profileKey || proof.profilePath !== PATH || proof.checkpointReady !== true
-        || proof.runtimeProtocol !== 2 || proof.multiMissionReady !== true || !pid(proof.browserPid) || !pid(proof.supervisorPid)) return fail('daytona_company_enrollment_not_ready');
+      // Discovery still proves readiness. An exact existing binding on the
+      // start-only path instead relies on the mandatory fresh service.start
+      // probe below, without paying for a second enrollment-only probe.
+      if (!found || !continuation) {
+        const inspection = await this.provider.inspect(binding);
+        if (inspection.sandboxId !== binding.sandboxId || inspection.state !== 'started' || inspection.public !== false || !this.provider.probe) return fail('daytona_not_ready');
+        const proof = await this.provider.probe(binding);
+        const pid = (value: unknown) => Number.isSafeInteger(value) && Number(value) > 0 && Number(value) <= 2147483647;
+        if (proof?.ready !== true || proof.profileKey !== profileKey || proof.profilePath !== PATH || proof.checkpointReady !== true
+          || proof.runtimeProtocol !== 2 || proof.multiMissionReady !== true || !pid(proof.browserPid) || !pid(proof.supervisorPid)) return fail('daytona_company_enrollment_not_ready');
+      }
       if (identity() !== derived) return fail('owner_forbidden');
       await this.admission(binding.sandboxId);
       if (!found) {
@@ -97,8 +111,10 @@ export class DaytonaCompanyEnrollment {
         await this.store.createBinding(binding);
         if (!exact(await this.store.loadBinding(profileKey))) return fail('daytona_company_enrollment_unconfirmed');
       }
+      if (continuation) return continuation.run(binding);
+      return;
     };
-    if ('agents' in this.template && this.withReady) return this.withReady(binding, verify);
+    if ('agents' in this.template && this.withReady) return this.withReady(binding, verify, continuation?.maxSeconds);
     return verify();
   }
 }

@@ -163,7 +163,16 @@ def session(payload,enrollment,account,profile):
    base=value.WarmSupervisor
    class ObservedSupervisor(base):
     def listen(self):
-     super().listen();proof=self.status(time.monotonic()+5);need(proof.get('checkpointReady') is True and proof.get('encryptedKeyringUnlocked') is True);event('runtime_ready',role=payload['role'],sandboxId=payload['sandboxId'],operationId=payload['operationId'],profileKey=payload['profileKey'],profilePath=str(profile/'chromium'),browserPid=proof['browserPid'],supervisorPid=proof['supervisorPid'])
+     global PHASE
+     PHASE='runtime_readiness';super().listen();deadline=time.monotonic()+5
+     # Startup /proc observations can race Chromium descriptor churn. Reobserve
+     # status only; never relaunch Chrome, unlock again, or relax positive proof.
+     while True:
+      need(time.monotonic()<deadline);proof=self.status(deadline)
+      if proof.get('checkpointReady') is True and proof.get('encryptedKeyringUnlocked') is True:
+       need(time.monotonic()<deadline);break
+      time.sleep(min(0.05,max(0,deadline-time.monotonic())))
+     event('runtime_ready',role=payload['role'],sandboxId=payload['sandboxId'],operationId=payload['operationId'],profileKey=payload['profileKey'],profilePath=str(profile/'chromium'),browserPid=proof['browserPid'],supervisorPid=proof['supervisorPid'])
    value.WarmSupervisor=ObservedSupervisor
   return value
  proxy=SimpleNamespace(**{**vars(subprocess),'run':automatic_run})

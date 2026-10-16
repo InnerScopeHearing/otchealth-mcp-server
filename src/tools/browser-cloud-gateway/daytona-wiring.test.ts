@@ -35,8 +35,28 @@ function fixture() {
   const server = { registerTool: (name: string, _config: unknown, handler: (input: unknown) => Promise<Result>) => { handlers.set(name, handler); return { remove() {} }; } } as unknown as McpServer;
   registerCloudBrowserTools(server, () => 'a'.repeat(64), aws, undefined, adapter);
   const call = (tool: string, input: unknown, lane = 'cto', oauth = true) => requestContext.run({ callerAgent: lane, callerHash: 'a'.repeat(64), correlationId: 'test', authKind: oauth ? 'oauth' : 'codex', ...(oauth ? { authSubject: 'client', authConnectionId: 'own-connection' } : {}) }, () => handlers.get(tool)!(input));
-  return { call, calls, state };
+  return { call, calls, state, runtime };
 }
+
+test('company start uses one trusted consolidated admission without discovery or readiness round trips', async () => {
+  const f = fixture();
+  Object.assign(f.runtime.browser, { startCompany: async (...args: unknown[]) => { f.calls.push(['start-company', ...args]); return { sessionId: SESSION, expiresAt: 1900000300000, runtimeProtocol: 2 }; } });
+  const result = await f.call('browser_cloud_session_start', { profile_id: 'daytona-company', max_seconds: 180, action_budget: 25, dry_run: false });
+  assert.equal(result.structuredContent?.result?.status, 'ready');
+  assert.deepEqual(f.calls, [['get'], ['start-company', 'cto', 180, 25, websitePrincipalHash('cto', 'connection:own-connection')]]);
+});
+
+test('consolidated company start refuses a missing final V2 receipt or unknown wake without fallback', async () => {
+  for (const unknown of [false, true]) {
+    const f = fixture();
+    Object.assign(f.runtime.browser, { startCompany: async () => { f.calls.push(['start-company']); if (unknown) throw Object.assign(new Error('PRIVATE'), { code: 'daytona_role_reconciliation_required' }); return { sessionId: SESSION, expiresAt: 1900000300000 }; } });
+    const result = await f.call('browser_cloud_session_start', { profile_id: 'daytona-company', max_seconds: 180, dry_run: false });
+    assert.equal(result.structuredContent?.result?.error, unknown ? 'daytona_role_reconciliation_required' : 'daytona_multimission_unavailable');
+    assert.equal(result.structuredContent?.result?.status, undefined);
+    assert.deepEqual(f.calls.map(call => call[0]), ['get', 'start-company']);
+    assert.equal(JSON.stringify(result).includes('PRIVATE'), false);
+  }
+});
 
 test('reserved Daytona alias starts exact enrolled real service for each original OAuth company lane without AWS effects', async () => {
   const f = fixture();

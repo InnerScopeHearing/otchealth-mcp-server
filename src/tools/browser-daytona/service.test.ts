@@ -153,9 +153,9 @@ test('readiness is exact caller-bound fresh evidence with zero mission or lease 
 });
 
 test('automation alias requires exact fresh V2 proof before any mission or lease', async () => {
-  for (const invalid of ['absent', 'busy', 'foreign']) {
+  for (const invalid of ['absent', 'busy', 'foreign', 'checkpoint']) {
     const h = fixture(); if (invalid !== 'absent') h.state.runtimeProtocol = 2;
-    h.state.multiMissionReady = invalid !== 'busy'; h.state.readinessForeign = invalid === 'foreign';
+    h.state.multiMissionReady = invalid !== 'busy'; h.state.readinessForeign = invalid === 'foreign'; h.state.checkpointReady = invalid !== 'checkpoint';
     await assert.rejects(h.service.start('cto', binding.profileKey, 180, 5, hash, { requireMultiMission: true }));
     assert.equal(h.sessions.size, 0); assert.equal(h.leases.size, 0); assert.equal(h.state.opened, 0);
   }
