@@ -10,7 +10,7 @@ export function daytonaProfileKey(owner: string, principalHash: string): string 
   if (!/^[a-z0-9][a-z0-9_-]{1,30}$/.test(owner) || !HASH.test(principalHash)) return fail('owner_forbidden');
   return `${owner}-${principalHash}`;
 }
-const displayLease = (binding: DaytonaBinding) => `display-${createHash('sha256').update(binding.sandboxId).digest('hex').slice(0, 40)}`;
+const displayLease = (binding: Pick<DaytonaBinding, 'sandboxId'>) => `display-${createHash('sha256').update(binding.sandboxId).digest('hex').slice(0, 40)}`;
 const beforeEffectBusy = (session: DaytonaMission, error: unknown) => session.runtimeProtocol === 2 && error instanceof DaytonaBrowserError && error.code === 'daytona_operation_busy';
 /** Only logical missions on exact approved enrollment. No create/start/delete sandbox capability. */
 export class DaytonaBrowserService {
@@ -52,6 +52,10 @@ export class DaytonaBrowserService {
     const session: DaytonaMission = { provider: 'daytona', sessionId, owner: caller, ownerSubjectHash: principal!, profileKey, sandboxId: binding.sandboxId, expiresAt, actionsUsed: 0, actionBudget, effectUnknown: true, phase: 'OPENING', ...(multiMission ? { runtimeProtocol: 2 } : {}) };
     let openingAttempted = false, provenNotOpened = false;
     try {
+      // A trusted migration atomically requires this profile lease absent. A
+      // starter that read before its CAS must not use the stale physical SID.
+      const currentBinding = await this.binding(caller, profileKey, principal);
+      if (Object.keys(currentBinding).length !== Object.keys(binding).length || Object.entries(binding).some(([key, value]) => currentBinding[key as keyof DaytonaBinding] !== value)) return fail('daytona_binding_changed');
       if (!await this.store.createSession(session)) return fail('session_conflict');
       return await this.locked(caller, sessionId, principal, async (_binding, current, lock) => {
         openingAttempted = true;
@@ -93,6 +97,19 @@ export class DaytonaBrowserService {
       session.effectUnknown = false; await this.store.saveSessionUnderLock(session, lock); });
   }
   async stop(caller: string, id: string, principal?: string): Promise<void> {
+    const receipt = await this.store.loadSession(id);
+    if (receipt) {
+      assertDaytonaMission(receipt);
+      if (receipt.sessionId !== id || !principal || receipt.owner !== caller || receipt.ownerSubjectHash !== principal) return fail('owner_forbidden');
+      if (receipt.phase === 'CLOSED' && !receipt.effectUnknown) {
+        // Historical receipts retain their original SID after a quiescent
+        // enrollment migration. Never resolve/wake the successor desktop.
+        // Exact-owner conditional deletes also finish a prior lost cleanup ACK.
+        await this.store.releaseProfileLease(receipt.profileKey, receipt.sessionId);
+        if (receipt.runtimeProtocol !== 2) await this.store.releaseProfileLease(displayLease(receipt), receipt.sessionId);
+        return;
+      }
+    }
     await this.locked(caller, id, principal, async (binding, session, lock) => {
       if (session.phase !== 'CLOSED') {
         if (!await this.store.ownsProfileLease(binding.profileKey, session.sessionId) || (session.runtimeProtocol !== 2 && !await this.store.ownsProfileLease(displayLease(binding), session.sessionId))) return fail('profile_busy');
