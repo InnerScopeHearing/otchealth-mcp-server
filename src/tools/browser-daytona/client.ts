@@ -40,6 +40,7 @@ const ORDINARY_JSON_BYTES = 131072, ORDINARY_RESULT_CHARS = 100000;
 const CAPTURE_RESULT_CHARS = Math.ceil(4 * 1024 * 1024 / 3) * 4 + 16384;
 const CAPTURE_JSON_BYTES = CAPTURE_RESULT_CHARS + 16384;
 const SAFE_DISPATCHER_FAILURE_CODES = new Set([
+  'effect_unknown', 'target_operation_failed',
   'navigation_changed', 'navigation_failed', 'navigation_unavailable',
   'provider_action_failed', 'provider_connection_lost', 'provider_context_destroyed',
   'provider_document_pending', 'provider_protocol_error', 'provider_response_too_large', 'provider_timeout',

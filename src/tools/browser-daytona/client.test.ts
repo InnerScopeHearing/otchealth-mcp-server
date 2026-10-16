@@ -265,6 +265,15 @@ test('only exact allowlisted dispatcher failures are projected and oversized std
   });
   assert.equal(n.requests.filter(request => request.url.endsWith('/process/execute')).length, 1);
 
+  for (const code of ['effect_unknown', 'target_operation_failed']) {
+    n.state.processResponse = { exitCode: 1, result: JSON.stringify({ version: 1, ok: false, code }) };
+    await assert.rejects(c.execute(binding, mission, { type: 'navigate', url: 'https://example.com/' }, 10, binding.ownerSubjectHash), (error: any) => {
+      assert.equal(error.code, `daytona_runtime_${code}`);
+      assert.doesNotMatch(error.message, /PRIVATE-DISPATCHER-TEXT/);
+      return true;
+    });
+  }
+
   for (const envelope of [
     { version: 1, ok: false, code: 'PRIVATE-DISPATCHER-TEXT' },
     { version: 1, ok: false, code: 'provider_context_destroyed', extra: true },
@@ -284,7 +293,7 @@ test('only exact allowlisted dispatcher failures are projected and oversized std
   await assert.rejects(c.execute(binding, mission, { type: 'navigate', url: 'https://example.com/' }, 10, binding.ownerSubjectHash), (error: any) => error.code === 'daytona_runtime_unavailable' && !error.message.includes('PRIVATE-DISPATCHER-TEXT'));
   n.state.processResponse = { exitCode: 0, result: 'x'.repeat(100001) };
   await assert.rejects(c.execute(binding, mission, { type: 'navigate', url: 'https://example.com/' }, 10, binding.ownerSubjectHash), (error: any) => error.code === 'daytona_runtime_output_limit');
-  assert.equal(n.requests.filter(request => request.url.endsWith('/process/execute')).length, 8, 'each ambiguous runtime result is one request with no retry');
+  assert.equal(n.requests.filter(request => request.url.endsWith('/process/execute')).length, 10, 'each runtime result is one request with no retry');
 });
 test('one shared mission can navigate distinct public domains without a fixture-only allowlist', async () => {
   const n = network(sharedRuntime), c = await client({ fetchImpl: n.fetchImpl });
