@@ -101,10 +101,9 @@ function textContent(body: Uint8Array): string | null {
 
 function textContainsPdfSignature(contentType: string, body: Uint8Array): boolean {
   if (contentType !== 'text/plain' && contentType !== 'text/csv') return false;
-  // PDF readers may recognize a header after a BOM or other leading bytes.
-  // Include four trailing bytes so a signature starting at byte 1023 cannot straddle the bound.
-  const offset = Buffer.from(body.subarray(0, 1028)).indexOf('%PDF-', 0, 'ascii');
-  return offset >= 0 && offset < 1024;
+  // Policy: PDF magic is not permitted anywhere in size-bounded text/CSV bytes.
+  // Readers can recover headers after arbitrary prefixes, not just within the first 1024 bytes.
+  return Buffer.from(body).indexOf('%PDF-', 0, 'ascii') >= 0;
 }
 
 function pngHasBasicStructure(body: Uint8Array): boolean {

@@ -189,7 +189,7 @@ test('rejects the exact attachment PDF declared as text or CSV before scanner or
   assert.equal(attachmentPdf.byteLength, 849);
   assert.equal(sha(attachmentPdf), '32e92e9124c9d5b57ed8580a8ceb4a351c656c19d29f806d1dafb5faf261635e');
   for (const [contentType, extension] of [['text/plain', 'txt'], ['text/csv', 'csv']] as const) {
-    for (const prefix of [Buffer.alloc(0), Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('prefix\n'), Buffer.alloc(1023, 0x20)]) {
+    for (const prefix of [Buffer.alloc(0), Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('prefix\n'), ...[1023, 1024, 1025, 2048, 65536].map(size => Buffer.alloc(size, 0x20))]) {
       const store = new MemoryFileStore();
       let scans = 0;
       const scanner: BrowserFileScanner = { scan: async ({ body }) => { scans += 1; return receipt(body, 1_800_000_000_000); } };
@@ -206,7 +206,7 @@ test('blocks integrity-valid old-ready text records containing a PDF before retu
   const id = '00000000-0000-4000-8000-000000000001';
   const principal = 'a'.repeat(64);
   for (const [contentType, extension] of [['text/plain', 'txt'], ['text/csv', 'csv']] as const) {
-    for (const prefix of [Buffer.alloc(0), Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('prefix\n'), Buffer.alloc(1023, 0x20)]) {
+    for (const prefix of [Buffer.alloc(0), Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('prefix\n'), ...[1023, 1024, 1025, 2048, 65536].map(size => Buffer.alloc(size, 0x20))]) {
       const store = new MemoryFileStore();
       const body = Buffer.concat([prefix, attachmentPdf]);
       const record = { id, owner: 'cfo', ownerSubjectHash: principal, filename: `old.${extension}`, contentType, byteLength: body.byteLength, sha256: sha(body), status: 'ready' as const, expiresAt: now + 3_600_000, scanReceipt: receipt(body, now) };
@@ -216,6 +216,20 @@ test('blocks integrity-valid old-ready text records containing a PDF before retu
       await assert.rejects(files.forUpload('cfo', id, 'b'.repeat(64)), /owner/i);
     }
   }
+});
+
+test('rejects the final five PDF-magic bytes of maximum-sized text at staging and old-ready transfer', async () => {
+  const body = Buffer.alloc(10 * 1024 * 1024, 0x20);
+  body.set(Buffer.from('%PDF-', 'ascii'), body.byteLength - 5);
+  const { broker: files, store } = broker();
+  await assert.rejects(files.stage('cfo', { filename: 'late.txt', contentType: 'text/plain', body }), /match|content type/i);
+  assert.equal(store.rows.size, 0);
+  const id = '00000000-0000-4000-8000-000000000001';
+  const principal = 'a'.repeat(64);
+  const now = 1_800_000_000_000;
+  const record = { id, owner: 'cfo', ownerSubjectHash: principal, filename: 'old.txt', contentType: 'text/plain', byteLength: body.byteLength, sha256: sha(body), status: 'ready' as const, expiresAt: now + 3_600_000, scanReceipt: receipt(body, now) };
+  await store.put(`browser-files/cfo/${id}`, record, body);
+  await assert.rejects(files.forUpload('cfo', id, principal), /not cleared/i);
 });
 
 test('ordinary text and CSV remain ready and transferable with unchanged exact bytes', async () => {
