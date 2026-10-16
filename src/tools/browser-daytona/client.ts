@@ -39,6 +39,12 @@ const ORDINARY_JSON_BYTES = 131072, ORDINARY_RESULT_CHARS = 100000;
 // capture commands receive this allowance; all other provider reads stay small.
 const CAPTURE_RESULT_CHARS = Math.ceil(4 * 1024 * 1024 / 3) * 4 + 16384;
 const CAPTURE_JSON_BYTES = CAPTURE_RESULT_CHARS + 16384;
+const SAFE_DISPATCHER_FAILURE_CODES = new Set([
+  'navigation_changed', 'navigation_failed', 'navigation_unavailable',
+  'provider_action_failed', 'provider_connection_lost', 'provider_context_destroyed',
+  'provider_document_pending', 'provider_protocol_error', 'provider_response_too_large', 'provider_timeout',
+  'receipt_unavailable', 'runtime_not_ready', 'selector_not_found', 'selector_not_interactable',
+]);
 const fail = (code: string): never => { throw new DaytonaBrowserError(code); };
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : fail('daytona_provider_invalid');
 function httpsUrl(raw: string): URL {
@@ -112,8 +118,20 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
   private async processWith(context: Context, base: URL, binding: DaytonaBinding, command: string, timeoutMs: number, binaryCapture = false): Promise<Record<string, unknown>> {
     context.remaining();
     const response = await this.json(context, `${base.href.replace(/\/+$/, '')}/${encodeURIComponent(binding.sandboxId)}/process/execute`, { method: 'POST', body: JSON.stringify({ command, timeout: Math.ceil(timeoutMs / 1000) }) }, binaryCapture ? CAPTURE_JSON_BYTES : ORDINARY_JSON_BYTES);
-    if ((response.exitCode ?? response.code) !== 0 || typeof response.result !== 'string' || response.result.length > (binaryCapture ? CAPTURE_RESULT_CHARS : ORDINARY_RESULT_CHARS)) return fail('daytona_runtime_unavailable');
-    let parsed: unknown; try { parsed = JSON.parse(response.result); } catch { return fail('daytona_runtime_invalid'); }
+    const exitCode = response.exitCode ?? response.code;
+    if (typeof response.result === 'string' && response.result.length > (binaryCapture ? CAPTURE_RESULT_CHARS : ORDINARY_RESULT_CHARS)) return fail('daytona_runtime_output_limit');
+    if (typeof response.result !== 'string') return fail(exitCode === 0 ? 'daytona_runtime_invalid' : 'daytona_runtime_unavailable');
+    let parsed: unknown;
+    try { parsed = JSON.parse(response.result); } catch { return fail(exitCode === 0 ? 'daytona_runtime_invalid' : 'daytona_runtime_unavailable'); }
+    if (exitCode !== 0) {
+      if (exitCode === 1 && parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const receipt = parsed as Record<string, unknown>;
+        if (Object.keys(receipt).length === 3 && receipt.version === 1 && receipt.ok === false && typeof receipt.code === 'string' && SAFE_DISPATCHER_FAILURE_CODES.has(receipt.code)) {
+          return fail(`daytona_runtime_${receipt.code}`);
+        }
+      }
+      return fail('daytona_runtime_unavailable');
+    }
     return record(parsed);
   }
   private async runtimeWith(context: Context, binding: DaytonaBinding, op: 'probe' | 'open' | 'execute' | 'release' | 'checkpoint' | 'human_pause' | 'human_resume', sessionId?: string, action?: CloudBrowserAction, principalHash?: string, timeoutSeconds = 18, upload?: DaytonaUploadDescriptor, runtimeProtocol?: 2): Promise<unknown> {
