@@ -399,6 +399,13 @@ class Cdp:
         if self.sock: self.sock.close()
 
 
+def allow_observed_url(url):
+    # Only CDP metadata may transiently omit a document URL during navigation.
+    # User-supplied URLs still go directly through the unchanged allow_url.
+    if url == '': fail('provider_document_pending')
+    allow_url(url, allow_blank=True)
+
+
 def current_url(cdp, session):
     result = cdp.command('Page.getFrameTree', {}, session)
     tree = result.get('frameTree', {})
@@ -408,7 +415,7 @@ def current_url(cdp, session):
         frame = pending.pop()
         count += 1
         if count > 256: fail('provider_response_too_large')
-        allow_url(frame.get('frame', {}).get('url'), allow_blank=True)
+        allow_observed_url(frame.get('frame', {}).get('url'))
         pending.extend(frame.get('childFrames', []))
     return url
 
@@ -441,7 +448,7 @@ def selected(cdp, state):
     if not target or target not in state['owned']: fail('target_not_owned')
     info = cdp.command('Target.getTargetInfo', {'targetId': target}).get('targetInfo', {})
     if info.get('type') != 'page': fail('target_not_owned')
-    allow_url(info.get('url'), allow_blank=True)
+    allow_observed_url(info.get('url'))
     result = cdp.command('Target.attachToTarget', {'targetId': target, 'flatten': True})
     session = result.get('sessionId')
     if not text(session): fail('provider_protocol_error')
@@ -457,7 +464,7 @@ def post_action_snapshot(cdp, state, navigation=False):
             target, session = selected(cdp, state)
             return snapshot(cdp, session, target)
         except DispatchError as error:
-            if not navigation or error.code not in ('provider_context_destroyed', 'navigation_changed'): raise
+            if not navigation or error.code not in ('provider_context_destroyed', 'navigation_changed', 'provider_document_pending'): raise
             remaining = min(cdp.remaining(), deadline - time.monotonic())
             if remaining <= 0: raise
             time.sleep(min(0.05, remaining))
