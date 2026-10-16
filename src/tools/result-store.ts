@@ -11,6 +11,7 @@
  * results (the vast majority) are never touched, so behavior is backward-compatible.
  */
 import * as cosmos from '../agentstate/store.js';
+import { logResultProjection, type ResultProjectionMeasurement } from '../audit/result-projection.js';
 
 // Writer-only migration gate. Read fresh from process.env so task-definition rollout can enable
 // compact writes after every task has a reader that understands serialization_format.
@@ -46,6 +47,8 @@ export interface ResultStoreDeps {
     id: string,
   ) => Promise<{ doc: Record<string, unknown> } | null>;
   now: () => number;
+  /** Injectable sink for deterministic seam tests; production uses the structured audit logger. */
+  logProjection?: (measurement: ResultProjectionMeasurement) => void;
 }
 
 const DEFAULT_RESULT_STORE_DEPS: ResultStoreDeps = {
@@ -199,10 +202,15 @@ export async function offloadResult(
   callerHash: string,
   deps: ResultStoreDeps = DEFAULT_RESULT_STORE_DEPS,
 ): Promise<OffloadOutcome | null> {
+  const emitProjection = deps.logProjection ?? logResultProjection;
   try {
     // Never create a bearer-style result object without a verified authenticated caller binding.
     // The registry keeps the full inline response when this returns null.
-    if (!validCallerHash(callerHash)) return null;
+    const originalBytes = Buffer.byteLength(fullText, 'utf8');
+    if (!validCallerHash(callerHash)) {
+      emitProjection({ outcome: 'fail_open', originalBytes, initialReturnBytes: originalBytes });
+      return null;
+    }
     const resultId = deps.newId('jitres');
     const now = deps.now();
     const compactWrite = compactResultJsonWritesEnabled();
@@ -224,12 +232,23 @@ export async function offloadResult(
       expiresAt: now + TTL_SECONDS * 1000,
       ttl: TTL_SECONDS + 60,
     });
+    const preview = buildPreview(fullText, resultId);
+    emitProjection({
+      outcome: 'offloaded',
+      originalBytes,
+      initialReturnBytes: Buffer.byteLength(preview, 'utf8'),
+    });
     return {
-      preview: buildPreview(fullText, resultId),
+      preview,
       resultId,
       totalBytes,
     };
   } catch {
+    emitProjection({
+      outcome: 'fail_open',
+      originalBytes: Buffer.byteLength(fullText, 'utf8'),
+      initialReturnBytes: Buffer.byteLength(fullText, 'utf8'),
+    });
     return null; // fail-open: caller keeps the full inline result
   }
 }
@@ -251,6 +270,7 @@ export async function fetchStoredResult(
   callerHash: string,
   deps: ResultStoreDeps = DEFAULT_RESULT_STORE_DEPS,
 ): Promise<FetchOutcome> {
+  const emitProjection = deps.logProjection ?? logResultProjection;
   if (!validCallerHash(callerHash)) return { found: false };
   const hit = await deps.readDoc('cache', resultId, resultId);
   if (!hit || !hit.doc) return { found: false };
@@ -272,6 +292,13 @@ export async function fetchStoredResult(
     return { found: false };
   }
   const sliced = pageSlice(serialized, page);
+  emitProjection({
+    outcome: 'retrieved',
+    originalBytes: Buffer.byteLength(serialized, 'utf8'),
+    returnedBytes: Buffer.byteLength(sliced.chunk, 'utf8'),
+    page: sliced.page,
+    pages: sliced.pages,
+  });
   return {
     found: true,
     total_bytes: Buffer.byteLength(serialized, 'utf8'),
