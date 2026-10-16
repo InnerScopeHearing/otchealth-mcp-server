@@ -60,6 +60,18 @@ test('timing error codes preserve known diagnostics and omit secret-shaped unkno
   assert.equal(toolTimingLogFields({ phase: 'operation', durationMs: 1, outcome: 'error', errorCode: 'secret_token_value' }).error_code, undefined);
 });
 
+test('phase logs retain only the five fixed Xero HTTP categories', () => {
+  for (const code of [
+    'xero_http_unauthorized', 'xero_http_forbidden', 'xero_http_rate_limited',
+    'xero_http_upstream_error', 'xero_http_request_error',
+  ]) {
+    assert.equal(toolTimingLogFields({ phase: 'operation', durationMs: 1, outcome: 'error', errorCode: code }).error_code, code);
+  }
+  for (const code of ['xero_http_SYNTHETIC_SECRET', 'xero_http_401_tenant_private', 'xero_http_timeout']) {
+    assert.equal(toolTimingLogFields({ phase: 'operation', durationMs: 1, outcome: 'error', errorCode: code }).error_code, undefined);
+  }
+});
+
 test('phase event links parent request and tool call IDs separately; missing parents stay unclaimed', async (t) => {
   const seen: Record<string, unknown>[] = [];
   const spy = mock.method(logger, 'info', (fields: Record<string, unknown>) => { seen.push(fields); });

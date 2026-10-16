@@ -29,6 +29,8 @@ const SAFE_ERROR_CODES = new Set([
   'aws_mcp_forbidden', 'aws_mcp_grant_refused', 'aws_mcp_disabled', 'aws_mcp_invalid_input',
   'aws_mcp_tool_blocked', 'aws_mcp_tool_not_allowed', 'aws_mcp_unavailable',
   'aws_mcp_upstream_tool_error', 'aws_mcp_internal_error',
+  'xero_http_unauthorized', 'xero_http_forbidden', 'xero_http_rate_limited',
+  'xero_http_upstream_error', 'xero_http_request_error',
 ]);
 const PHASE_SET = new Set<string>(TOOL_TIMING_PHASES);
 const OUTCOMES = new Set<string>(['success', 'error', 'rejected', 'unknown']);

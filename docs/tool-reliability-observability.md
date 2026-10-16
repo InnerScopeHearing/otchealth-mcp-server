@@ -8,6 +8,10 @@ MCP requests retain their existing generated correlation ID. Tool start/end reco
 
 The AWS bridge observes queue, credentials, initialization, operation and best-effort shutdown separately. A timeout after dispatch has unknown effect, not confirmed failure or success. Shutdown timing is not evidence that the upstream session was destroyed. Never automatically replay an unknown write.
 
+Xero refresh, tenant-connection and accounting GET HTTP failures retain a typed status internally. On Xero tools only, phase timing projects five fixed categories: `xero_http_unauthorized`, `xero_http_forbidden`, `xero_http_rate_limited`, `xero_http_upstream_error`, or `xero_http_request_error`. Messages, bodies, paths, tenant identities and credentials are never added to these events. Public errors and legacy detailed messages, authentication, retries and persistence stay unchanged.
+
+Untyped transport, timeout, token-chain and other errors remain generic; this classification does not diagnose earlier generic errors or establish provider health. Verify future naturally occurring failures through bounded metadata, without replaying financial actions as a deployment test.
+
 ## Results and discovery
 
 Eligible ordinary inline results add content-free UTF-8 byte observations without parsing or serializing the payload again. Offload, retrieval, binding, expiry and fail-open behavior remain unchanged. Ephemeral outputs, terminal result retrieval, AWS bridge results, WeFunder investor outputs and M365 static-auth outputs retain their existing exclusions. An offloaded result still requires retrieval; a returned preview does not prove task completion.

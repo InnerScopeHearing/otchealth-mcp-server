@@ -67,6 +67,7 @@ import {
 import { EXEC_RING } from './kb/search-privileged.js';
 import { projectPinnedObservationDiagnostic } from '../audit/internal-diagnostics.js';
 import { parseUpstreamToolError } from '../audit/upstream-tool-error.js';
+import { projectXeroFailure } from './xero/diagnostic-error.js';
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 // Per-lane curated connector toolsets, advertised to Claude Chat (DCR) / occ_ connector requests so
@@ -1795,6 +1796,8 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         if (thrownCode === 'aws_mcp_timeout' || (thrownCode && TIMING_REJECTION_CODES.has(thrownCode))) {
           callbackErrorCode = thrownCode;
         }
+        // Diagnostic metadata only: preserve public errors, provider behavior and retry semantics.
+        callbackErrorCode ??= projectXeroFailure(err, canonicalName) ?? undefined;
         let errorCode = 'tool_error';
         let nextStep = 'Check server logs for the correlation_id.';
         let upstreamStatus: number | undefined;

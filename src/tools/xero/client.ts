@@ -33,6 +33,7 @@
  */
 import { createHash } from 'node:crypto';
 import { loadXeroRuntimeConfig } from './runtime-config.js';
+import { XeroHttpError } from './diagnostic-error.js';
 import { EXEC_RING } from '../kb/search-privileged.js';
 import {
   isConfigured as cosmosConfigured,
@@ -220,7 +221,7 @@ async function refreshGrant(
   const body = await r.text();
   if (!r.ok) {
     if (r.status === 400 && /invalid_grant/i.test(body)) return 'invalid_grant';
-    throw new Error(`Xero token refresh failed: HTTP ${r.status} ${body.slice(0, 160)}`);
+    throw new XeroHttpError('refresh', r.status, `Xero token refresh failed: HTTP ${r.status} ${body.slice(0, 160)}`);
   }
   const j = JSON.parse(body) as { access_token?: string; refresh_token?: string; expires_in?: number };
   if (!j.access_token || !j.refresh_token) throw new Error('Xero token refresh returned no tokens');
@@ -237,7 +238,7 @@ async function resolveTenant(
     headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
-  if (!r.ok) throw new Error(`Xero /connections failed: HTTP ${r.status}`);
+  if (!r.ok) throw new XeroHttpError('connections', r.status, `Xero /connections failed: HTTP ${r.status}`);
   const conns = (await r.json()) as Array<{ tenantId: string; tenantName?: string }>;
   if (!conns.length) throw new Error(`Xero org "${org}": token has no connected tenants`);
   const byPin = pin ? conns.find((c) => c.tenantId === pin) : undefined;
@@ -552,7 +553,7 @@ export async function xeroGet(
   if (!r.ok && r.status !== 304) {
     // FND-20260724-68f5 fix: surface the real ValidationErrors detail, not a fixed-length slice
     // of raw text that cut off before the actual cause every time.
-    throw new Error(`Xero GET ${path} (${org}) -> HTTP ${r.status}: ${extractXeroErrorDetail(text)}`);
+    throw new XeroHttpError('accounting_get', r.status, `Xero GET ${path} (${org}) -> HTTP ${r.status}: ${extractXeroErrorDetail(text)}`);
   }
   return {
     status: r.status,
