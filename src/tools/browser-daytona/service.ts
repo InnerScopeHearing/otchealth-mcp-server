@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { CloudBrowserAction } from '../browser-cloud/contract.js';
 import { validateCloudBrowserAction } from '../browser-cloud/actions.js';
-import { DaytonaBrowserError, DaytonaViewerNotMintedError, type DaytonaBinding, type DaytonaBrowserStore, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness } from './contract.js';
+import { DaytonaBrowserError, DaytonaViewerNotMintedError, type DaytonaBinding, type DaytonaBrowserStore, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness, type DaytonaMissionStatus, type DaytonaHumanInputReceipt } from './contract.js';
 import { assertDaytonaBinding, assertDaytonaMission } from './store.js';
 const HASH = /^[a-f0-9]{64}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -212,13 +212,81 @@ export class DaytonaBrowserService {
       return grant;
     });
   }
-  async completeHumanInput(caller: string, id: string, principal?: string): Promise<{ status: 'saved'; human_input_revoked: true }> {
+  async status(caller: string, id: string, principal?: string): Promise<DaytonaMissionStatus> {
+    const session = await this.store.loadSession(id); if (!session) return fail('owner_forbidden'); assertDaytonaMission(session);
+    if (session.sessionId !== id || !principal || session.owner !== caller || session.ownerSubjectHash !== principal) return fail('owner_forbidden');
+    const human_control = session.effectUnknown ? 'unknown' : session.phase === 'CLOSED' ? 'released' : session.sensitiveOutputSuppressed ? 'human' : 'agent';
+    let profile_lease_released = false;
+    if (session.phase === 'CLOSED' && !session.effectUnknown) {
+      const profileOwned = await this.store.ownsProfileLease(session.profileKey, session.sessionId);
+      const displayOwned = session.runtimeProtocol !== 2 && await this.store.ownsProfileLease(displayLease(session), session.sessionId);
+      profile_lease_released = !profileOwned && !displayOwned;
+    }
+    return { phase: session.phase, effectUnknown: session.effectUnknown, expiresAt: session.expiresAt, human_control,
+      profile_lease_released, receipt: session.humanInputReceipt ? { ...session.humanInputReceipt } : null };
+  }
+  async renewViewerGrant(caller: string, id: string, principal: string | undefined, expectedHandle: string, notAfter: number): Promise<{ url: string; expiresAt: number; grantHandle: string }> {
+    if (!UUID.test(expectedHandle) || !Number.isSafeInteger(notAfter) || notAfter <= this.now()) return fail('invalid_duration');
+    return this.locked(caller, id, principal, async (binding, session, lock) => {
+      await this.active(binding, session, true);
+      if (!session.sensitiveOutputSuppressed || session.viewerGrantHandle !== expectedHandle || !session.viewerExpiresAt) return fail('viewer_unavailable');
+      const deadline = Math.min(notAfter, session.expiresAt, this.now() + 300_000);
+      const seconds = Math.floor((deadline - this.now()) / 1000); if (seconds < 1) return fail('session_expired');
+      if (session.viewerExpiresAt > this.now()) {
+        if (session.viewerExpiresAt > deadline) return fail('viewer_unavailable');
+        const existing = await this.provider.readViewerGrant(binding, expectedHandle);
+        let url: URL; try { url = new URL(existing.url); } catch { return fail('viewer_grant_invalid'); }
+        if (existing.grantHandle !== expectedHandle || existing.expiresAt !== session.viewerExpiresAt || existing.expiresAt > deadline || existing.expiresAt <= this.now() || url.protocol !== 'https:' || url.username || url.password) return fail('viewer_grant_invalid');
+        return existing;
+      }
+      // Persist the fence before revoke. A lost revoke or mint acknowledgement
+      // must never permit a second renewal attempt with the old handle.
+      session.effectUnknown = true; await this.store.saveSessionUnderLock(session, lock);
+      const revoked = await this.provider.revokeViewerGrant(binding, expectedHandle);
+      if (revoked.human_input_revoked !== true) return fail('viewer_revocation_unknown');
+      delete session.viewerGrantHandle; delete session.viewerExpiresAt;
+      await this.store.saveSessionUnderLock(session, lock);
+      const minted = await this.provider.viewerGrant(binding, seconds, deadline);
+      if (!UUID.test(minted.grantHandle) || minted.grantHandle === expectedHandle) return fail('viewer_grant_invalid');
+      let owned: Awaited<ReturnType<DaytonaProvider['readViewerGrant']>>;
+      try { owned = await this.provider.readViewerGrant(binding, minted.grantHandle); }
+      catch (error) {
+        try {
+          const cleanup = await this.provider.revokeViewerGrant(binding, minted.grantHandle);
+          if (cleanup.human_input_revoked === true) {
+            session.viewerGrantHandle = minted.grantHandle;
+            session.viewerExpiresAt = Number.isSafeInteger(minted.expiresAt) && minted.expiresAt > 0 ? Math.min(minted.expiresAt, deadline) : deadline;
+            await this.store.saveSessionUnderLock(session, lock);
+          }
+        } catch { /* unknown mint remains fenced */ }
+        throw error;
+      }
+      if (owned.grantHandle !== minted.grantHandle || !Number.isSafeInteger(owned.expiresAt) || owned.expiresAt <= 0) return fail('viewer_grant_invalid');
+      session.viewerGrantHandle = owned.grantHandle; session.viewerExpiresAt = Math.min(owned.expiresAt, deadline);
+      await this.store.saveSessionUnderLock(session, lock);
+      let url: URL; try { url = new URL(minted.url); } catch {
+        try { await this.provider.revokeViewerGrant(binding, owned.grantHandle); } catch { /* stored owner-bound handle remains fenced for stop cleanup */ }
+        return fail('viewer_grant_invalid');
+      }
+      if (owned.url !== minted.url || owned.expiresAt !== minted.expiresAt || minted.expiresAt <= this.now() || minted.expiresAt > deadline || url.protocol !== 'https:' || url.username || url.password) {
+        try { await this.provider.revokeViewerGrant(binding, owned.grantHandle); } catch { /* stored owner-bound handle remains fenced for stop cleanup */ }
+        return fail('viewer_grant_invalid');
+      }
+      session.effectUnknown = false;
+      await this.store.saveSessionUnderLock(session, lock); return owned;
+    });
+  }
+  async completeHumanInput(caller: string, id: string, principal?: string): Promise<{ status: 'saved'; human_input_revoked: true; receipt: DaytonaHumanInputReceipt }> {
     return this.locked(caller, id, principal, async (binding, session, lock) => {
       await this.active(binding, session, true); if (!session.viewerGrantHandle || !session.sensitiveOutputSuppressed) return fail('viewer_unavailable');
-      session.effectUnknown = true; await this.store.saveSessionUnderLock(session, lock); const receipt = await this.provider.revokeViewerGrant(binding, session.viewerGrantHandle); if (receipt.human_input_revoked !== true) return fail('viewer_revocation_unknown');
+      const grantHandle = session.viewerGrantHandle;
+      session.effectUnknown = true; await this.store.saveSessionUnderLock(session, lock); const receipt = await this.provider.revokeViewerGrant(binding, grantHandle); if (receipt.human_input_revoked !== true) return fail('viewer_revocation_unknown');
       await this.provider.checkpoint(binding, session);
       if (session.runtimeProtocol === 2) { if (!this.provider.resumeAutomation) return fail('daytona_handoff_unavailable'); const resumed = await this.provider.resumeAutomation(binding, session); if (resumed.resumed !== true) return fail('daytona_resume_unconfirmed'); }
-      delete session.viewerGrantHandle; delete session.viewerExpiresAt; session.sensitiveOutputSuppressed = false; session.effectUnknown = false; await this.store.saveSessionUnderLock(session, lock); return { status: 'saved', human_input_revoked: true };
+      delete session.viewerGrantHandle; delete session.viewerExpiresAt; session.sensitiveOutputSuppressed = false; session.effectUnknown = false;
+      const humanInputReceipt: DaytonaHumanInputReceipt = { grantHandle, completedAt: this.now(), human_input_revoked: true, profile_checkpointed: true, automation_resumed: true };
+      session.humanInputReceipt = humanInputReceipt; await this.store.saveSessionUnderLock(session, lock);
+      return { status: 'saved', human_input_revoked: true, receipt: humanInputReceipt };
     });
   }
 }

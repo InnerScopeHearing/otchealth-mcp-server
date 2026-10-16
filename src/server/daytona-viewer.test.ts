@@ -8,10 +8,11 @@ import { registerDaytonaViewerRoutes, type DaytonaViewerService } from './dayton
 const ORIGIN = 'https://mcp.otchealth.app';
 const TOKEN = 'A'.repeat(43);
 const ID = createHash('sha256').update(TOKEN).digest('hex').slice(0, 32);
-const COOKIE = `__Host-otc-daytona-login-${ID}=${TOKEN}`;
 const URL = 'https://6080-signed-port-capability.proxy.daytona.works/vnc.html?autoconnect=true&resize=scale';
 const NOW = 1_900_000_000_000;
 const VIEW = { signed_url: URL, expires_at: NOW + 90_000 };
+const OPENING = NOW + 300_000;
+const MISSION = NOW + 3_600_000;
 const HEADERS = { origin: ORIGIN, 'sec-fetch-site': 'same-origin' };
 
 function appWith(service: Partial<DaytonaViewerService> = {}) {
@@ -22,292 +23,263 @@ function appWith(service: Partial<DaytonaViewerService> = {}) {
   return app;
 }
 
-test('Daytona exchange enforces strict same-origin token input and original-expiry unique HttpOnly cookie', async () => {
-  let calls = 0;
-  const app = appWith({ exchange: async () => { calls++; return VIEW; } });
+async function recoveryCookie(app: ReturnType<typeof appWith>): Promise<string> {
+  const response = await app.inject('/browser/daytona');
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers['set-cookie'], undefined, 'cross-site page GET must not rotate a Strict proof');
+  const first = await app.inject({ method: 'POST', url: '/browser/daytona/bootstrap', headers: HEADERS, payload: {} });
+  assert.equal(first.statusCode, 200);
+  assert.deepEqual(first.json(), { ready: false });
+  const value = String(first.headers['set-cookie']).match(/(__Host-otc-daytona-recovery=[A-Za-z0-9_-]{43})/)?.[1];
+  assert.ok(value, 'same-origin bootstrap provisions an HttpOnly proof before ticket effects');
+  assert.match(String(first.headers['set-cookie']), /Path=\/; HttpOnly; Secure; SameSite=Strict/);
+  const confirmed = await app.inject({ method: 'POST', url: '/browser/daytona/bootstrap', headers: { ...HEADERS, cookie: value }, payload: {} });
+  assert.deepEqual(confirmed.json(), { ready: true });
+  return value;
+}
+
+test('Daytona cross-site document GET never rotates the strict browser proof; same-origin bootstrap confirms it', async () => {
+  const app = appWith();
   try {
-    for (const headers of [{}, { origin: `${ORIGIN}.evil.example` }, { ...HEADERS, 'sec-fetch-site': 'cross-site' }]) {
-      assert.equal((await app.inject({ method: 'POST', url: '/browser/daytona/exchange', headers, payload: { token: TOKEN } })).statusCode, 403);
-    }
-    for (const payload of [{}, [], { token: TOKEN, profile: 'foreign' }, { token: 'bad' }]) {
-      assert.equal((await app.inject({ method: 'POST', url: '/browser/daytona/exchange', headers: HEADERS, payload })).statusCode, 400);
-    }
-    assert.equal(calls, 0);
-    const response = await app.inject({ method: 'POST', url: '/browser/daytona/exchange', headers: HEADERS, payload: { token: TOKEN } });
-    assert.equal(response.statusCode, 200);
-    assert.deepEqual(response.json(), { ...VIEW, handoff_id: ID });
-    assert.equal(response.headers['set-cookie'], `${COOKIE}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=90`);
-    assert.match(response.headers['cache-control']!, /no-store/);
-    assert.equal(response.body.includes(TOKEN), false);
+    const first = await app.inject('/browser/daytona');
+    assert.equal(first.headers['set-cookie'], undefined);
+    const crossSite = await app.inject({ method: 'GET', url: '/browser/daytona?handoff=' + ID, headers: { 'sec-fetch-site': 'cross-site' } });
+    assert.equal(crossSite.headers['set-cookie'], undefined, 'cross-site navigation must not overwrite a prior handoff proof');
+    const created = await app.inject({ method: 'POST', url: '/browser/daytona/bootstrap', headers: HEADERS, payload: {} });
+    const proof = String(created.headers['set-cookie']).split(';')[0];
+    const reload = await app.inject({ method: 'GET', url: '/browser/daytona?handoff=' + ID, headers: { cookie: proof } });
+    assert.equal(reload.headers['set-cookie'], undefined, 'GET never replaces proof on reload');
+    const check = await app.inject({ method: 'POST', url: '/browser/daytona/bootstrap', headers: { ...HEADERS, cookie: proof }, payload: {} });
+    assert.deepEqual(check.json(), { ready: true });
   } finally { await app.close(); }
 });
 
-test('Daytona viewer rejects non-private origins, extra credential queries, foreign ports, paths and expired links without leakage', async () => {
+test('Daytona prepare binds a one-time token to the pre-provisioned browser proof before exchange', async () => {
+  const seen: string[] = [];
+  const app = appWith({
+    prepare: async (token, proof) => { seen.push(`prepare:${token}:${proof}`); return { handoff_id: ID, opening_expires_at: OPENING, mission_expires_at: MISSION }; },
+    exchange: async (token, proof) => { seen.push(`exchange:${token}:${proof}`); return VIEW; },
+  });
+  try {
+    const proof = await recoveryCookie(app);
+    const cookie = `${proof}; unrelated=keep`;
+    for (const headers of [{}, { origin: `${ORIGIN}.evil.example` }, { ...HEADERS, 'sec-fetch-site': 'cross-site' }]) {
+      assert.equal((await app.inject({ method: 'POST', url: '/browser/daytona/prepare', headers, payload: { token: TOKEN } })).statusCode, 403);
+    }
+    for (const payload of [{}, [], { token: TOKEN, profile: 'foreign' }, { token: 'bad' }]) {
+      assert.equal((await app.inject({ method: 'POST', url: '/browser/daytona/prepare', headers: { ...HEADERS, cookie }, payload })).statusCode, 400);
+    }
+    assert.deepEqual(seen, []);
+    const prepared = await app.inject({ method: 'POST', url: '/browser/daytona/prepare', headers: { ...HEADERS, cookie }, payload: { token: TOKEN } });
+    assert.equal(prepared.statusCode, 200);
+    assert.deepEqual(prepared.json(), { handoff_id: ID, opening_expires_at: OPENING, mission_expires_at: MISSION });
+    assert.equal(prepared.body.includes(TOKEN), false);
+    const exchanged = await app.inject({ method: 'POST', url: '/browser/daytona/exchange', headers: { ...HEADERS, cookie }, payload: { token: TOKEN } });
+    assert.equal(exchanged.statusCode, 200);
+    assert.deepEqual(exchanged.json(), { ...VIEW, handoff_id: ID });
+    assert.equal(exchanged.headers['set-cookie'], undefined, 'recovery authority was installed by GET, before exchange');
+    assert.deepEqual(seen, [`prepare:${TOKEN}:${proof.split('=')[1]}`, `exchange:${TOKEN}:${proof.split('=')[1]}`]);
+  } finally { await app.close(); }
+});
+
+test('Daytona selector routes require the exact HttpOnly proof and expose status without viewer data', async () => {
+  const seen: string[] = [];
+  const app = appWith({
+    recover: async (selector, proof) => { seen.push(`recover:${selector}:${proof}`); return VIEW; },
+    status: async (selector, proof) => { seen.push(`status:${selector}:${proof}`); return { status: 'active', opening_expires_at: OPENING, mission_expires_at: MISSION }; },
+    renew: async (selector, proof) => { seen.push(`renew:${selector}:${proof}`); return VIEW; },
+    reconcile: async (selector, proof) => { seen.push(`reconcile:${selector}:${proof}`); return { status: 'saved', human_input_revoked: true, checkpoint_saved: true, mission_released: true }; },
+    complete: async (_token, proof) => { seen.push(`complete:${proof}`); return { status: 'saved', human_input_revoked: true, checkpoint_saved: true, mission_released: true }; },
+    expire: async (_token, proof) => { seen.push(`expire:${proof}`); return { status: 'expired', human_input_revoked: true, mission_released: true }; },
+  });
+  try {
+    const proofCookie = await recoveryCookie(app);
+    const proof = proofCookie.split('=')[1]!;
+    for (const action of ['open', 'recover', 'status', 'reconcile', 'renew', 'complete', 'expire']) {
+      for (const cookie of ['', '__Host-otc-website-login=' + proof, `${proofCookie}; ${proofCookie}`]) {
+        assert.equal((await app.inject({ method: 'POST', url: `/browser/daytona/${action}`, headers: { ...HEADERS, cookie }, payload: { handoff_id: ID } })).statusCode, 400);
+      }
+      assert.equal((await app.inject({ method: 'POST', url: `/browser/daytona/${action}`, headers: { ...HEADERS, cookie: proofCookie }, payload: { handoff_id: ID, token: TOKEN } })).statusCode, 400);
+      assert.equal((await app.inject({ method: 'POST', url: `/browser/daytona/${action}`, headers: { origin: 'https://evil.example', cookie: proofCookie }, payload: { handoff_id: ID } })).statusCode, 403);
+    }
+    const status = await app.inject({ method: 'POST', url: '/browser/daytona/status', headers: { ...HEADERS, cookie: proofCookie }, payload: { handoff_id: ID } });
+    assert.equal(status.statusCode, 200);
+    assert.deepEqual(status.json(), { status: 'active', opening_expires_at: OPENING, mission_expires_at: MISSION });
+    assert.equal(status.body.includes(URL), false);
+    assert.equal(status.body.includes(TOKEN), false);
+    for (const action of ['recover', 'renew']) {
+      const response = await app.inject({ method: 'POST', url: `/browser/daytona/${action}`, headers: { ...HEADERS, cookie: proofCookie }, payload: { handoff_id: ID } });
+      assert.equal(response.statusCode, 200);
+      assert.deepEqual(response.json(), { ...VIEW, handoff_id: ID });
+    }
+    const reconciled = await app.inject({ method: 'POST', url: '/browser/daytona/reconcile', headers: { ...HEADERS, cookie: proofCookie }, payload: { handoff_id: ID } });
+    assert.equal(reconciled.statusCode, 200);
+    assert.deepEqual(reconciled.json(), { status: 'saved', human_input_revoked: true, checkpoint_saved: true, mission_released: true });
+    const completed = await app.inject({ method: 'POST', url: '/browser/daytona/complete', headers: { ...HEADERS, cookie: proofCookie }, payload: { handoff_id: ID } });
+    assert.equal(completed.statusCode, 200);
+    assert.deepEqual(completed.json(), { status: 'saved', human_input_revoked: true, checkpoint_saved: true, mission_released: true });
+    const expired = await app.inject({ method: 'POST', url: '/browser/daytona/expire', headers: { ...HEADERS, cookie: proofCookie }, payload: { handoff_id: ID } });
+    assert.equal(expired.statusCode, 200);
+    assert.deepEqual(expired.json(), { status: 'expired', human_input_revoked: true, mission_released: true });
+    assert.deepEqual(seen, [
+      `status:${ID}:${proof}`, `recover:${ID}:${proof}`, `renew:${ID}:${proof}`, `reconcile:${ID}:${proof}`, `complete:${proof}`, `expire:${proof}`,
+    ]);
+  } finally { await app.close(); }
+});
+
+test('Daytona page commits only the selector before network work and never stores the bearer or signed URL', async () => {
+  const app = appWith();
+  try {
+    const response = await app.inject('/browser/daytona');
+    const script = response.body.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1];
+    assert.ok(script);
+    const requests: { url: string; body: Record<string, unknown> }[] = [];
+    const stored = new Map<string, string>();
+    const scheduled: number[] = [];
+    const handlers = new Map<string, () => Promise<void>>();
+    const nodes = new Map<string, Record<string, unknown>>();
+    for (const id of ['status', 'deadlines', 'targetHeading', 'targetInstructions', 'viewer', 'done', 'cancel', 'recover', 'renew', 'open', 'bootstrap', 'reconcile']) nodes.set(id, { textContent: '', src: '', hidden: true, disabled: true, focus: () => {}, addEventListener: (event: string, fn: () => Promise<void>) => handlers.set(`${id}:${event}`, fn) });
+    let location = '/browser/daytona';
+    const context = {
+      window: { location: { hash: `#token=${TOKEN}`, search: '', pathname: '/browser/daytona' } },
+      history: { replaceState: (_: unknown, _title: string, value: string) => { location = value; } },
+      URLSearchParams, URL, Date: Object.assign(Date, { now: () => NOW }), TextEncoder, AbortSignal: { timeout: () => ({}) }, setTimeout: (_: unknown, delay: number) => { scheduled.push(delay); return scheduled.length; }, clearTimeout: () => {},
+      crypto: { subtle: { digest: async (_: string, data: Uint8Array) => Uint8Array.from(createHash('sha256').update(data).digest()) } },
+      document: { getElementById: (id: string) => nodes.get(id) },
+      sessionStorage: { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => stored.set(key, value), removeItem: (key: string) => stored.delete(key) },
+      fetch: async (url: string, init: { body: string }) => {
+        assert.equal(location, `/browser/daytona?handoff=${ID}`, 'selector is placed in history before network I/O');
+        requests.push({ url, body: JSON.parse(init.body) });
+        const body = url.endsWith('/bootstrap')
+          ? { ready: requests.filter(value => value.url.endsWith('/bootstrap')).length > 1 }
+          : url.endsWith('/prepare')
+          ? { handoff_id: ID, opening_expires_at: OPENING, mission_expires_at: MISSION, target_label: 'WeFunder' }
+          : { ...VIEW, handoff_id: ID };
+        return { ok: true, status: 200, json: async () => body };
+      },
+    };
+    runInNewContext(script, context);
+    for (let i = 0; i < 30 && requests.length < 2; i++) await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(requests, [
+      { url: '/browser/daytona/bootstrap', body: {} },
+      { url: '/browser/daytona/bootstrap', body: {} },
+      { url: '/browser/daytona/prepare', body: { token: TOKEN } },
+      { url: '/browser/daytona/exchange', body: { token: TOKEN } },
+    ]);
+    assert.equal(stored.get('otc-daytona-handoff'), ID);
+    assert.equal(JSON.stringify([...stored]).includes(TOKEN), false);
+    assert.equal(JSON.stringify([...stored]).includes(URL), false);
+    assert.equal(nodes.get('viewer')!.src, URL);
+    assert.equal(nodes.get('targetHeading')!.textContent, 'Connect to WeFunder');
+    assert.match(String(nodes.get('targetInstructions')!.textContent), /WeFunder workspace/);
+    assert.match(String(nodes.get('deadlines')!.textContent), /05:00 remaining.*60:00 remaining/);
+    await handlers.get('viewer:load')!();
+    assert.equal(nodes.get('done')!.disabled, false);
+    assert.deepEqual(scheduled, [1_000, 15_000, 90_000]);
+  } finally { await app.close(); }
+});
+
+test('Daytona viewer URLs still reject untrusted authorities and signed query credentials', async () => {
+  const proof = 'B'.repeat(43);
   for (const signed_url of ['https://6080-token.evil.example/vnc.html', 'https://6080-token.proxy.daytona.works.evil.example/vnc.html', 'http://6080-token.proxy.daytona.works/vnc.html', 'https://6080-token.proxy.daytona.works:444/vnc.html', 'https://2280-token.proxy.daytona.works/vnc.html', 'https://6080-token.proxy.daytona.works/toolbox', `${URL}&token=MASTER_SECRET`, 'https://user:MASTER_SECRET@6080-token.proxy.daytona.works/vnc.html', `${URL}#MASTER_SECRET`]) {
     const app = appWith({ exchange: async () => ({ ...VIEW, signed_url }) });
     try {
-      const response = await app.inject({ method: 'POST', url: '/browser/daytona/exchange', headers: HEADERS, payload: { token: TOKEN } });
+      const response = await app.inject({ method: 'POST', url: '/browser/daytona/exchange', headers: { ...HEADERS, cookie: `__Host-otc-daytona-recovery=${proof}` }, payload: { token: TOKEN } });
       assert.equal(response.statusCode, 409, signed_url);
-      assert.equal(response.headers['set-cookie'], undefined);
       assert.equal(response.body.includes('MASTER_SECRET'), false);
       assert.equal(response.body.includes(signed_url), false);
     } finally { await app.close(); }
   }
-  const app = appWith({ exchange: async () => ({ ...VIEW, expires_at: NOW }) });
-  try { assert.equal((await app.inject({ method: 'POST', url: '/browser/daytona/exchange', headers: HEADERS, payload: { token: TOKEN } })).statusCode, 409); }
-  finally { await app.close(); }
 });
 
-test('Daytona resume/complete/expire require exact selected cookie and resume never renews expiry', async () => {
-  const seen: string[] = [];
-  const app = appWith({
-    resume: async token => { seen.push(`resume:${token}`); return VIEW; },
-    complete: async token => { seen.push(`complete:${token}`); return { status: 'saved', human_input_revoked: true }; },
-    expire: async token => { seen.push(`expire:${token}`); return { status: 'expired', human_input_revoked: true }; },
-  });
-  try {
-    for (const action of ['resume', 'complete', 'expire']) {
-      for (const cookie of ['', '__Host-otc-website-login=' + TOKEN, COOKIE.replace(TOKEN, 'B'.repeat(43)), `${COOKIE}; ${COOKIE}`]) {
-        assert.equal((await app.inject({ method: 'POST', url: `/browser/daytona/${action}`, headers: { ...HEADERS, cookie }, payload: { handoff_id: ID } })).statusCode, 400);
-      }
-      assert.equal((await app.inject({ method: 'POST', url: `/browser/daytona/${action}`, headers: { ...HEADERS, cookie: COOKIE }, payload: { handoff_id: ID, token: TOKEN } })).statusCode, 400);
-      assert.equal((await app.inject({ method: 'POST', url: `/browser/daytona/${action}`, headers: { origin: 'https://evil.example', cookie: COOKIE }, payload: { handoff_id: ID } })).statusCode, 403);
-    }
-    assert.deepEqual(seen, []);
-    const resumed = await app.inject({ method: 'POST', url: '/browser/daytona/resume', headers: { ...HEADERS, cookie: COOKIE }, payload: { handoff_id: ID } });
-    assert.equal(resumed.statusCode, 200);
-    assert.equal(resumed.headers['set-cookie'], undefined);
-    assert.deepEqual(resumed.json(), { ...VIEW, handoff_id: ID });
-    for (const action of ['complete', 'expire']) {
-      const response = await app.inject({ method: 'POST', url: `/browser/daytona/${action}`, headers: { ...HEADERS, cookie: `unrelated=keep; ${COOKIE}` }, payload: { handoff_id: ID } });
-      assert.equal(response.statusCode, 200);
-      assert.equal(response.headers['set-cookie'], `__Host-otc-daytona-login-${ID}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`);
-    }
-    assert.deepEqual(seen, [`resume:${TOKEN}`, `complete:${TOKEN}`, `expire:${TOKEN}`]);
-  } finally { await app.close(); }
-});
-
-test('Daytona terminal actions fail closed without confirmed human-input revocation and never leak errors', async () => {
-  const app = appWith({
-    complete: async () => ({ status: 'saved', human_input_revoked: false }) as never,
-    expire: async () => { throw new Error(`unknown effect ${TOKEN} ${URL}`); },
-  });
-  try {
-    for (const action of ['complete', 'expire']) {
-      const response = await app.inject({ method: 'POST', url: `/browser/daytona/${action}`, headers: { ...HEADERS, cookie: COOKIE }, payload: { handoff_id: ID } });
-      assert.equal(response.statusCode, 409);
-      assert.equal(response.headers['set-cookie'], undefined);
-      assert.equal(response.body.includes(TOKEN), false);
-      assert.equal(response.body.includes(URL), false);
-    }
-  } finally { await app.close(); }
-});
-
-test('Daytona concurrent tab selectors never choose or clear the other owner-bound handoff', async () => {
-  const secondToken = 'B'.repeat(43);
-  const completed: string[] = [];
-  const app = appWith({ exchange: async () => VIEW, complete: async token => { completed.push(token); return { status: 'saved', human_input_revoked: true }; } });
-  try {
-    const exchanges = await Promise.all([TOKEN, secondToken].map(token => app.inject({ method: 'POST', url: '/browser/daytona/exchange', headers: HEADERS, payload: { token } })));
-    const [first, second] = exchanges;
-    const both = exchanges.map(response => String(response.headers['set-cookie']).split(';')[0]).join('; ');
-    assert.notEqual(first!.json().handoff_id, second!.json().handoff_id);
-    const response = await app.inject({ method: 'POST', url: '/browser/daytona/complete', headers: { ...HEADERS, cookie: both }, payload: { handoff_id: ID } });
-    assert.equal(response.statusCode, 200);
-    assert.deepEqual(completed, [TOKEN]);
-    assert.equal(String(response.headers['set-cookie']).includes(second!.json().handoff_id), false);
-  } finally { await app.close(); }
-});
-
-test('Daytona page is nonce-protected private iframe UI, clears fragment and stores only nonsecret selector', async () => {
+test('Daytona blocked cookies prevent prepare and exchange while keeping an accessible setup retry', async () => {
   const app = appWith();
   try {
-    const response = await app.inject('/browser/daytona');
-    assert.equal(response.statusCode, 200);
-    const csp = String(response.headers['content-security-policy']);
-    assert.match(csp, /default-src 'none'/);
-    assert.match(csp, /frame-src https:\/\/\*\.proxy\.daytona\.works/);
-    assert.equal(csp.includes('unsafe-eval'), false);
-    assert.equal(response.body.includes('dcv.js'), false);
-    assert.match(response.body, /referrerpolicy="no-referrer"/);
-    const script = response.body.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1];
+    const html = await app.inject('/browser/daytona'), script = html.body.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1];
     assert.ok(script);
-    const requests: { url: string; body: unknown }[] = [];
-    const scheduled: number[] = [];
-    const stored = new Map<string, string>();
-    const handlers = new Map<string, () => Promise<void>>();
-    const nodes = new Map<string, Record<string, unknown>>();
-    for (const id of ['status', 'viewer', 'done', 'cancel']) nodes.set(id, { textContent: '', src: '', hidden: true, disabled: true, addEventListener: (_: string, fn: () => Promise<void>) => handlers.set(id, fn), removeAttribute: () => {} });
-    let fragmentCleared = false;
-    const context = {
-      window: { location: { hash: `#token=${TOKEN}`, origin: ORIGIN, pathname: '/browser/daytona' } },
-      history: { replaceState: () => { fragmentCleared = true; } },
-      URLSearchParams, URL, Date: { now: () => NOW }, setTimeout: (_: unknown, delay: number) => { scheduled.push(delay); return 0; }, clearTimeout: () => {},
-      document: { getElementById: (id: string) => nodes.get(id) },
-      sessionStorage: { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => stored.set(key, value), removeItem: (key: string) => stored.delete(key) },
-      fetch: async (url: string, init: { body: string }) => { assert.equal(fragmentCleared, true); requests.push({ url, body: JSON.parse(init.body) }); return { ok: true, json: async () => url.endsWith('exchange') ? { ...VIEW, handoff_id: ID } : { status: 'saved', human_input_revoked: true } }; },
-    };
-    runInNewContext(script, context);
-    for (let i = 0; i < 12; i++) await Promise.resolve();
-    assert.equal(requests[0]?.url, '/browser/daytona/exchange');
-    assert.equal(nodes.get('viewer')!.src, URL);
-    assert.deepEqual([...stored.values()], [ID]);
-    assert.deepEqual(scheduled, [89_000], 'best-effort release starts before original HttpOnly cookie expires');
-    assert.equal(JSON.stringify([...stored]).includes(TOKEN), false);
-    assert.equal(JSON.stringify([...stored]).includes(URL), false);
-    await handlers.get('done')!();
-    await handlers.get('done')!();
-    assert.equal(requests.filter(value => value.url.endsWith('/complete')).length, 1);
-    assert.equal(nodes.get('viewer')!.src, 'about:blank');
-    assert.deepEqual([...stored.values()], []);
-  } finally { await app.close(); }
-});
-
-test('Daytona page resumes only selector and blocks duplicate Done after an ambiguous failure', async () => {
-  const app = appWith();
-  try {
-    const response = await app.inject('/browser/daytona');
-    const script = response.body.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1];
-    assert.ok(script);
-    const requests: { url: string; body: unknown }[] = [];
-    const stored = new Map([['otc-daytona-handoff', ID]]);
-    const handlers = new Map<string, () => Promise<void>>();
-    const nodes = new Map<string, Record<string, unknown>>();
-    for (const id of ['status', 'viewer', 'done', 'cancel']) nodes.set(id, { textContent: '', src: '', hidden: true, disabled: true, addEventListener: (_: string, fn: () => Promise<void>) => handlers.set(id, fn) });
-    let cleared = false;
+    const requests: string[] = [], nodes = new Map<string, Record<string, unknown>>();
+    for (const id of ['status', 'deadlines', 'viewer', 'done', 'cancel', 'recover', 'renew', 'open', 'bootstrap', 'reconcile']) nodes.set(id, { textContent: '', src: '', hidden: true, disabled: true, focus: () => {}, addEventListener: () => {} });
     runInNewContext(script, {
-      window: { location: { hash: '', origin: ORIGIN, pathname: '/browser/daytona' } },
-      history: { replaceState: () => { cleared = true; } }, URLSearchParams, Date, setTimeout: () => 0, clearTimeout: () => {},
-      document: { getElementById: (id: string) => nodes.get(id) },
-      sessionStorage: { getItem: (key: string) => stored.get(key), setItem: (key: string, value: string) => stored.set(key, value), removeItem: (key: string) => stored.delete(key) },
-      fetch: async (url: string, init: { body: string }) => {
-        assert.equal(cleared, true);
-        requests.push({ url, body: JSON.parse(init.body) });
-        if (url.endsWith('/complete')) throw new Error(`uncertain ${TOKEN}`);
-        return { ok: true, json: async () => ({ ...VIEW, handoff_id: ID }) };
+      window: { location: { hash: `#token=${TOKEN}`, search: '', pathname: '/browser/daytona' } }, history: { replaceState: () => {} },
+      URLSearchParams, Date: Object.assign(Date, { now: () => NOW }), TextEncoder, AbortSignal: { timeout: () => ({}) },
+      crypto: { subtle: { digest: async (_: string, data: Uint8Array) => Uint8Array.from(createHash('sha256').update(data).digest()) } },
+      setTimeout: () => 0, clearTimeout: () => {}, document: { getElementById: (id: string) => nodes.get(id) },
+      sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+      fetch: async (url: string) => { requests.push(url); return { ok: true, json: async () => ({ ready: false }) }; },
+    });
+    for (let i = 0; i < 24; i++) await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(requests, ['/browser/daytona/bootstrap', '/browser/daytona/bootstrap']);
+    assert.equal(nodes.get('bootstrap')!.hidden, false);
+    assert.match(String(nodes.get('status')!.textContent), /not accepting the required cookie/i);
+  } finally { await app.close(); }
+});
+
+test('Daytona reload of a prepared selector offers an explicit open action and never mints from status', async () => {
+  const app = appWith({
+    status: async () => ({ status: 'ready_for_open', opening_expires_at: OPENING, mission_expires_at: MISSION }),
+    openPrepared: async () => VIEW,
+  });
+  try {
+    const proofCookie = await recoveryCookie(app), html = await app.inject('/browser/daytona');
+    const script = html.body.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1]; assert.ok(script);
+    const requests: string[] = [], handlers = new Map<string, () => Promise<void>>(), stored = new Map<string, string>();
+    const nodes = new Map<string, Record<string, unknown>>();
+    for (const id of ['status', 'deadlines', 'viewer', 'done', 'cancel', 'recover', 'renew', 'open', 'bootstrap', 'reconcile']) nodes.set(id, { textContent: '', src: '', hidden: true, disabled: true, focus: () => {}, addEventListener: (event: string, fn: () => Promise<void>) => handlers.set(`${id}:${event}`, fn) });
+    runInNewContext(script, {
+      window: { location: { hash: '', search: `?handoff=${ID}`, pathname: '/browser/daytona' } }, history: { replaceState: () => {} },
+      URLSearchParams, Date: Object.assign(Date, { now: () => NOW }), TextEncoder, AbortSignal: { timeout: () => ({}) }, crypto: {}, setTimeout: () => 0, clearTimeout: () => {},
+      document: { getElementById: (id: string) => nodes.get(id) }, sessionStorage: { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => stored.set(key, value), removeItem: (key: string) => stored.delete(key) },
+      fetch: async (url: string, init: { body: string }) => { requests.push(url); const response = await app.inject({ method: 'POST', url, headers: { ...HEADERS, cookie: proofCookie }, payload: JSON.parse(init.body) }); return { ok: response.statusCode === 200, status: response.statusCode, json: async () => response.json() }; },
+    });
+    for (let i = 0; i < 24 && nodes.get('open')!.hidden; i++) await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(requests, ['/browser/daytona/status']);
+    assert.equal(nodes.get('open')!.hidden, false);
+    await handlers.get('open:click')!();
+    assert.deepEqual(requests, ['/browser/daytona/status', '/browser/daytona/open']);
+  } finally { await app.close(); }
+});
+
+test('Daytona ambiguous Done stays one-shot and recovery checks receipt status without reopening', async () => {
+  const app = appWith();
+  try {
+    const html = await app.inject('/browser/daytona');
+    assert.match(String(html.headers['content-security-policy']), /default-src 'none'/);
+    assert.match(String(html.headers['content-security-policy']), /frame-src https:\/\/\*\.proxy\.daytona\.works/);
+    assert.equal(String(html.headers['content-security-policy']).includes('unsafe-eval'), false);
+    const script = html.body.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1]; assert.ok(script);
+    const requests: string[] = [], handlers = new Map<string, () => Promise<void>>(), stored = new Map<string, string>();
+    const nodes = new Map<string, Record<string, unknown>>();
+    for (const id of ['status', 'deadlines', 'viewer', 'done', 'cancel', 'recover', 'renew', 'open', 'bootstrap', 'reconcile']) nodes.set(id, { textContent: '', src: '', hidden: true, disabled: true, focus: () => {}, addEventListener: (event: string, fn: () => Promise<void>) => handlers.set(`${id}:${event}`, fn) });
+    runInNewContext(script, {
+      window: { location: { hash: `#token=${TOKEN}`, search: '', pathname: '/browser/daytona' } }, history: { replaceState: () => {} },
+      URLSearchParams, Date: Object.assign(Date, { now: () => NOW }), TextEncoder, AbortSignal: { timeout: () => ({}) },
+      crypto: { subtle: { digest: async (_: string, data: Uint8Array) => Uint8Array.from(createHash('sha256').update(data).digest()) } },
+      setTimeout: () => 0, clearTimeout: () => {}, document: { getElementById: (id: string) => nodes.get(id) },
+      sessionStorage: { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => stored.set(key, value), removeItem: (key: string) => stored.delete(key) },
+      fetch: async (url: string) => {
+        requests.push(url);
+        if (url.endsWith('/bootstrap')) return { ok: true, status: 200, json: async () => ({ ready: true }) };
+        if (url.endsWith('/prepare')) return { ok: true, status: 200, json: async () => ({ handoff_id: ID, opening_expires_at: OPENING, mission_expires_at: MISSION }) };
+        if (url.endsWith('/exchange')) return { ok: true, status: 200, json: async () => ({ ...VIEW, handoff_id: ID }) };
+        if (url.endsWith('/complete')) throw new TypeError('connection lost after submit');
+        if (url.endsWith('/status')) return { ok: true, status: 200, json: async () => ({ status: 'pending', cleanup_required: true, opening_expires_at: OPENING, mission_expires_at: MISSION }) };
+        if (url.endsWith('/reconcile')) return { ok: true, status: 200, json: async () => ({ status: 'saved', human_input_revoked: true, checkpoint_saved: true, mission_released: true }) };
+        assert.fail('ambiguous completion must not open or recover a viewer');
       },
     });
-    for (let i = 0; i < 12; i++) await Promise.resolve();
-    assert.deepEqual(requests[0], { url: '/browser/daytona/resume', body: { handoff_id: ID } });
-    assert.equal(stored.get('otc-daytona-handoff'), ID);
-    await handlers.get('done')!();
-    await handlers.get('done')!();
-    await handlers.get('cancel')!();
-    assert.equal(requests.length, 2);
-    assert.equal(nodes.get('done')!.disabled, true);
-    assert.equal(nodes.get('cancel')!.disabled, true);
+    for (let i = 0; i < 30 && !requests.some(value => value.endsWith('/exchange')); i++) await new Promise<void>(resolve => setImmediate(resolve));
+    await handlers.get('viewer:load')!();
+    await handlers.get('done:click')!(); await handlers.get('done:click')!();
+    assert.equal(requests.filter(value => value.endsWith('/complete')).length, 1);
+    await handlers.get('recover:click')!();
+    assert.equal(requests.filter(value => value.endsWith('/status')).length, 1);
+    assert.equal(requests.filter(value => value.endsWith('/recover')).length, 0);
+    assert.equal(requests.filter(value => value.endsWith('/renew')).length, 0);
+    assert.equal(nodes.get('reconcile')!.hidden, false, 'durable saved receipt exposes only the explicit release reconciliation action');
+    await handlers.get('reconcile:click')!();
+    assert.equal(requests.filter(value => value.endsWith('/reconcile')).length, 1);
     assert.equal(nodes.get('viewer')!.src, 'about:blank');
-    assert.match(String(nodes.get('status')!.textContent), /could not be confirmed/);
-    assert.equal(String(nodes.get('status')!.textContent).includes(TOKEN), false);
-    assert.equal(stored.size, 0);
-  } finally { await app.close(); }
-});
-
-test('Daytona page still opens initial handoff if browser storage is blocked', async () => {
-  const app = appWith();
-  try {
-    const response = await app.inject('/browser/daytona');
-    const script = response.body.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1];
-    assert.ok(script);
-    const nodes = new Map<string, Record<string, unknown>>();
-    for (const id of ['status', 'viewer', 'done', 'cancel']) nodes.set(id, { textContent: '', src: '', hidden: true, disabled: true, addEventListener: () => {} });
-    runInNewContext(script, {
-      window: { location: { hash: `#token=${TOKEN}`, pathname: '/browser/daytona' } }, history: { replaceState: () => {} }, URLSearchParams, Date,
-      setTimeout: () => 0, clearTimeout: () => {}, document: { getElementById: (id: string) => nodes.get(id) },
-      sessionStorage: { getItem: () => { throw new Error('SecurityError'); }, setItem: () => { throw new Error('SecurityError'); }, removeItem: () => { throw new Error('SecurityError'); } },
-      fetch: async () => ({ ok: true, json: async () => ({ ...VIEW, handoff_id: ID }) }),
-    });
-    for (let i = 0; i < 12; i++) await Promise.resolve();
-    assert.equal(nodes.get('viewer')!.src, URL);
-    assert.equal(nodes.get('done')!.disabled, false);
-  } finally { await app.close(); }
-});
-
-test('Daytona offline or transient resume retains only selector and a later manual reload resumes the same cookie-bound grant', async () => {
-  let resumes = 0;
-  const app = appWith({ resume: async token => { assert.equal(token, TOKEN); resumes++; return VIEW; } });
-  try {
-    const html = await app.inject('/browser/daytona');
-    const script = html.body.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1];
-    assert.ok(script);
-    for (const failure of ['offline', 408, 429, 500, 502, 503, 504] as const) {
-      const stored = new Map([['otc-daytona-handoff', ID]]);
-      const requests: string[] = [];
-      const scheduled: number[] = [];
-      let online = false;
-      const reload = async () => {
-        const nodes = new Map<string, Record<string, unknown>>();
-        const handlers = new Map<string, () => Promise<void>>();
-        for (const id of ['status', 'viewer', 'done', 'cancel']) nodes.set(id, { textContent: '', src: '', hidden: true, disabled: true, addEventListener: (_: string, fn: () => Promise<void>) => handlers.set(id, fn) });
-        runInNewContext(script, {
-          window: { location: { hash: '', pathname: '/browser/daytona' } }, history: { replaceState: () => {} }, URLSearchParams, Date: { now: () => NOW },
-          setTimeout: (_: unknown, delay: number) => { scheduled.push(delay); return 0; }, clearTimeout: () => {},
-          document: { getElementById: (id: string) => nodes.get(id) },
-          sessionStorage: { getItem: (key: string) => stored.get(key), setItem: (key: string, value: string) => stored.set(key, value), removeItem: (key: string) => stored.delete(key) },
-          fetch: async (url: string, init: { body: string; credentials: string }) => {
-            requests.push(url);
-            assert.equal(init.credentials, 'same-origin');
-            assert.deepEqual(JSON.parse(init.body), { handoff_id: ID });
-            if (!online) {
-              if (failure === 'offline') throw new TypeError('Failed to fetch');
-              return { ok: false, status: failure };
-            }
-            const response = await app.inject({ method: 'POST', url, headers: { ...HEADERS, cookie: COOKIE }, payload: JSON.parse(init.body) });
-            assert.equal(response.headers['set-cookie'], undefined, 'reload must not extend the original cookie');
-            return { ok: response.statusCode === 200, status: response.statusCode, json: async () => response.json() };
-          },
-        });
-        for (let i = 0; i < 30 && !nodes.get('status')!.textContent; i++) await new Promise<void>(resolve => setImmediate(resolve));
-        return { nodes, handlers };
-      };
-      const failed = await reload();
-      assert.equal(stored.get('otc-daytona-handoff'), ID, String(failure));
-      assert.deepEqual(requests, ['/browser/daytona/resume'], 'no automatic retry');
-      assert.deepEqual(scheduled, [], 'no expiry or other effect scheduled on failure');
-      assert.equal(failed.nodes.get('viewer')!.src, 'about:blank');
-      assert.equal(failed.nodes.get('done')!.disabled, true);
-      assert.equal(failed.nodes.get('cancel')!.disabled, true);
-      assert.match(String(failed.nodes.get('status')!.textContent), /reload/i);
-      await failed.handlers.get('done')!(); await failed.handlers.get('cancel')!();
-      assert.equal(requests.length, 1, 'failed bootstrap cannot invoke terminal effects');
-      online = true;
-      const recovered = await reload();
-      assert.equal(recovered.nodes.get('viewer')!.src, URL);
-      assert.equal(recovered.nodes.get('done')!.disabled, false);
-      assert.deepEqual(requests, ['/browser/daytona/resume', '/browser/daytona/resume']);
-      assert.deepEqual(scheduled, [89_000], 'only the original expiry is scheduled after recovery');
-      assert.deepEqual([...stored.values()], [ID]);
-      assert.equal(JSON.stringify([...stored]).includes(TOKEN), false);
-      assert.equal(JSON.stringify([...stored]).includes(URL), false);
-    }
-    assert.equal(resumes, 7);
-  } finally { await app.close(); }
-});
-
-test('Daytona explicit denied or terminal resume response clears selector and cannot invoke Done or expiry', async () => {
-  const app = appWith();
-  try {
-    const html = await app.inject('/browser/daytona');
-    const script = html.body.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1];
-    assert.ok(script);
-    for (const status of [400, 401, 403, 404, 409, 410, 422]) {
-      const stored = new Map([['otc-daytona-handoff', ID]]);
-      const requests: string[] = [];
-      const handlers = new Map<string, () => Promise<void>>();
-      const nodes = new Map<string, Record<string, unknown>>();
-      for (const id of ['status', 'viewer', 'done', 'cancel']) nodes.set(id, { textContent: '', src: '', hidden: true, disabled: true, addEventListener: (_: string, fn: () => Promise<void>) => handlers.set(id, fn) });
-      runInNewContext(script, {
-        window: { location: { hash: '', pathname: '/browser/daytona' } }, history: { replaceState: () => {} }, URLSearchParams, Date: { now: () => NOW },
-        setTimeout: () => { assert.fail('terminal resume must not schedule effects'); }, clearTimeout: () => {}, document: { getElementById: (id: string) => nodes.get(id) },
-        sessionStorage: { getItem: (key: string) => stored.get(key), setItem: (key: string, value: string) => stored.set(key, value), removeItem: (key: string) => stored.delete(key) },
-        fetch: async (url: string) => { requests.push(url); return { ok: false, status }; },
-      });
-      for (let i = 0; i < 12; i++) await Promise.resolve();
-      assert.equal(stored.size, 0, String(status));
-      assert.equal(nodes.get('viewer')!.src, 'about:blank');
-      await handlers.get('done')!(); await handlers.get('cancel')!();
-      assert.deepEqual(requests, ['/browser/daytona/resume']);
-      assert.match(String(nodes.get('status')!.textContent), /expired or unavailable/);
-    }
+    assert.equal(stored.has('otc-daytona-handoff'), false, 'selector clears only after explicit reconciliation confirms release');
+    assert.match(String(nodes.get('status')!.textContent), /control released/i);
   } finally { await app.close(); }
 });

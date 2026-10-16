@@ -1,20 +1,25 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { URL as URLConstructor } from 'node:url';
 import test from 'node:test';
-import { DaytonaViewerHandoffService, DynamoDaytonaViewerTicketStore, type DaytonaViewerTicket, type DaytonaViewerTicketStore, type DaytonaViewerMissionBoundary } from './daytona-viewer-service.js';
+import { DaytonaViewerError, DaytonaViewerHandoffService, DynamoDaytonaViewerTicketStore, type DaytonaViewerTicket, type DaytonaViewerTicketStore, type DaytonaViewerMissionBoundary } from './daytona-viewer-service.js';
 
 const NOW = 1_900_000_000_000;
 const PRINCIPAL = 'a'.repeat(64);
 const SESSION = randomUUID();
 const HANDLE = randomUUID();
 const URL = 'https://6080-signed.proxy.daytona.works/vnc.html';
+const PROOF = 'P'.repeat(43);
 function fixture() {
   let now = NOW;
   const rows = new Map<string, DaytonaViewerTicket>();
   const leases = new Map<string, string>();
+  const pointers = new Map<string, string>();
   const calls: string[] = [];
   let activeHandle: string | undefined;
+  let activeExpiresAt = NOW + 90_000;
+  let missionPhase = 'ACTIVE', missionUnknown = false, profileLeaseReleased = false;
+  let humanInputReceipt: { grantHandle: string; completedAt: number; human_input_revoked: true; profile_checkpointed: true; automation_resumed: true } | undefined;
   const store: DaytonaViewerTicketStore = {
     create: async (hash, row) => { if (rows.has(hash)) return false; rows.set(hash, structuredClone(row)); return true; },
     load: async hash => structuredClone(rows.get(hash) ?? null),
@@ -22,15 +27,18 @@ function fixture() {
     acquireMissionLease: async (id, hash) => { if (leases.has(id)) return false; leases.set(id, hash); return true; },
     ownsMissionLease: async (id, hash) => leases.get(id) === hash,
     releaseMissionLease: async (id, hash) => { if (leases.get(id) === hash) leases.delete(id); },
+    bindBrowser: async (hash, selector, browserHash, recoveryUntil, next) => { const row = rows.get(hash); const key = `${browserHash}:${selector}`; if (!row || (row.browserHash && row.browserHash !== browserHash) || (pointers.has(key) && pointers.get(key) !== hash)) return false; rows.set(hash, structuredClone(next)); pointers.set(key, hash); return true; },
+    loadByBrowser: async (selector, browserHash) => { const hash = pointers.get(`${browserHash}:${selector}`); return hash ? { hash, ticket: structuredClone(rows.get(hash)!) } : null; },
   };
   const missions: DaytonaViewerMissionBoundary = {
-    loadSession: async id => ({ sessionId: id, owner: 'cto', ownerSubjectHash: PRINCIPAL, expiresAt: NOW + 600_000, phase: 'ACTIVE', effectUnknown: false, ...(activeHandle ? { viewerGrantHandle: activeHandle } : {}) }),
-    getViewerGrant: async (owner, id, principal, seconds) => { assert.equal(owner, 'cto'); assert.equal(id, SESSION); assert.equal(principal, PRINCIPAL); calls.push(`mint:${seconds}`); activeHandle = HANDLE; return { url: URL, expiresAt: NOW + 90_000, grantHandle: HANDLE }; },
-    resumeViewerGrant: async (_owner, _id, _principal, handle) => { assert.equal(handle, HANDLE); calls.push('resume'); return { url: URL, expiresAt: NOW + 90_000, grantHandle: HANDLE }; },
-    completeHumanInput: async () => { calls.push('complete'); return { status: 'saved', human_input_revoked: true }; },
-    stop: async () => { calls.push('stop'); },
+    loadSession: async id => ({ sessionId: id, owner: 'cto', ownerSubjectHash: PRINCIPAL, expiresAt: NOW + 600_000, phase: missionPhase, effectUnknown: missionUnknown, ...(profileLeaseReleased ? { profileLeaseReleased: true } : {}), ...(activeHandle ? { viewerGrantHandle: activeHandle } : {}), ...(humanInputReceipt ? { humanInputReceipt } : {}) }),
+    getViewerGrant: async (owner, id, principal, seconds) => { assert.equal(owner, 'cto'); assert.equal(id, SESSION); assert.equal(principal, PRINCIPAL); calls.push(`mint:${seconds}`); activeHandle = HANDLE; activeExpiresAt = NOW + 90_000; return { url: URL, expiresAt: activeExpiresAt, grantHandle: HANDLE }; },
+    resumeViewerGrant: async (_owner, _id, _principal, handle) => { assert.equal(handle, HANDLE); calls.push('resume'); return { url: URL, expiresAt: activeExpiresAt, grantHandle: HANDLE }; },
+    completeHumanInput: async () => { calls.push('complete'); humanInputReceipt = { grantHandle: activeHandle!, completedAt: now, human_input_revoked: true, profile_checkpointed: true, automation_resumed: true }; activeHandle = undefined; return { status: 'saved', human_input_revoked: true, receipt: humanInputReceipt }; },
+    renewViewerGrant: async (_owner, _id, _principal, handle, notAfter) => { assert.equal(handle, HANDLE); calls.push('renew'); activeHandle = HANDLE; activeExpiresAt = Math.min(now + 90_000, notAfter); return { url: URL, expiresAt: activeExpiresAt, grantHandle: HANDLE }; },
+    stop: async () => { calls.push('stop'); missionPhase = 'CLOSED'; missionUnknown = false; profileLeaseReleased = true; },
   };
-  return { rows, leases, store, missions, calls, advance: (ms: number) => { now += ms; }, service: new DaytonaViewerHandoffService(store, missions, () => now) };
+  return { rows, leases, store, missions, calls, setReceipt: (receipt: typeof humanInputReceipt) => { humanInputReceipt = receipt; }, markLeaseReleased: (released: boolean) => { profileLeaseReleased = released; }, advance: (ms: number) => { now += ms; }, service: new DaytonaViewerHandoffService(store, missions, () => now) };
 }
 
 test('Daytona bearer handoff persists only SHA lookup and owned mission binding; single exchange/resume preserves same grant and original expiry', async () => {
@@ -49,9 +57,140 @@ test('Daytona bearer handoff persists only SHA lookup and owned mission binding;
   assert.equal(JSON.stringify([...f.rows]).includes(URL), false);
   assert.equal([...f.rows.values()][0]!.expiresAt, NOW + 120_000);
   await f.service.complete(token);
-  assert.deepEqual(f.calls, ['mint:120', 'resume', 'complete']);
+  assert.deepEqual(f.calls, ['mint:120', 'resume', 'complete', 'stop']);
   assert.equal(f.leases.size, 0);
   await assert.rejects(f.service.complete(token));
+});
+
+test('prepare durably binds one browser proof; selector alone and another browser cannot recover', async () => {
+  const f = fixture(); const started = await f.service.issue('cto', SESSION, PRINCIPAL, 120);
+  const token = new URLConstructor(started.login_url).hash.slice(7);
+  const prepared = await f.service.prepare(token, PROOF);
+  assert.equal(prepared.handoff_id, createHash('sha256').update(token).digest('hex').slice(0, 32));
+  assert.equal(prepared.opening_expires_at, started.expires_at);
+  assert.equal(prepared.mission_expires_at, NOW + 600_000);
+  assert.deepEqual(await f.service.prepare(token, PROOF), prepared, 'same cookie prepare is idempotent');
+  assert.equal([...f.rows.values()][0]!.browserHash, createHash('sha256').update(PROOF).digest('hex'));
+  assert.equal(JSON.stringify([...f.rows]).includes(PROOF), false);
+  await assert.rejects(f.service.recover(prepared.handoff_id, 'Q'.repeat(43)));
+});
+
+test('a prepared NEW ticket reports ready_for_open and only explicit openPrepared begins the one mint', async () => {
+  const f = fixture(); const started = await f.service.issue('cto', SESSION, PRINCIPAL, 120);
+  const token = new URLConstructor(started.login_url).hash.slice(7); const prepared = await f.service.prepare(token, PROOF);
+  assert.deepEqual(await f.service.status(prepared.handoff_id, PROOF), { status: 'ready_for_open', opening_expires_at: started.expires_at, mission_expires_at: NOW + 600_000 });
+  const view = await f.service.openPrepared(prepared.handoff_id, PROOF);
+  assert.deepEqual(view, { signed_url: URL, expires_at: NOW + 90_000 });
+  assert.deepEqual(f.calls, ['mint:120']);
+  await assert.rejects(f.service.openPrepared(prepared.handoff_id, PROOF), error => error instanceof DaytonaViewerError && error.code === 'operation_pending');
+  assert.equal(f.calls.filter(call => call.startsWith('mint:')).length, 1);
+});
+
+test('lost exchange ticket commit is recovered by reading only the persisted exact grant; no second mint', async () => {
+  const f = fixture(); const started = await f.service.issue('cto', SESSION, PRINCIPAL, 120);
+  const token = new URLConstructor(started.login_url).hash.slice(7); const prepared = await f.service.prepare(token, PROOF);
+  const transition = f.store.transition;
+  f.store.transition = async (hash, phase, next) => phase === 'ISSUING' ? false : transition(hash, phase, next);
+  await assert.rejects(f.service.exchange(token, PROOF));
+  assert.equal([...f.rows.values()][0]!.phase, 'ISSUING');
+  f.store.transition = transition;
+  assert.deepEqual(await f.service.recover(prepared.handoff_id, PROOF), { signed_url: URL, expires_at: NOW + 90_000 });
+  assert.deepEqual(f.calls, ['mint:120', 'resume']);
+  assert.equal([...f.rows.values()][0]!.phase, 'EXCHANGED');
+});
+
+test('expired opening ticket returns opening_expired before any provider call', async () => {
+  const f = fixture(); const started = await f.service.issue('cto', SESSION, PRINCIPAL, 60);
+  const token = new URLConstructor(started.login_url).hash.slice(7); f.advance(60_001);
+  await assert.rejects(f.service.exchange(token), error => error instanceof DaytonaViewerError && error.code === 'opening_expired');
+  assert.deepEqual(f.calls, []);
+});
+
+test('unknown mint receipt remains fenced; recover never mints or clears ISSUING', async () => {
+  const f = fixture(); const started = await f.service.issue('cto', SESSION, PRINCIPAL, 120);
+  const token = new URLConstructor(started.login_url).hash.slice(7); const prepared = await f.service.prepare(token, PROOF);
+  f.missions.getViewerGrant = async () => { f.calls.push('unknown-mint'); throw new Error('private provider detail'); };
+  await assert.rejects(f.service.exchange(token, PROOF));
+  await assert.rejects(f.service.recover(prepared.handoff_id, PROOF));
+  assert.equal([...f.rows.values()][0]!.phase, 'ISSUING');
+  assert.equal(f.calls.filter(call => call === 'unknown-mint').length, 1);
+});
+
+test('expired grant renewal is explicit, keeps original opening deadline, and recovers a lost renewal commit by exact read', async () => {
+  const f = fixture(); const started = await f.service.issue('cto', SESSION, PRINCIPAL, 300);
+  const token = new URLConstructor(started.login_url).hash.slice(7); const prepared = await f.service.prepare(token, PROOF);
+  await f.service.exchange(token, PROOF); f.advance(90_001);
+  assert.deepEqual(await f.service.status(prepared.handoff_id, PROOF), { status: 'pending', opening_expires_at: started.expires_at, mission_expires_at: NOW + 600_000, viewer_expires_at: NOW + 90_000, renewal_allowed: true });
+  const transition = f.store.transition;
+  f.store.transition = async (hash, phase, next) => phase === 'RENEWING' ? false : transition(hash, phase, next);
+  await assert.rejects(f.service.renew(prepared.handoff_id, PROOF));
+  assert.equal([...f.rows.values()][0]!.phase, 'RENEWING');
+  f.store.transition = transition;
+  const renewed = await f.service.recover(prepared.handoff_id, PROOF);
+  assert.equal(renewed.expires_at, NOW + 180_001);
+  assert.equal([...f.rows.values()][0]!.expiresAt, started.expires_at, 'opening deadline is immutable');
+  assert.equal([...f.rows.values()][0]!.phase, 'EXCHANGED');
+  assert.equal(f.calls.filter(call => call.startsWith('mint:')).length, 1);
+  assert.equal(f.calls.filter(call => call === 'renew').length, 1);
+});
+
+test('Done acknowledgement loss reconciles a closed exact-receipt mission without repeating checkpoint or stop', async () => {
+  const f = fixture(); const started = await f.service.issue('cto', SESSION, PRINCIPAL, 120);
+  const token = new URLConstructor(started.login_url).hash.slice(7); const prepared = await f.service.prepare(token, PROOF);
+  await f.service.exchange(token, PROOF);
+  const transition = f.store.transition;
+  f.store.transition = async (hash, phase, next) => {
+    if (phase === 'COMPLETING' && next.phase === 'SAVED') return false;
+    return transition(hash, phase, next);
+  };
+  await assert.rejects(f.service.complete(prepared.handoff_id, PROOF));
+  f.store.transition = transition;
+  assert.deepEqual(await f.service.status(prepared.handoff_id, PROOF), { status: 'saved', opening_expires_at: started.expires_at, mission_expires_at: NOW + 600_000 });
+  assert.equal([...f.rows.values()][0]!.phase, 'SAVED'); assert.equal(f.leases.size, 0);
+  assert.equal(f.calls.filter(call => call === 'complete').length, 1);
+  assert.equal(f.calls.filter(call => call === 'stop').length, 1);
+});
+
+test('lost core Done acknowledgement exposes cleanup_required; explicit reconcile stops once without checkpoint replay', async () => {
+  const f = fixture(); const started = await f.service.issue('cto', SESSION, PRINCIPAL, 120);
+  const token = new URLConstructor(started.login_url).hash.slice(7); const prepared = await f.service.prepare(token, PROOF);
+  await f.service.exchange(token, PROOF);
+  f.missions.completeHumanInput = async () => { f.calls.push('complete-ack-lost'); f.setReceipt({ grantHandle: HANDLE, completedAt: NOW, human_input_revoked: true, profile_checkpointed: true, automation_resumed: true }); throw new Error('private lost acknowledgement'); };
+  await assert.rejects(f.service.complete(prepared.handoff_id, PROOF));
+  assert.deepEqual(await f.service.status(prepared.handoff_id, PROOF), { status: 'pending', opening_expires_at: started.expires_at, mission_expires_at: NOW + 600_000, cleanup_required: true });
+  assert.deepEqual(await f.service.reconcile(prepared.handoff_id, PROOF), { status: 'saved', human_input_revoked: true, checkpoint_saved: true, mission_released: true });
+  assert.deepEqual(f.calls.slice(-2), ['complete-ack-lost', 'stop']);
+  assert.equal(f.calls.includes('complete'), false);
+});
+
+test('closed completion receipt is not Saved until profile lease release is positively read', async () => {
+  const f = fixture(); const started = await f.service.issue('cto', SESSION, PRINCIPAL, 120);
+  const token = new URLConstructor(started.login_url).hash.slice(7); const prepared = await f.service.prepare(token, PROOF);
+  await f.service.exchange(token, PROOF);
+  const stop = f.missions.stop; let stops = 0;
+  f.missions.stop = async (...args) => { await stop(...args); if (++stops === 1) f.markLeaseReleased(false); };
+  await assert.rejects(f.service.complete(prepared.handoff_id, PROOF));
+  assert.deepEqual(await f.service.status(prepared.handoff_id, PROOF), { status: 'pending', opening_expires_at: started.expires_at, mission_expires_at: NOW + 600_000, cleanup_required: true });
+  assert.deepEqual(await f.service.reconcile(prepared.handoff_id, PROOF), { status: 'saved', human_input_revoked: true, checkpoint_saved: true, mission_released: true });
+  assert.equal(stops, 2);
+});
+
+test('Cancel is terminal expired, never saved, and remains readable after its lease is released', async () => {
+  const f = fixture(); const started = await f.service.issue('cto', SESSION, PRINCIPAL, 120);
+  const token = new URLConstructor(started.login_url).hash.slice(7); const prepared = await f.service.prepare(token, PROOF);
+  await f.service.exchange(token, PROOF); await f.service.expire(prepared.handoff_id, PROOF);
+  assert.deepEqual(await f.service.status(prepared.handoff_id, PROOF), { status: 'expired', opening_expires_at: started.expires_at, mission_expires_at: NOW + 600_000 });
+  assert.equal(f.leases.size, 0);
+  assert.equal(f.calls.includes('complete'), false);
+});
+
+test('expiry cleanup can stop a mission after its deadline but cannot mint or renew', async () => {
+  const f = fixture(); const started = await f.service.issue('cto', SESSION, PRINCIPAL, 120);
+  const token = new URLConstructor(started.login_url).hash.slice(7); const prepared = await f.service.prepare(token, PROOF);
+  await f.service.exchange(token, PROOF); f.advance(600_001);
+  assert.deepEqual(await f.service.expire(prepared.handoff_id, PROOF), { status: 'expired', human_input_revoked: true, mission_released: true });
+  assert.equal(f.calls.filter(call => call.startsWith('mint:')).length, 1);
+  assert.equal(f.leases.size, 0);
 });
 
 test('Daytona bearer adapter rejects foreign/expired missions before minting and keeps one durable mission handoff lease', async () => {
@@ -129,7 +268,7 @@ test('Daytona cancellation requires confirmed owned mission stop before lease re
   const started = await f.service.issue('cto', SESSION, PRINCIPAL, 120);
   const token = new URLConstructor(started.login_url).hash.slice(7);
   await f.service.exchange(token);
-  assert.deepEqual(await f.service.expire(token), { status: 'expired', human_input_revoked: true });
+  assert.deepEqual(await f.service.expire(token), { status: 'expired', human_input_revoked: true, mission_released: true });
   assert.deepEqual(f.calls, ['mint:120', 'stop']);
   assert.equal(f.leases.size, 0);
 });
@@ -159,4 +298,17 @@ test('Daytona Dynamo codec rejects missing ownership and unpaired grant metadata
   await assert.rejects(store.load(hash));
   payload = { ...payload, owner: 'cto', grantExpiresAt: NOW + 90000 };
   await assert.rejects(store.load(hash));
+});
+
+test('browser proof binding uses a Dynamo transaction without top-level TableName and stores only hashes', async () => {
+  let request: Record<string, unknown> | undefined;
+  const store = new DynamoDaytonaViewerTicketStore({ resolveCredentials: async () => ({ accessKeyId: 'TESTKEY', secretAccessKey: 'TESTSECRET' }), fetchImpl: async (_input, init) => { request = JSON.parse(String(init?.body)) as Record<string, unknown>; return new Response('{}'); } });
+  const hash = 'c'.repeat(64), browserHash = 'd'.repeat(64), selector = hash.slice(0, 32);
+  const ticket: DaytonaViewerTicket = { owner: 'cto', principalHash: PRINCIPAL, sessionId: SESSION, expiresAt: NOW + 120_000, missionExpiresAt: NOW + 600_000, browserHash, recoveryUntil: NOW + 600_000, phase: 'NEW', version: 1 };
+  assert.equal(await store.bindBrowser(hash, selector, browserHash, NOW + 600_000, ticket), true);
+  assert.equal(request!.TableName, undefined);
+  assert.equal(Array.isArray(request!.TransactItems), true);
+  assert.equal((request!.TransactItems as unknown[]).length, 2);
+  assert.equal(JSON.stringify(request).includes(PROOF), false);
+  assert.equal(JSON.stringify(request).includes(browserHash), true);
 });

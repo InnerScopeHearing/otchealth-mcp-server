@@ -9,7 +9,7 @@ const KEY = /^[a-z0-9][a-z0-9_-]{0,95}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const bindingFields = ['provider', 'owner', 'ownerSubjectHash', 'sandboxId', 'profileKey', 'sharedProfileKey', 'profilePath', 'readinessReceiptSha256'];
-const missionFields = ['provider', 'sessionId', 'owner', 'ownerSubjectHash', 'profileKey', 'sandboxId', 'expiresAt', 'actionsUsed', 'actionBudget', 'effectUnknown', 'phase', 'runtimeProtocol', 'sensitiveOutputSuppressed', 'viewerGrantHandle', 'viewerExpiresAt'];
+const missionFields = ['provider', 'sessionId', 'owner', 'ownerSubjectHash', 'profileKey', 'sandboxId', 'expiresAt', 'actionsUsed', 'actionBudget', 'effectUnknown', 'phase', 'runtimeProtocol', 'sensitiveOutputSuppressed', 'viewerGrantHandle', 'viewerExpiresAt', 'humanInputReceipt'];
 function record(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === 'object' && !Array.isArray(value)); }
 function only(value: Record<string, unknown>, allowed: string[]): boolean { return Object.keys(value).every(key => allowed.includes(key)); }
 function text(value: unknown, pattern: RegExp): boolean { return typeof value === 'string' && pattern.test(value); }
@@ -21,6 +21,12 @@ export function assertDaytonaBinding(value: unknown): asserts value is DaytonaBi
 export function assertDaytonaMission(value: unknown): asserts value is DaytonaMission {
   if (record(value) && 'runtimeProtocol' in value && value.runtimeProtocol !== 2) throw new DaytonaBrowserError('daytona_session_invalid');
   if (!record(value) || !only(value, missionFields) || value.provider !== 'daytona' || !ID.test(String(value.sessionId ?? '')) || !ID.test(String(value.owner ?? '')) || !HASH.test(String(value.ownerSubjectHash ?? '')) || !KEY.test(String(value.profileKey ?? '')) || !ID.test(String(value.sandboxId ?? '')) || !Number.isSafeInteger(value.expiresAt) || Number(value.expiresAt) <= 0 || !Number.isSafeInteger(value.actionsUsed) || Number(value.actionsUsed) < 0 || !Number.isSafeInteger(value.actionBudget) || Number(value.actionBudget) < 1 || Number(value.actionBudget) > 10000 || Number(value.actionsUsed) > Number(value.actionBudget) || typeof value.effectUnknown !== 'boolean' || !['OPENING', 'ACTIVE', 'RELEASING', 'CLOSED'].includes(String(value.phase)) || (value.sensitiveOutputSuppressed !== undefined && typeof value.sensitiveOutputSuppressed !== 'boolean') || (value.viewerGrantHandle !== undefined && !UUID.test(String(value.viewerGrantHandle))) || (value.viewerExpiresAt !== undefined && (!Number.isSafeInteger(value.viewerExpiresAt) || Number(value.viewerExpiresAt) <= 0 || Number(value.viewerExpiresAt) > Number(value.expiresAt))) || ((value.viewerGrantHandle === undefined) !== (value.viewerExpiresAt === undefined))) throw new DaytonaBrowserError('daytona_session_invalid');
+  if (value.humanInputReceipt !== undefined) {
+    const receipt = value.humanInputReceipt;
+    if (!record(receipt) || !only(receipt, ['grantHandle', 'completedAt', 'human_input_revoked', 'profile_checkpointed', 'automation_resumed'])
+      || Object.keys(receipt).length !== 5 || !UUID.test(String(receipt.grantHandle ?? '')) || !Number.isSafeInteger(receipt.completedAt) || Number(receipt.completedAt) <= 0
+      || receipt.human_input_revoked !== true || receipt.profile_checkpointed !== true || receipt.automation_resumed !== true) throw new DaytonaBrowserError('daytona_session_invalid');
+  }
 }
 class ConditionalConflict extends Error {}
 type Item = Record<string, { S?: string; N?: string }>;

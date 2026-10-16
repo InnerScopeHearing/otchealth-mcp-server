@@ -46,6 +46,60 @@ test('company start uses one trusted consolidated admission without discovery or
   assert.deepEqual(f.calls, [['get'], ['start-company', 'cto', 180, 25, websitePrincipalHash('cto', 'connection:own-connection')]]);
 });
 
+test('existing job read returns exact-owned Daytona mission status before the unrelated AWS live gate', async () => {
+  const previous = process.env.CLOUD_BROWSER_ENABLED; process.env.CLOUD_BROWSER_ENABLED = 'false';
+  try {
+    const f = fixture();
+    Object.assign(f.runtime.browser, { status: async (...args: unknown[]) => {
+      f.calls.push(['status', ...args]);
+      return { session_id: SESSION, phase: 'CLOSED', effectUnknown: false, expiresAt: 1900000300000, human_control: false };
+    } });
+    const result = await f.call('browser_cloud_job_get', { job_id: SESSION }, 'wefunder-campaign-director');
+    assert.equal((result.structuredContent?.result?.job as Record<string, unknown>)?.phase, 'CLOSED');
+    assert.deepEqual(f.calls, [['lookup', SESSION], ['status', 'wefunder-campaign-director', SESSION, websitePrincipalHash('wefunder-campaign-director', 'connection:own-connection')]]);
+  } finally { process.env.CLOUD_BROWSER_ENABLED = previous; }
+});
+
+test('mission status rejects ownership and lookup failures without another backend fallback', async () => {
+  const f = fixture();
+  Object.assign(f.runtime.browser, { status: async () => { throw Object.assign(new Error('PRIVATE'), { code: 'owner_forbidden' }); } });
+  const denied = await f.call('browser_cloud_job_get', { job_id: SESSION }, 'cro');
+  assert.equal(denied.structuredContent?.result?.error, 'owner_forbidden');
+  assert.equal(JSON.stringify(denied).includes('PRIVATE'), false);
+  f.state.lookupError = true;
+  const unknown = await f.call('browser_cloud_job_get', { job_id: SESSION });
+  assert.equal(unknown.structuredContent?.result?.error, 'daytona_store_unavailable');
+});
+
+test('WeFunder desktop preset creates and explicitly selects the editor before issuing human control', async () => {
+  const f = fixture();
+  Object.assign(f.runtime.browser, { execute: async (...args: unknown[]) => {
+    f.calls.push(['execute', ...args]);
+    return (args[2] as { type: string }).type === 'tab_create' ? { completed: true, createdTargetId: 'A'.repeat(32) } : { completed: true, selectedTargetId: 'A'.repeat(32) };
+  } });
+  const result = await f.call('browser_cloud_session_start', { profile_id: 'daytona-desktop:wefunder', max_seconds: 900, action_budget: 40, dry_run: false }, 'wefunder-campaign-director');
+  assert.equal(result.structuredContent?.result?.sessionId, SESSION);
+  assert.equal(result.structuredContent?.result?.profile_id, 'daytona-desktop:wefunder');
+  assert.deepEqual(f.calls.map(c => c[0]), ['get', 'discover', 'readiness', 'start', 'execute', 'execute', 'issue']);
+  const actions = f.calls.filter(c => c[0] === 'execute');
+  assert.deepEqual(actions.map(c => c[3]), [{ type: 'tab_create', url: 'https://wefunder.com/otchealth/editor/header' }, { type: 'tab_select', targetId: 'A'.repeat(32) }]);
+  assert.equal(f.calls.some(c => c[0] === 'aws-start'), false);
+  assert.equal(f.calls.find(c => c[0] === 'issue')?.[5], 'wefunder');
+  const other = fixture();
+  assert.equal((await other.call('browser_cloud_session_start', { profile_id: 'daytona-desktop:wefunder', max_seconds: 900, dry_run: false }, 'cro')).structuredContent?.result?.error, 'owner_forbidden');
+  assert.deepEqual(other.calls, []);
+});
+
+test('desktop preparation failure returns its exact mission for reconciliation without a duplicate or viewer', async () => {
+  const f = fixture(); f.state.providerError = true;
+  const result = await f.call('browser_cloud_session_start', { profile_id: 'daytona-desktop:wefunder', max_seconds: 900, dry_run: false }, 'wefunder-campaign-director');
+  assert.equal(result.structuredContent?.result?.sessionId, SESSION);
+  assert.equal(result.structuredContent?.result?.error, 'effect_unknown');
+  assert.equal(result.structuredContent?.result?.recovery_required, true);
+  assert.equal(f.calls.some(c => c[0] === 'issue' || c[0] === 'aws-start'), false);
+  assert.equal(f.calls.filter(c => c[0] === 'start').length, 1);
+});
+
 test('consolidated company start refuses a missing final V2 receipt or unknown wake without fallback', async () => {
   for (const unknown of [false, true]) {
     const f = fixture();

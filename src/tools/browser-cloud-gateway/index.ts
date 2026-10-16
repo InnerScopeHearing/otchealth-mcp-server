@@ -127,6 +127,8 @@ export interface CloudBrowserGatewayRuntime {
 export interface DaytonaGatewayRuntime {
   capabilities: Readonly<{ checkpoint: boolean; humanViewer: boolean }>;
   browser: Pick<DaytonaBrowserService, 'discover' | 'readiness' | 'start' | 'execute' | 'snapshot' | 'savePersistentProfile' | 'stop'> & {
+    /** Read-only exact-owner retained mission receipt; never a page observation. */
+    status?: DaytonaBrowserService['status'];
     /** Internal dedicated-desktop composition, never a caller-selected binding. */
     startCompany?(caller: string, maxSeconds: number, actionBudget: number | undefined, principal: string): ReturnType<DaytonaBrowserService['start']>;
   };
@@ -359,7 +361,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       category: "read",
       annotations: {
         title: "Cloud browser: get job",
-        description: "Reads an authenticated caller’s durable browser job without request text.",
+        description: "Reads an authenticated caller’s durable browser job or exact-owned Daytona mission status. For a Daytona session use its original session ID as job_id; returns only lifecycle/control/checkpoint receipt metadata, never page content or viewer links.",
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -371,8 +373,16 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
         error: z.string().optional(),
       },
       handler: async (input, ctx) => {
-        if (!live()) return unavailable();
         try {
+          if (/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(input.job_id)) {
+            const desktop = await daytona?.forSession(input.job_id);
+            if (desktop) {
+              if (!desktop.browser.status) throw new DaytonaBrowserError('daytona_status_unavailable');
+              const status = await desktop.browser.status(ctx.callerAgent, input.job_id, daytonaPrincipal(ctx.callerAgent));
+              return { data: { job: { id: input.job_id, kind: 'daytona_session', ...status } }, summary: `Owned Daytona mission is ${status.phase}; human control is ${status.human_control}. Saved requires its explicit checkpoint receipt; cancellation is not saved.` };
+            }
+          }
+          if (!live()) return unavailable();
           const job = await runtime.jobs.get(input.job_id, ctx.callerAgent, principalHash(ctx.callerAgent));
           const { request: _request, ownerSubjectHash: _principal, ...safe } = job;
           return {
@@ -539,7 +549,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       category: "write_simple",
       annotations: {
         title: "Cloud browser: start session",
-        description: "Starts an authenticated caller's browser within requested budgets. The opt-in daytona-company profile starts automation only when this OAuth connection's exact root-enrolled company browser proves V2 multi-mission readiness; it never opens a human viewer. The daytona-desktop profile requires configured human-viewer revocation and checkpoint support. The named profiles website-login:linkedin and website-login:wefunder retain the connection-bound AWS human sign-in flow. Open a returned login_url, confirm the signed-in account and click Done. Other profile IDs retain normal AWS session behavior.",
+        description: "Starts an authenticated caller's browser within requested budgets. daytona-company is V2 automation with no human viewer. daytona-desktop is a private human viewer; daytona-desktop:wefunder additionally prepares the real editor before handoff and is restricted to the WeFunder lane. Done must confirm checkpoint, revocation and mission release. A returned recovery_required session must be reconciled via job_get, not restarted. website-login:* profiles retain their separate AWS sign-in flow.",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -559,6 +569,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
         status: z.enum(['human_login_required', 'ready']).optional(),
         provider: z.literal('daytona').optional(),
         runtime_protocol: z.literal(2).optional(),
+        recovery_required: z.boolean().optional(),
         error: z.string().optional(),
       },
       ephemeralOutput: true,
@@ -566,13 +577,16 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       shieldInputForScan: shieldCloudBrowserInput,
       redactResultForLog: () => ({ operation: 'browser_cloud_session_start', result: '[redacted browser session]' }),
       handler: async (input, ctx) => {
-        if (!live() && input.profile_id !== 'daytona-desktop' && input.profile_id !== 'daytona-company') return unavailable();
+        const wefunderDesktop = input.profile_id === 'daytona-desktop:wefunder';
+        if (!live() && input.profile_id !== 'daytona-desktop' && input.profile_id !== 'daytona-company' && !wefunderDesktop) return unavailable();
         if (ctx.dryRun)
           return {
             data: { dry_run: true },
             summary: "Session start was not executed.",
           };
         try {
+          if (wefunderDesktop && ctx.callerAgent !== 'wefunder-campaign-director') throw new DaytonaBrowserError('owner_forbidden');
+          if (input.profile_id.startsWith('daytona-desktop:') && !wefunderDesktop) throw new DaytonaBrowserError('profile_not_enrolled');
           if (input.profile_id === 'daytona-company') {
             const principal = daytonaPrincipal(ctx.callerAgent);
             const company = await daytona?.get();
@@ -591,7 +605,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
             if (started.runtimeProtocol !== 2) throw new DaytonaBrowserError('daytona_multimission_unavailable');
             return { data: { sessionId: started.sessionId, expiresAt: started.expiresAt, profile_id: 'daytona-company', provider: 'daytona', runtime_protocol: 2, status: 'ready' }, summary: 'Owned company-browser automation mission started with confirmed V2 runtime routing. No human viewer or AWS session was created.' };
           }
-          if (input.profile_id === 'daytona-desktop') {
+          if (input.profile_id === 'daytona-desktop' || wefunderDesktop) {
             const principal = daytonaPrincipal(ctx.callerAgent);
             const desktop = await daytona?.get();
             if (!desktop) throw new DaytonaBrowserError('daytona_not_configured');
@@ -600,8 +614,23 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
             const readiness = await desktop.browser.readiness(ctx.callerAgent, profile.profileId, principal);
             if (readiness.ready !== true || readiness.profileKey !== profile.profileId || readiness.checkpointReady !== true) throw new DaytonaBrowserError('daytona_handoff_unavailable');
             const started = await desktop.browser.start(ctx.callerAgent, profile.profileId, input.max_seconds, input.action_budget, principal);
-            const handoff = await desktop.viewers.issue(ctx.callerAgent, started.sessionId, principal, Math.min(300, input.max_seconds));
-            return { data: { ...started, profile_id: 'daytona-desktop', provider: 'daytona', login_url: handoff.login_url, login_expires_at: handoff.expires_at, status: 'human_login_required' }, summary: 'Owned Daytona desktop mission started. Open the short-lived private viewer, confirm the signed-in account and click Done to release human control. No AWS session was created.' };
+            try {
+              if (wefunderDesktop) {
+                const tab = await desktop.browser.execute(ctx.callerAgent, started.sessionId, { type: 'tab_create', url: 'https://wefunder.com/otchealth/editor/header' }, 20, principal);
+                const targetId = tab && typeof tab === 'object' && 'createdTargetId' in tab ? tab.createdTargetId : undefined;
+                if (typeof targetId !== 'string' || !/^[A-Fa-f0-9]{32}$/.test(targetId)) throw new DaytonaBrowserError('daytona_target_unconfirmed');
+                const selected = await desktop.browser.execute(ctx.callerAgent, started.sessionId, { type: 'tab_select', targetId }, 20, principal);
+                if (!selected || typeof selected !== 'object' || !('selectedTargetId' in selected) || selected.selectedTargetId !== targetId) throw new DaytonaBrowserError('daytona_target_unconfirmed');
+              }
+              const handoff = wefunderDesktop
+                ? await desktop.viewers.issue(ctx.callerAgent, started.sessionId, principal, Math.min(300, input.max_seconds), 'wefunder')
+                : await desktop.viewers.issue(ctx.callerAgent, started.sessionId, principal, Math.min(300, input.max_seconds));
+              return { data: { ...started, profile_id: input.profile_id, provider: 'daytona', login_url: handoff.login_url, login_expires_at: handoff.expires_at, status: 'human_login_required' }, summary: 'Owned Daytona desktop mission started. Open the private viewer before its opening deadline. Done must confirm checkpoint, viewer revocation and mission release; Cancel/session_stop is not a saved-login receipt. No AWS session was created.' };
+            } catch (e) {
+              const failed = error(e);
+              const details = failed.data && typeof failed.data === 'object' && !Array.isArray(failed.data) ? failed.data : {};
+              return { ...failed, data: { ...details, ...started, profile_id: input.profile_id, provider: 'daytona', recovery_required: true }, summary: `${failed.summary} Preserve this exact session ID and use browser_cloud_job_get for its status; do not start a replacement or replay an unknown preparation/grant.` };
+            }
           }
           if (input.profile_id.startsWith('website-login:')) {
             const site = input.profile_id === 'website-login:linkedin' ? 'linkedin'
