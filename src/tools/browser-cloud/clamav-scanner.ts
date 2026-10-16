@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { connect as netConnect, isIP, type Socket } from 'node:net';
+import { logBrowserFileScannerFailure, type ScannerFailureReason, type ScannerFailureStage } from '../../audit/scanner-observation.js';
 import { BROWSER_FILE_MAX_BYTES, type BrowserFileScanner } from './file-broker.js';
 
 const MAX_AGE_MS = 48 * 60 * 60 * 1000;
@@ -13,13 +14,33 @@ function allowedAddress(address: string, loopback: boolean): boolean {
   const [a, b] = address.split('.').map(Number);
   return a === 10 || (a === 172 && b! >= 16 && b! <= 31) || (a === 192 && b === 168) || (loopback && address === '127.0.0.1');
 }
-function version(value: string, now: number) {
+function version(value: string, now: number, onSignatureAge?: (ageMs: number) => void) {
   const match = /^ClamAV ([0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?)\/([1-9][0-9]{0,11})\/((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +[0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4})$/.exec(value);
   if (!match) throw new Error('scanner_invalid_version');
   // Scanner deployment explicitly uses TZ=UTC; VERSION has no timezone field.
   const updatedAt = Date.parse(`${match[3]} UTC`);
-  if (!Number.isSafeInteger(updatedAt) || updatedAt > now || now - updatedAt > MAX_AGE_MS) throw new Error('scanner_stale_signatures');
+  const ageMs = now - updatedAt;
+  if (Number.isSafeInteger(updatedAt) && Number.isSafeInteger(ageMs) && ageMs >= 0) onSignatureAge?.(ageMs);
+  if (!Number.isSafeInteger(updatedAt) || updatedAt > now || ageMs > MAX_AGE_MS) throw new Error('scanner_stale_signatures');
   return { engineVersion: match[1]!, signatureVersion: match[2]!, signaturesUpdatedAt: updatedAt };
+}
+
+function failureReason(error: unknown, stage: ScannerFailureStage): ScannerFailureReason {
+  const code = error instanceof Error ? error.message : '';
+  switch (code) {
+    case 'scanner_invalid_size': return 'invalid_input';
+    case 'scanner_endpoint_forbidden': return 'endpoint_forbidden';
+    case 'scanner_timeout': return 'timeout';
+    case 'scanner_transport_error': return 'transport_error';
+    case 'scanner_invalid_version': return 'signature_invalid';
+    case 'scanner_stale_signatures': return 'signature_stale';
+    case 'scanner_invalid_verdict': return 'verdict_invalid';
+    case 'scanner_signature_changed': return 'signature_changed';
+    case 'scanner_truncated_reply':
+    case 'scanner_oversize_reply':
+    case 'scanner_invalid_reply': return 'protocol_error';
+    default: return stage === 'endpoint_resolution' ? 'endpoint_resolution_failed' : 'unexpected_error';
+  }
 }
 
 /** Private server-only ClamAV INSTREAM adapter; no paths or arbitrary commands are accepted. */
@@ -28,10 +49,14 @@ export function createClamAvBrowserFileScanner(options: Options): BrowserFileSca
       !Number.isInteger(options.timeoutMs ?? 20000) || (options.timeoutMs ?? 20000) < 50 || (options.timeoutMs ?? 20000) > 20000) throw new Error('scanner_config_invalid');
   const now = options.now ?? Date.now;
   return { async scan(input) {
+    const startedAt = performance.now();
+    let stage: ScannerFailureStage = 'input_validation';
+    let signatureAgeMs: number | undefined;
     try {
       if (!(input.body instanceof Uint8Array) || input.body.byteLength < 1 || input.body.byteLength > BROWSER_FILE_MAX_BYTES) throw new Error('scanner_invalid_size');
       const body = Buffer.from(input.body); const deadline = Date.now() + (options.timeoutMs ?? 20000);
       const remaining = () => { const ms = deadline - Date.now(); if (ms <= 0) throw new Error('scanner_timeout'); return ms; };
+      stage = 'endpoint_resolution';
       let dnsTimer: ReturnType<typeof setTimeout> | undefined;
       const addresses = await Promise.race([(options.lookup ?? dnsLookup)(options.host, { all: true, verbatim: true }), new Promise<never>((_, reject) => { dnsTimer = setTimeout(() => reject(new Error('scanner_timeout')), remaining()); })]).finally(() => clearTimeout(dnsTimer));
       if (!addresses.length || addresses.some(item => !allowedAddress(item.address, options.allowLoopback === true))) throw new Error('scanner_endpoint_forbidden');
@@ -69,15 +94,26 @@ export function createClamAvBrowserFileScanner(options: Options): BrowserFileSca
           })().catch(() => done(new Error('scanner_transport_error')));
         });
       });
-      const before = await request('VERSION'); const signature = version(before, now());
+      stage = 'signature_before_scan';
+      const before = await request('VERSION'); const signature = version(before, now(), age => { signatureAgeMs = age; });
+      stage = 'scan';
       const result = await request('INSTREAM');
       if (/^stream: [A-Za-z0-9_.()+ -]{1,256} FOUND$/.test(result)) return { verdict: 'infected' };
       if (result !== 'stream: OK') throw new Error('scanner_invalid_verdict');
-      const after = await request('VERSION'); const scannedAt = now(); version(after, scannedAt);
+      stage = 'signature_after_scan';
+      const after = await request('VERSION'); const scannedAt = now(); version(after, scannedAt, age => { signatureAgeMs = age; });
       remaining(); // A delayed event loop must not turn an expired scan into a clean receipt.
       if (after !== before || !Number.isSafeInteger(scannedAt) || scannedAt < 0) throw new Error('scanner_signature_changed');
       return { verdict: 'clean', scanner: 'clamav', sha256: createHash('sha256').update(body).digest('hex'), byteLength: body.length, scannedAt, ...signature };
-    } catch { return { verdict: 'error' }; }
+    } catch (error) {
+      logBrowserFileScannerFailure({
+        stage,
+        reason: failureReason(error, stage),
+        durationMs: performance.now() - startedAt,
+        ...(signatureAgeMs === undefined ? {} : { signatureAgeMs }),
+      });
+      return { verdict: 'error' };
+    }
   } };
 }
 
@@ -86,5 +122,8 @@ export function createConfiguredBrowserFileScanner(env: NodeJS.ProcessEnv = proc
   const keys = ['BROWSER_FILE_CLAMAV_HOST', 'BROWSER_FILE_CLAMAV_PORT', 'BROWSER_FILE_CLAMAV_TIMEOUT_MS', 'BROWSER_FILE_CLAMAV_ALLOW_LOOPBACK'];
   if (!keys.some(key => env[key] !== undefined)) return undefined;
   try { return createClamAvBrowserFileScanner({ host: env.BROWSER_FILE_CLAMAV_HOST!, port: env.BROWSER_FILE_CLAMAV_PORT === undefined ? 3310 : Number(env.BROWSER_FILE_CLAMAV_PORT), timeoutMs: env.BROWSER_FILE_CLAMAV_TIMEOUT_MS === undefined ? 20000 : Number(env.BROWSER_FILE_CLAMAV_TIMEOUT_MS), allowLoopback: env.BROWSER_FILE_CLAMAV_ALLOW_LOOPBACK === 'true' }); }
-  catch { return { scan: async () => ({ verdict: 'error' }) }; }
+  catch { return { scan: async () => {
+    logBrowserFileScannerFailure({ stage: 'configuration', reason: 'invalid_configuration', durationMs: 0 });
+    return { verdict: 'error' };
+  } }; }
 }

@@ -9,6 +9,7 @@
  */
 
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { toJsonSchemaCompat } from '@modelcontextprotocol/sdk/server/zod-json-schema-compat.js';
 import { z, type ZodRawShape } from 'zod';
 import { loadEnv, type Env } from '../config/env.js';
@@ -32,12 +33,14 @@ import {
   newCorrelationId,
   type ToolCallLogEnd,
 } from '../audit/logger.js';
+import { logToolPhase, type ToolTimingOutcome } from '../audit/tool-timing.js';
 import { applyGuardrail, type ComplianceWarning } from '../compliance/guardrail.js';
 import { recordTool, deriveService } from '../catalog/catalog.js';
 import { lazyCallerSurfaceEntry, type CallerSurfaceTool } from './catalog/caller-surface-fingerprint.js';
+import { hideDeniedWefunderChatActions } from './catalog/wefunder-visibility.js';
 import { requiredRoleFor, roleAllows } from '../catalog/governance.js';
 import { currentCallerAgent, isConnectorSurface, isM365StaticAuth } from '../server/request-context.js';
-import { shouldOffload, offloadResult, extractResultSummary, mayOffloadToolResult } from './result-store.js';
+import { shouldOffload, offloadResult, extractResultSummary, mayOffloadToolResult, recordInlineResultProjection } from './result-store.js';
 import { WEFUNDER_CAMPAIGN_DIRECTOR_LANE } from './hyperagent/ring.js';
 import { HEYGEN_DATA_TOOLS, HEYGEN_PREFLIGHT_TOOLS } from './heygen/access.js';
 import {
@@ -513,7 +516,10 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
         : lane === 'wefunder-campaign-director'
           ? WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET.join(',')
           : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
-  const tools = new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
+  const names = csv.split(',').map((s) => s.trim()).filter(Boolean);
+  const tools = new Set<string>(lane === WEFUNDER_CAMPAIGN_DIRECTOR_LANE
+    ? hideDeniedWefunderChatActions(names)
+    : names);
   // The owner-bound Framer metadata reader is exposed only to CTO and Developer,
   // even when a shared CONNECTOR_TOOLSET override names additional tools.
   if (lane === 'cto' || lane === 'developer') tools.add(FRAMER_PROJECT_INSPECT_TOOL);
@@ -779,6 +785,13 @@ const COMMON_INPUT: ZodRawShape = {
       'If true, the caller accepts that the response may contain regulated or investor-sensitive content (see compliance_warning). Required to render flagged payloads.',
     ),
 };
+
+const TIMING_REJECTION_CODES = new Set([
+  'invalid_input', 'forbidden_role', 'github_invalid_path', 'github_owner_not_allowed',
+  'github_write_phi_rejected', 'github_pre_share_blocked', 'write_disabled', 'cold_start_enforced',
+  'prompt_injection_blocked', 'ungrounded_blocked', 'aws_mcp_forbidden', 'aws_mcp_grant_refused',
+  'aws_mcp_disabled', 'aws_mcp_invalid_input', 'aws_mcp_tool_blocked', 'aws_mcp_tool_not_allowed',
+]);
 
 /**
  * Neutral common fields for the narrowly opted-in connector schema projection. The validation is
@@ -1182,7 +1195,11 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       const correlationId = newCorrelationId();
       const callerHash = callerHashProvider();
       const started = Date.now();
+      let callbackOutcome: ToolTimingOutcome = 'unknown';
+      let callbackErrorCode: string | undefined;
 
+      try {
+        const response = await (async (): Promise<CallToolResult> => {
       // Strict input validation: reject unexpected fields.
       const inputZ = z.object(inputShape).strict();
       const parsed = inputZ.safeParse(rawArgs);
@@ -1683,25 +1700,44 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         if (jitDoctrine.pitfalls.length) {
           capturePlanePrelude.push(`DOCTRINE: ${jitDoctrine.pitfalls.join(' | ')}`);
         }
-        let text = buildTextContent(
-          { ...payload, data: result },
-          warning,
-          capturePlanePrelude.length ? capturePlanePrelude.join('\n') : undefined,
-          canonicalName === 'developer_task_rollup' && payload.compactJsonText === true,
-        );
+        const projectionStarted = Date.now();
+        let projectionOutcome: ToolTimingOutcome = 'success';
+        let text: string;
+        try {
+          text = buildTextContent(
+            { ...payload, data: result },
+            warning,
+            capturePlanePrelude.length ? capturePlanePrelude.join('\n') : undefined,
+            canonicalName === 'developer_task_rollup' && payload.compactJsonText === true,
+          );
+        } catch (error) {
+          projectionOutcome = 'error';
+          throw error;
+        } finally {
+          logToolPhase({ phase: 'projection', durationMs: Date.now() - projectionStarted, outcome: projectionOutcome, toolCorrelationId: correlationId });
+        }
 
         // Check the complete inline envelope before JIT handling. A constrained tool must fail
         // closed instead of persisting an oversized response and returning an offload reference.
         if (def.maxResponseBytes !== undefined) {
-          const serializedResponse = JSON.stringify({
-            content: [{ type: 'text', text }, ...nativeContent],
-            structuredContent: structured,
-          });
-          if (serializedResponse === undefined) {
-            throw new Error(`Tool ${def.name} response could not be sized safely.`);
-          }
-          if (Buffer.byteLength(serializedResponse, 'utf8') > def.maxResponseBytes) {
-            throw new Error(`Tool ${def.name} response exceeded its configured size limit.`);
+          const serializationStarted = Date.now();
+          let serializationOutcome: ToolTimingOutcome = 'success';
+          try {
+            const serializedResponse = JSON.stringify({
+              content: [{ type: 'text', text }, ...nativeContent],
+              structuredContent: structured,
+            });
+            if (serializedResponse === undefined) {
+              throw new Error(`Tool ${def.name} response could not be sized safely.`);
+            }
+            if (Buffer.byteLength(serializedResponse, 'utf8') > def.maxResponseBytes) {
+              throw new Error(`Tool ${def.name} response exceeded its configured size limit.`);
+            }
+          } catch (error) {
+            serializationOutcome = 'error';
+            throw error;
+          } finally {
+            logToolPhase({ phase: 'serialization', durationMs: Date.now() - serializationStarted, outcome: serializationOutcome, toolCorrelationId: correlationId });
           }
         }
 
@@ -1722,13 +1758,16 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // caller binding, so this principal must keep its payload inline, never in that cache.
         // gateway_fetch_result is already the terminal, bounded pagination transport. Re-offloading
         // one of its pages creates an unusable result-id chain instead of delivering that page.
-        if (
-          !def.ephemeralOutput && mayOffloadToolResult(canonicalName) &&
-          callerAgent !== WEFUNDER_CAMPAIGN_DIRECTOR_LANE &&
-          shouldOffload(text) &&
-          !isM365StaticAuth()
-        ) {
+        const inlineProjectionEligible = !def.ephemeralOutput && mayOffloadToolResult(canonicalName) &&
+          callerAgent !== WEFUNDER_CAMPAIGN_DIRECTOR_LANE && !isM365StaticAuth();
+        const offloadAttempted = inlineProjectionEligible && shouldOffload(text);
+        if (offloadAttempted) {
+          const writeStarted = Date.now();
           const off = await offloadResult(text, result, correlationId, callerHash);
+          logToolPhase({
+            phase: 'write', durationMs: Date.now() - writeStarted,
+            outcome: off ? 'success' : 'unknown', toolCorrelationId: correlationId,
+          });
           if (off) {
             text = off.preview;
             // Bounded inline summary (pagination.itemCount/pageCount, shim page counts, array
@@ -1743,6 +1782,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
             };
           }
         }
+        if (inlineProjectionEligible && !offloadAttempted) recordInlineResultProjection(text);
 
         return {
           content: [{ type: 'text', text }, ...nativeContent],
@@ -1750,12 +1790,18 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         };
       } catch (err) {
         const e = err as Error;
+        const thrownCode = err && typeof err === 'object' && 'code' in err && typeof (err as { code?: unknown }).code === 'string'
+          ? (err as { code: string }).code : undefined;
+        if (thrownCode === 'aws_mcp_timeout' || (thrownCode && TIMING_REJECTION_CODES.has(thrownCode))) {
+          callbackErrorCode = thrownCode;
+        }
         let errorCode = 'tool_error';
         let nextStep = 'Check server logs for the correlation_id.';
         let upstreamStatus: number | undefined;
         const upstreamErr = parseUpstreamToolError(err, canonicalName);
         if (upstreamErr) {
           errorCode = upstreamErr.code;
+          callbackErrorCode = upstreamErr.code;
           nextStep = upstreamErr.nextStep;
           upstreamStatus = upstreamErr.status;
         }
@@ -1792,6 +1838,45 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
             error: errPayload,
           },
         };
+      }
+        })();
+
+        const responseRecord = response && typeof response === 'object' ? response as Record<string, unknown> : {};
+        const structured = responseRecord.structuredContent && typeof responseRecord.structuredContent === 'object'
+          ? responseRecord.structuredContent as Record<string, unknown>
+          : {};
+        const result = structured.result && typeof structured.result === 'object'
+          ? structured.result as Record<string, unknown>
+          : {};
+        const error = structured.error && typeof structured.error === 'object'
+          ? structured.error as Record<string, unknown>
+          : {};
+        callbackErrorCode ??= typeof error.code === 'string' ? error.code : undefined;
+        const complianceWarning = structured.compliance_warning && typeof structured.compliance_warning === 'object'
+          ? structured.compliance_warning as Record<string, unknown>
+          : {};
+        const deferred = result._jit_offloaded === true || structured.deferred === true || result.deferred === true ||
+          result.persistenceState === 'pending' || result.persistenceState === 'unknown';
+        if (deferred || callbackErrorCode === 'aws_mcp_timeout') {
+          callbackOutcome = 'unknown';
+        } else if (structured.result === null && complianceWarning.requires_acknowledge === true) {
+          callbackOutcome = 'rejected';
+        } else if (responseRecord.isError === true || result.is_error === true) {
+          callbackOutcome = callbackErrorCode && TIMING_REJECTION_CODES.has(callbackErrorCode) ? 'rejected' : 'error';
+        } else if (structured.result !== undefined) {
+          callbackOutcome = 'success';
+        } else {
+          callbackOutcome = 'unknown';
+        }
+        return response;
+      } finally {
+        logToolPhase({
+          phase: 'operation',
+          durationMs: Date.now() - started,
+          outcome: callbackOutcome,
+          toolCorrelationId: correlationId,
+          errorCode: callbackErrorCode,
+        });
       }
     },
   );

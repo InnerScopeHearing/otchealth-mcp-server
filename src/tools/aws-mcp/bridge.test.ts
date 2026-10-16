@@ -1086,6 +1086,44 @@ test('NEGATIVE CACHE: a refresh failure near expiry reuses still-valid credentia
   assertSignedAsReader(w.mcp.requests, readerKey(1), readerToken(1));
 });
 
+test('phase timing reports an immediate credential rejection, a 429 rejection, and uncertain best-effort shutdown conservatively', async () => {
+  const credentialFailure = world({ assumeFailure: () => stsError('AccessDenied') });
+  const clock = mock.method(Date, 'now', () => T0);
+  let credentialLogs: Awaited<ReturnType<typeof captureLogs>>;
+  try {
+    credentialLogs = await captureLogs(() =>
+      bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, credentialFailure.deps),
+    );
+  } finally { clock.mock.restore(); }
+  assert.ok(credentialLogs.error instanceof AwsReaderUnavailableError);
+  assert.equal((credentialLogs.error as InstanceType<typeof AwsReaderUnavailableError>).reason, 'assume_role_failed');
+  assert.equal(credentialFailure.mcp.requests.length, 0, 'credential failure sends no request to the AWS MCP provider');
+  const credentialPhase = credentialLogs.lines.find((line) => line.fields.type === 'tool_phase_timing' && line.fields.phase === 'credentials');
+  assert.ok(credentialPhase, 'immediate failure emits a credential phase event');
+  assert.equal(credentialPhase.fields.outcome, 'error');
+  assert.ok(Number.isInteger(credentialPhase.fields.duration_ms) && (credentialPhase.fields.duration_ms as number) >= 0);
+
+  const throttled = world({ mcp: { onRequest: (rpc) => rpc?.method === 'tools/call' ? new Response('slow down', { status: 429 }) : undefined } });
+  const throttleLogs = await captureLogs(() =>
+    bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, throttled.deps),
+  );
+  assert.ok(throttleLogs.error instanceof AwsMcpBridgeError);
+  assert.equal((throttleLogs.error as AwsMcpBridgeError).code, 'aws_mcp_throttled');
+  const operationPhase = throttleLogs.lines.find((line) => line.fields.type === 'tool_phase_timing' && line.fields.phase === 'operation');
+  assert.ok(operationPhase);
+  assert.equal(operationPhase.fields.outcome, 'rejected');
+  assert.equal(throttled.mcp.requests.filter((request) => request.rpc?.method === 'tools/call').length, 1, 'a throttle is not replayed');
+
+  const successful = world();
+  const successLogs = await captureLogs(() =>
+    bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, successful.deps),
+  );
+  assert.equal(successLogs.error, undefined);
+  const shutdownPhase = successLogs.lines.find((line) => line.fields.type === 'tool_phase_timing' && line.fields.phase === 'shutdown');
+  assert.ok(shutdownPhase);
+  assert.equal(shutdownPhase.fields.outcome, 'unknown', 'best-effort termination does not confirm remote cleanup');
+});
+
 // ---------------------------------------------------------------------------------------------
 // Audit: one structured line per call, hashes and sizes only
 // ---------------------------------------------------------------------------------------------

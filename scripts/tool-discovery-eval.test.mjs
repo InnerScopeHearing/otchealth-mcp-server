@@ -5,15 +5,22 @@ import { evaluateDiscovery } from './tool-discovery-eval.mjs';
 
 test('fixed routes are checked against the real bounded discovery helper', () => {
   const report = evaluateDiscovery(fixture);
+  assert.equal(report.task_id, 'synthetic-discovery-pilot-v1');
+  assert.equal(report.role, 'synthetic-routing-evaluation');
+  assert.equal(report.product, 'gateway discovery helper');
   assert.equal(report.routeCount, fixture.routes.length);
   assert.equal(report.successCount, fixture.routes.length);
   assert.equal(report.actualToolDefinitionTokens, null);
+  assert.equal(report.actualToolInputTokens, null);
+  assert.equal(report.actualToolOutputTokens, null);
+  assert.equal(report.hostDeferredLoading, null);
   assert.equal(report.claimedHostContextSaving, null);
   assert.equal(report.llmRoutingAccuracy, null);
   assert.equal(report.helperToolExecutions, 0);
   assert.ok(report.metadata.fullCatalogChars > 0);
   assert.ok(report.metadata.fullCatalogUtf8Bytes >= report.metadata.fullCatalogChars);
   assert.equal(report.metadata.helperSampleCount, fixture.routes.length + 1);
+  assert.equal(report.metadata.helperCalls, report.metadata.helperSampleCount);
   assert.ok(Number.isFinite(report.metadata.meanHelperMs));
   assert.equal(report.routes.find(({ id }) => id === 'aws-pack-later-result').retryUsed, true);
   assert.deepEqual(report.routes.find(({ id }) => id === 'honest-empty-missing-tool').selected, []);

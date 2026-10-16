@@ -15,6 +15,7 @@ const {
   pageSlice,
   shouldOffload,
   mayOffloadToolResult,
+  recordInlineResultProjection,
   extractResultSummary,
   offloadResult,
   fetchStoredResult,
@@ -65,6 +66,44 @@ test('successful result offload logs original UTF-8 bytes and initial preview by
     initial_return_bytes: Buffer.byteLength(outcome.preview, 'utf8'),
   });
   assert.equal(JSON.stringify(events).includes(fullText.slice(0, 30)), false);
+});
+
+test('synthetic result pilot receipt confirms bounded initial return and full retrieval before TTL', async () => {
+  const store = fakeResultStore();
+  const callerHash = '5'.repeat(64);
+  const payload = { rows: ['synthetic-row-'.repeat(4000)] };
+  const fullText = JSON.stringify(payload);
+  const { value: outcome, events } = await captureResultProjection((logProjection) =>
+    offloadResult(fullText, payload, 'corr_synthetic_pilot', callerHash, { ...store.deps, logProjection }));
+  assert.ok(outcome);
+  const stored = store.docs.get(outcome.resultId)!;
+  store.setNow(Number(stored.expiresAt) - 1);
+  const pages: string[] = [];
+  let pageCount = 0;
+  for (let page = 0; ; page++) {
+    const fetched = await fetchStoredResult(outcome.resultId, page, callerHash, store.deps);
+    assert.equal(fetched.found, true);
+    pages.push(fetched.chunk!);
+    pageCount = fetched.pages!;
+    if (page + 1 >= pageCount) break;
+  }
+  const reassembled = pages.join('');
+  assert.deepEqual(JSON.parse(reassembled), payload);
+  const receipt = {
+    task_id: 'synthetic-result-pilot-v1',
+    original_bytes: Buffer.byteLength(fullText, 'utf8'),
+    initial_return_bytes: Buffer.byteLength(outcome.preview, 'utf8'),
+    retrieved_bytes: Buffer.byteLength(reassembled, 'utf8'),
+    retrieved_payload_bytes: Buffer.byteLength(JSON.stringify(payload, null, 2), 'utf8'),
+    pages: pageCount,
+    fully_retrievable_before_ttl: true,
+    actual_tool_tokens: null,
+    host_deferral_observed: null,
+  };
+  assert.equal(receipt.initial_return_bytes < receipt.original_bytes, true);
+  assert.equal(receipt.retrieved_bytes, receipt.retrieved_payload_bytes);
+  assert.ok(events.some(({ outcome: kind }) => kind === 'offloaded'));
+  assert.ok(pageCount > 0);
 });
 
 test('storage failure logs fail_open and returns null so the caller keeps the inline result', async () => {
@@ -142,6 +181,22 @@ test('extractResultSummary: caps array_lengths at 8 keys', () => {
 test('shouldOffload is false for a short result (backward-compatible: small results untouched)', () => {
   assert.equal(shouldOffload('small result'), false);
   assert.equal(shouldOffload(''), false);
+});
+
+test('ordinary inline result records only content-free byte and fixed outcome fields', () => {
+  const events: Parameters<typeof resultProjectionLogFields>[0][] = [];
+  const text = 'ordinary synthetic inline result 😀';
+  recordInlineResultProjection(text, (measurement) => events.push(measurement));
+  assert.deepEqual(events.map(resultProjectionLogFields), [{
+    type: 'result_projection',
+    outcome: 'inline',
+    size_class: 'under-40KiB',
+    original_bytes: Buffer.byteLength(text, 'utf8'),
+    initial_return_bytes: Buffer.byteLength(text, 'utf8'),
+  }]);
+  assert.equal(JSON.stringify(events).includes(text), false);
+  recordInlineResultProjection(123 as unknown as string, (measurement) => events.push(measurement));
+  assert.equal(events.length, 1, 'malformed runtime input is ignored');
 });
 
 test('buildPreview embeds the result_id, the JIT marker, and head+tail for long input', () => {

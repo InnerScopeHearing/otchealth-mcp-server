@@ -63,6 +63,20 @@ function validCallerHash(callerHash: string): boolean {
 }
 
 
+/** Record an ordinary inline result without parsing or serializing its content. */
+export function recordInlineResultProjection(
+  text: string,
+  logProjection: (measurement: ResultProjectionMeasurement) => void = logResultProjection,
+): void {
+  if (typeof text !== 'string') return;
+  const originalBytes = Buffer.byteLength(text, 'utf8');
+  try {
+    logProjection({ outcome: 'inline', originalBytes, initialReturnBytes: originalBytes });
+  } catch {
+    // Instrumentation must not change the existing inline result contract.
+  }
+}
+
 /** True when a result is large enough to offload, within the Cosmos doc cap, AND Cosmos is available. */
 export function shouldOffload(text: string): boolean {
   return (
