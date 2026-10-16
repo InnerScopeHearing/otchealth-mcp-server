@@ -63,9 +63,9 @@ test('qpdf verifies PDF syntax and obtains the structural page count', async () 
 
 test('rejects PDF attachment dictionaries even when syntax and antivirus are clean', async () => {
   for (const value of [
-    { '/EF': { '/F': '2 0 R' } }, { '/AF': ['2 0 R'] }, { '/EmbeddedFiles': {} },
+    { '/EF': { '/F': '2 0 R' } }, { '/AF': ['2 0 R'] }, { '/Names': { '/EmbeddedFiles': {} } },
     { '/Collection': {} }, { '/Type': '/EmbeddedFile' }, { '/Subtype': '/FileAttachment' },
-    { '/Nested': [{ '/EF': {} }] },
+    { '/Nested': [{ '/Type': '/Filespec', '/EF': {} }] },
   ]) {
     const validator = createTrustedBrowserBinaryValidator({ runTool: async (_file, args) => ({ stdout: args.includes('--json=2') ? jsonOutput(value) : syntaxOutput, stderr: '' }) });
     await assert.rejects(validator.validate({ contentType: 'application/pdf', body: pdf }), /validation unavailable/i);
@@ -85,6 +85,61 @@ test('preserves ordinary PDF dictionaries and text mentioning attachment names',
   const output = jsonOutput({ '/Title': 'u:/EmbeddedFiles /EF /AF /Collection', '/Metadata': '2 0 R', '/Annots': [{ '/Subtype': '/Link' }], '/Font': { '/F1': '3 0 R' } });
   const validator = createTrustedBrowserBinaryValidator({ runTool: async (_file, args) => ({ stdout: args.includes('--json=2') ? output : syntaxOutput, stderr: '' }) });
   assert.deepEqual(await validator.validate({ contentType: 'application/pdf', body: pdf }), { complete: true, pageCount: 1 });
+});
+
+test('rejects indirect attachment names and fails closed on cyclic, missing, and overlong inspected references', async () => {
+  for (const field of ['/Type', '/Subtype']) {
+    for (const references of [
+      { 'obj:4 0 R': { value: field === '/Type' ? '/EmbeddedFile' : '/FileAttachment' } },
+      { 'obj:4 0 R': { value: '5 0 R' }, 'obj:5 0 R': { value: field === '/Type' ? '/EmbeddedFile' : '/FileAttachment' } },
+      { 'obj:4 0 R': { value: '5 0 R' }, 'obj:5 0 R': { value: '4 0 R' } },
+      {},
+      Object.fromEntries(Array.from({ length: 34 }, (_, index) => [`obj:${index + 4} 0 R`, { value: index === 33 ? '/Font' : `${index + 5} 0 R` }])),
+    ]) {
+      const document = JSON.parse(jsonOutput({ [field]: '4 0 R' }));
+      Object.assign(document.qpdf[1], references);
+      const validator = createTrustedBrowserBinaryValidator({ runTool: async (_file, args) => ({ stdout: args.includes('--json=2') ? JSON.stringify(document) : syntaxOutput, stderr: '' }) });
+      await assert.rejects(validator.validate({ contentType: 'application/pdf', body: pdf }), /validation unavailable/i);
+    }
+  }
+});
+
+test('real qpdf rejects indirect EmbeddedFile and FileAttachment names after valid syntax checks', { skip: !qpdfAvailable }, async () => {
+  let inspections = 0;
+  const validator = createTrustedBrowserBinaryValidator({ runTool: async (file, args, timeout, maxBuffer) => {
+    const result = spawnSync(file, [...args], { encoding: 'utf8', timeout, maxBuffer });
+    if (result.status !== 0) throw new Error('local parser failed');
+    if (args.includes('--json=2')) inspections += 1;
+    return { stdout: result.stdout, stderr: result.stderr };
+  } });
+  for (const body of [
+    makePdf('', ['<< /Type 5 0 R /Length 4 >>\nstream\ntest\nendstream', '/EmbeddedFile']),
+    makePdf('', ['<< /Type /Annot /Subtype 5 0 R /Rect [0 0 1 1] >>', '/FileAttachment'], '/Annots [4 0 R]'),
+  ]) await assert.rejects(validator.validate({ contentType: 'application/pdf', body }));
+  assert.equal(inspections, 2);
+});
+
+test('real qpdf preserves legal font resource aliases matching attachment field names', { skip: !qpdfAvailable }, async () => {
+  const aliases = ['/AF', '/EF', '/EmbeddedFiles', '/Collection', '/Type', '/Subtype'];
+  const font = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>';
+  for (const indirect of [false, true]) {
+    const body = makePdf('', [font, ...(indirect ? [`<< ${aliases.map(name => `${name} 4 0 R`).join(' ')} >>`] : [])],
+      `/Resources << /Font ${indirect ? '5 0 R' : `<< ${aliases.map(name => `${name} 4 0 R`).join(' ')} >>`} >>`);
+    assert.deepEqual(await createTrustedBrowserBinaryValidator().validate({ contentType: 'application/pdf', body }), { complete: true, pageCount: 1 });
+  }
+});
+
+test('real qpdf preserves an AF color-space alias containing a valid PDF array', { skip: !qpdfAvailable }, async () => {
+  const body = makePdf('', [], '/Resources << /ColorSpace << /AF [/Indexed /DeviceRGB 1 <000000FFFFFF>] >> >>');
+  assert.deepEqual(await createTrustedBrowserBinaryValidator().validate({ contentType: 'application/pdf', body }), { complete: true, pageCount: 1 });
+});
+
+test('real qpdf rejects associated and orphan filespecs without optional Type names', { skip: !qpdfAvailable }, async () => {
+  const filespec = '<< /F (test.txt) /EF << /F 5 0 R >> >>';
+  const stream = '<< /Length 4 >>\nstream\ntest\nendstream';
+  for (const catalog of ['', '/AF [4 0 R]']) {
+    await assert.rejects(createTrustedBrowserBinaryValidator().validate({ contentType: 'application/pdf', body: makePdf(catalog, [filespec, stream]) }));
+  }
 });
 
 test('real qpdf rejects named, associated, annotation, orphan, and escaped-name attachments', { skip: !qpdfAvailable }, async () => {
