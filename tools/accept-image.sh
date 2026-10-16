@@ -25,7 +25,7 @@ timeout 90s docker run --rm --platform "$PLATFORM" --network none \
     node -e '\''
       const tls = require("node:tls");
       const fs = require("node:fs");
-      const { X509Certificate } = require("node:crypto");
+      const { X509Certificate, createHash } = require("node:crypto");
       if (process.versions.node.split(".")[0] !== "22") throw Error(`Node ${process.versions.node}`);
       if (process.arch !== process.env.EXPECT_ARCH) throw Error(`arch ${process.arch}`);
       if (!process.versions.modules) throw Error("missing Node module ABI");
@@ -49,6 +49,16 @@ timeout 90s docker run --rm --platform "$PLATFORM" --network none \
       if (machine !== expectedMachine) throw Error(`Datadog init ELF machine ${machine} != ${expectedMachine}`);
       const pprof = require("@datadog/pprof");
       if (typeof pprof.time?.start !== "function") throw Error("Datadog native profiler module did not load");
+      // Dedicated browser image bytes: begin
+      const expectedRoleHelper = "b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51";
+      const roleHelperBytes = fs.readFileSync("/app/tools/daytona-browser-runtime/role-browser-helper.py");
+      const roleHelperDigest = createHash("sha256").update(roleHelperBytes).digest("hex");
+      if (roleHelperDigest !== expectedRoleHelper) throw Error("image role helper hash mismatch");
+      const compiledLifecycleBytes = fs.readFileSync("/app/dist/tools/browser-daytona/lifecycle.js");
+      const compiledHelperPins = [...compiledLifecycleBytes.toString("utf8").matchAll(/^const HELPER_SHA256 = (["\x27])([a-f0-9]{64})\1;$/gm)];
+      if (compiledHelperPins.length !== 1 || compiledHelperPins[0][2] !== expectedRoleHelper) throw Error("image compiled lifecycle helper pin mismatch");
+      console.log(JSON.stringify({role_helper_sha256:roleHelperDigest, compiled_lifecycle_sha256:createHash("sha256").update(compiledLifecycleBytes).digest("hex"), compiled_helper_pin:compiledHelperPins[0][2], provider_calls:0, network:"disabled"}));
+      // Dedicated browser image bytes: end
       console.log(JSON.stringify({node: process.versions.node, modules: process.versions.modules, arch: process.arch, glibc: process.report.getReport().header.glibcVersionRuntime, extraCa: extraStats, systemCa: systemStats, datadogElfMachine: machine, nativeProfilerLoaded: true}));
     '\''
     # Invoke Datadog init with no key and a harmless child; assert it actually execs the child.
