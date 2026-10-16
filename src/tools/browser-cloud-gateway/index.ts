@@ -194,10 +194,21 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
     {
       name: "browser_cloud_profile_discover",
       category: "read",
-      annotations: { title: "Cloud browser: discover my browser profile", description: "Returns the authenticated caller's public profile and own saved website profile IDs. Named website-login:linkedin and website-login:wefunder profiles can start human sign-in through the existing session-start tool. Discovery creates no browser or login session.", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-      inputShape: {},
-      outputShape: { profile_id: z.string().optional(), allowed_hosts: z.array(z.string()).optional(), persistent: z.boolean().optional(), website_profiles: websiteProfilesSchema, error: z.string().optional() },
-      handler: async (_input, ctx) => {
+      annotations: { title: "Cloud browser: discover my browser profile", description: "Returns the authenticated caller's public profile and own saved website profile IDs. Optional profile_id daytona-company selects the root-opted-in shared company browser and can create only this signed OAuth connection's immutable membership after fresh runtime proof. No browser, login session or human viewer is started. Named website-login:linkedin and website-login:wefunder remain available through session-start.", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputShape: { profile_id: z.literal('daytona-company').optional() },
+      outputShape: { profile_id: z.string().optional(), enrolled_profile_id: z.string().optional(), provider: z.literal('daytona').optional(), dry_run: z.boolean().optional(), allowed_hosts: z.array(z.string()).optional(), persistent: z.boolean().optional(), website_profiles: websiteProfilesSchema, error: z.string().optional() },
+      handler: async (input, ctx) => {
+        if (input.profile_id === 'daytona-company') {
+          if (ctx.dryRun) return { data: { dry_run: true }, summary: 'Company browser membership discovery was not executed.' };
+          try {
+            const principal = daytonaPrincipal(ctx.callerAgent), company = await daytona?.get();
+            if (!company) throw new DaytonaBrowserError('daytona_not_configured');
+            const profile = await company.browser.discover(ctx.callerAgent, principal);
+            const proof = await company.browser.readiness(ctx.callerAgent, profile.profileId, principal);
+            if (proof.ready !== true || proof.profileKey !== profile.profileId || proof.checkpointReady !== true || proof.runtimeProtocol !== 2 || proof.multiMissionReady !== true) throw new DaytonaBrowserError('daytona_multimission_unavailable');
+            return { data: { profile_id: 'daytona-company', enrolled_profile_id: profile.profileId, provider: 'daytona' as const, persistent: true, allowed_hosts: [] }, summary: 'Verified this connection’s company-browser membership and fresh V2 readiness. No browser session or human viewer was started.' };
+          } catch (e) { return error(e); }
+        }
         if (!live()) return unavailable();
         const websites = await websiteProfiles(ctx.callerAgent);
         try {

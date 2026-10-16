@@ -11,6 +11,7 @@ import type { DaytonaGatewayAdapter, DaytonaGatewayRuntime } from '../tools/brow
 import { DaytonaViewerHandoffService, DynamoDaytonaViewerTicketStore, type DaytonaViewerMissionBoundary, type DaytonaViewerTicketStore } from './daytona-viewer-service.js';
 import { registerDaytonaViewerRoutes, type DaytonaViewerOptions, type DaytonaViewerService } from './daytona-viewer.js';
 import { createConfiguredDaytonaArtifactPorts } from './daytona-artifact-ports.js';
+import { companyEnrollmentTemplate, DaytonaCompanyEnrollment } from './daytona-company-enrollment.js';
 
 type CapableProvider = DaytonaProvider & { capabilities: Readonly<{ checkpoint: boolean }> };
 export interface DaytonaRuntimeDependencies {
@@ -27,7 +28,7 @@ export interface DaytonaRuntimeDependencies {
 }
 export interface DaytonaRuntimeController {
   adapter: DaytonaGatewayAdapter;
-  status(): { optedIn: boolean; configured: boolean; watchdogReady: boolean; missing: string[] };
+  status(): { optedIn: boolean; configured: boolean; watchdogReady: boolean; missing: string[]; enrollmentConfigured: boolean; enrollmentMissing: string[] };
   initialize(): Promise<boolean>;
   shutdown(): void;
   registerRoutes(app: FastifyInstance): Promise<boolean>;
@@ -35,8 +36,8 @@ export interface DaytonaRuntimeController {
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 function fail(code: string): never { throw new DaytonaBrowserError(code); }
 
-/** No resources, profiles or bindings are provisioned. Merely importing this
- * module or constructing a controller NEVER starts timers/provider actions. */
+/** Construction never provisions or starts timers/provider actions. Root-opted-in
+ * company discovery may conditionally enroll only the current signed connection. */
 export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDependencies = {}): DaytonaRuntimeController {
   const env = dependencies.env ?? process.env;
   const table = () => env.DAYTONA_BROWSER_DDB_TABLE ?? env.CLOUD_BROWSER_DDB_TABLE;
@@ -81,6 +82,11 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
     if (!dependencies.resolveApiToken) { try { token(); } catch { missing.push('DAYTONA_BROWSER_API_TOKEN'); } }
     try { origins(); } catch { missing.push('DAYTONA_BROWSER_TOOLBOX_ALLOWED_ORIGINS'); } return missing;
   };
+  const enrollmentMissing = (): string[] => {
+    if (env.DAYTONA_COMPANY_ENROLLMENT_ENABLED === undefined || env.DAYTONA_COMPANY_ENROLLMENT_ENABLED === 'false') return [];
+    try { companyEnrollmentTemplate(env, sandboxIds()); return []; }
+    catch { return ['DAYTONA_COMPANY_ENROLLMENT_ENABLED/SANDBOX_ID/READINESS_SHA256']; }
+  };
   const viewerOptions = (): DaytonaViewerOptions => {
     const previewDomain = env.DAYTONA_BROWSER_PREVIEW_DOMAIN ?? '', previewPort = Number(env.DAYTONA_BROWSER_PREVIEW_PORT), viewerPath = env.DAYTONA_BROWSER_PREVIEW_PATH ?? '';
     if (!/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(previewDomain) || !Number.isInteger(previewPort) || previewPort < 1 || previewPort > 65535
@@ -103,8 +109,12 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
   const expiryReady = () => expiries.size > 0 && [...expiries.keys()].every(workerReady);
   const anyExpiryReady = () => [...expiries.keys()].some(workerReady);
   const status = () => {
+    // Optional discovery enrollment cannot disable existing viewer revocation
+    // routes or their expiry watchdog after a restart. Report it separately.
     const missing = [...commonMissing(), ...humanMissing()]; if (env.DAYTONA_BROWSER_ENABLED !== 'true') missing.unshift('DAYTONA_BROWSER_ENABLED');
-    return { optedIn: env.DAYTONA_BROWSER_ENABLED === 'true', configured: missing.length === 0, watchdogReady: expiryReady(), missing };
+    const enrollmentProblems = enrollmentMissing();
+    return { optedIn: env.DAYTONA_BROWSER_ENABLED === 'true', configured: missing.length === 0, watchdogReady: expiryReady(), missing,
+      enrollmentConfigured: missing.length === 0 && env.DAYTONA_COMPANY_ENROLLMENT_ENABLED === 'true' && enrollmentProblems.length === 0, enrollmentMissing: enrollmentProblems };
   };
   const requireExpiry = (sandboxId?: string) => {
     if (!status().configured || !(sandboxId === undefined ? anyExpiryReady() : sandboxIds().includes(sandboxId) && workerReady(sandboxId))) fail('daytona_viewer_expiry_unavailable');
@@ -123,6 +133,9 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
     }
     const provider = (dependencies.createProvider ?? (options => new DaytonaApiBrowserProvider(options)))({ apiBaseUrl: env.DAYTONA_BROWSER_API_BASE_URL!, organizationId: env.DAYTONA_BROWSER_ORGANIZATION_ID!, resolveApiToken, toolboxAllowedOrigins: origins(), ...createConfiguredDaytonaArtifactPorts({ env }), ...(viewer ? { viewer } : {}) });
     const store = sessionStore(), service = new DaytonaBrowserService(store, provider);
+    // Opt-out or broken enrollment configuration cannot break sealed cleanup.
+    const template = status().enrollmentConfigured ? companyEnrollmentTemplate(env, sandboxIds()) : undefined;
+    const enrollment = new DaytonaCompanyEnrollment(template, store, provider, requireExpiry);
     const approved = async (caller: string, profile: string, principal?: string) => {
       const binding = await store.loadBinding(profile); assertDaytonaBinding(binding);
       if (binding.profileKey !== profile || binding.owner !== caller || binding.ownerSubjectHash !== principal || !sandboxIds().includes(binding.sandboxId)) fail('owner_forbidden');
@@ -135,7 +148,7 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
       if (session.sandboxId !== binding.sandboxId) fail('owner_forbidden'); return session;
     };
     const browser: DaytonaGatewayRuntime['browser'] = {
-      discover: async (caller, principal, profile) => { const result = await service.discover(caller, principal, profile); await approved(caller, result.profileId, principal); return result; },
+      discover: async (caller, principal, profile) => { await enrollment.ensure(caller, principal, profile); const result = await service.discover(caller, principal, profile); await approved(caller, result.profileId, principal); return result; },
       readiness: async (caller, profile, principal) => { await approved(caller, profile, principal); return service.readiness(caller, profile, principal); },
       start: async (caller, profile, seconds, budget, principal, options) => { await approved(caller, profile, principal); return service.start(caller, profile, seconds, budget, principal, options); },
       execute: async (caller, id, action, seconds, principal) => { await approvedSession(caller, id, principal); return service.execute(caller, id, action, seconds, principal); },

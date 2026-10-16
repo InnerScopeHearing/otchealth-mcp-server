@@ -1176,7 +1176,12 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         dry_run?: boolean;
         acknowledge_warning?: boolean;
       };
-      const dryRun = args.dry_run ?? (def.category === 'read' ? false : env.DRY_RUN_DEFAULT);
+      // This existing discovery tool has one explicit metadata-mutation branch.
+      // Keep ordinary discovery a read, but run the selected company enrollment
+      // through the SAME write defaults/gates/accounting as other simple writes.
+      const category: ToolCategory = canonicalName === 'browser_cloud_profile_discover' && (args as Record<string, unknown>).profile_id === 'daytona-company'
+        ? 'write_simple' : def.category;
+      const dryRun = args.dry_run ?? (category === 'read' ? false : env.DRY_RUN_DEFAULT);
       const acknowledged = args.acknowledge_warning === true;
 
       // Governance: every agent SEES every tool, but some actions are role-gated for EXECUTION.
@@ -1213,7 +1218,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       let gov = requiredRoleFor(canonicalName);
       // High-risk default: any write_orchestrated tool (money / SMS / voice / DNS / build /
       // deploy / irreversible delete) is CTO-only unless an explicit rule already covers it.
-      if (!gov && def.category === 'write_orchestrated') {
+      if (!gov && category === 'write_orchestrated') {
         gov = { role: 'cto', reason: 'High-risk (write_orchestrated) action — CTO-only by default.' };
       }
       if (gov && !roleAllows(gov.role, callerAgent)) {
@@ -1360,7 +1365,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       }
 
       // Write-tool gating.
-      const gate = gatedReject(env, def.category, def.name);
+      const gate = gatedReject(env, category, def.name);
       if (gate.rejected) {
         logToolEnd({
           correlation_id: correlationId,
@@ -1387,7 +1392,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       // called wake() recently gets a non-fatal warning (mode=warn, the default) or is refused
       // outright (mode=enforce). Reads are NEVER gated -- evaluateColdStart isn't even called for
       // them. Fail-open by construction (evaluateColdStart never throws; see safety/cold-start.ts).
-      const coldStart = def.category === 'read'
+      const coldStart = category === 'read'
         ? { cold: false, block: false, mode: 'off' as const, scope: 'process' as const }
         : evaluateColdStart(callerHash);
       if (coldStart.block) {
@@ -1491,7 +1496,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // AUTO-GUARD (outbound): groundedness on the result, only when the tool surfaced a grounding hint
         // (query + text + sources). enforce-blocking is limited to READ tools — a write already ran, so
         // blocking its output is pointless. Fail-open + mode-gated (GROUNDEDNESS_MODE off|report|enforce).
-        const ground = await outboundGroundedness(payload.groundedness, def.category === 'read');
+        const ground = await outboundGroundedness(payload.groundedness, category === 'read');
         if (ground.blocked) {
           const gmsg =
             `Tool "${def.name}" output withheld by groundedness detection (GROUNDEDNESS_MODE=enforce): ` +
@@ -1533,7 +1538,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
 
         // CAPTURE PLANE (Phase 2): a successful MUTATING, non-dry-run call -- the SAME gate the
         // cold-start block above already computed (coldStart is only evaluated for
-        // def.category !== 'read'; dryRun is checked here explicitly since cold-start doesn't
+        // category !== 'read'; dryRun is checked here explicitly since cold-start doesn't
         // gate on it). Two independent, fail-open-by-construction effects:
         //  (1) recordMutation bumps this caller's capture-pressure counter (safety/capture-pressure.ts).
         //      Never throws. SKIPPED for the checkpoint tool itself: checkpoint's own handler
@@ -1548,7 +1553,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         //      .catch() so a Cosmos/Search outage can never add latency to, or fail, this response.
         //      Reads and dry-runs are never journaled or counted. AUTO_JOURNAL_MODE=off skips only
         //      the episode write (capture-pressure counting still runs -- a separate, lighter signal).
-        if (def.category !== 'read' && !dryRun) {
+        if (category !== 'read' && !dryRun) {
           if (def.name !== 'checkpoint') recordMutation(callerHash);
           const journaled = parseAutoJournalMode(process.env.AUTO_JOURNAL_MODE) === 'on';
           if (journaled) {
@@ -1596,7 +1601,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // unlike cold_start/capture_pressure below, a pitfall bound to a READ tool (e.g. a posthog_
         // read defaulting to the PHI project, or legal_blob_get reaching into the privileged personal
         // room) is exactly the moment the agent needs the warning, so this is deliberately NOT gated
-        // on `def.category !== 'read'`. Advisory only in v1 (no enforce mode, never blocks); fail-open
+        // on `category !== 'read'`. Advisory only in v1 (no enforce mode, never blocks); fail-open
         // by construction and never throws (safety/jit-doctrine.ts). Throttled once per (caller, tool)
         // per process so the same pitfall does not nag on every subsequent call.
         // canonicalName, not def.name -- a pitfall bound to e.g. "posthog_" or "azure_containerapp_set_env"
@@ -1615,7 +1620,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // is always the non-fatal nudge, never a refusal. Surfaced in BOTH the structured content and
         // the text block (mirrors how compliance_warning is prepended) so it is maximally visible.
         let capturePressure: CapturePressureOutcome | null = null;
-        if (def.category !== 'read') {
+        if (category !== 'read') {
           structured.cold_start = { cold: coldStart.cold, blocked: false, mode: coldStart.mode, scope: coldStart.scope };
           // CAPTURE-PRESSURE (Phase 2): always surfaced for a mutating call (informational, mirrors
           // cold_start above) regardless of whether THIS call was journaled -- the counter tracks
