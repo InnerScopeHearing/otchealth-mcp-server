@@ -3,6 +3,7 @@
 
 import argparse
 from contextlib import contextmanager
+import errno
 import fcntl
 import importlib.util
 import json
@@ -125,6 +126,87 @@ def trusted_module(filename, name):
     return module
 
 
+def startup_failure_diagnostic(supervisor, profile, error):
+    """Finite metadata only, before cleanup; never change verifier or process state."""
+    def error_code(value):
+        return {errno.EACCES: 'EACCES', errno.EPERM: 'EPERM', errno.ENOENT: 'ENOENT', errno.ESRCH: 'ESRCH'}.get(getattr(value, 'errno', None), 'OTHER')
+    def attempt(operation):
+        try: return operation(), 'NONE'
+        except OSError as failure: return None, error_code(failure)
+        except Exception: return None, 'OTHER'
+    errors = {'checkpoint_timeout', 'keyring_not_ready', 'runtime_not_ready', 'browser_not_owned', 'browser_not_ready', 'control_unavailable'}
+    code = getattr(error, 'code', None)
+    result = {'event': 'browser_startup_failure_diagnostic_v1', 'supervisor_pid': os.getpid(),
+              'checkpoint_error': code if type(code) is str and code in errors else 'OTHER', 'browser_pid': None, 'browser_poll': None,
+              'process_present': None, 'ppid': None, 'real_uid_matches': None, 'effective_uid_matches': None,
+              'procdir_uid_matches': None, 'procdir_errno': 'NONE', 'status_errno': 'NONE',
+              'profile_arg_matches': None, 'non_type_process': None, 'debug_address_matches': None,
+              'debug_port_matches': None, 'sandbox_flags_safe': None, 'cmdline_errno': 'NONE',
+              'exe_basename': 'UNAVAILABLE', 'exe_errno': 'NONE', 'fd_errno': 'NONE',
+              'tcp4_errno': 'NONE', 'tcp6_errno': 'NONE', 'listeners': [],
+              'verifier_result': 'UNCONFIRMED', 'verified_pid': None}
+    try:
+        browser = supervisor.browser
+        if browser is not None:
+            pid = browser.pid
+            if type(pid) is int and 1 < pid <= 2**31 - 1:
+                result['browser_pid'] = pid
+                poll, _ = attempt(browser.poll)
+                if poll is None or type(poll) is int and -255 <= poll <= 255: result['browser_poll'] = poll
+                path = Path('/proc') / str(pid)
+                info, result['procdir_errno'] = attempt(path.stat)
+                result['process_present'] = True if info is not None else False if result['procdir_errno'] in {'ENOENT', 'ESRCH'} else None
+                if info is not None: result['procdir_uid_matches'] = info.st_uid == os.getuid()
+                raw, result['status_errno'] = attempt(lambda: (path / 'status').read_text()[:16384])
+                if raw is not None:
+                    fields = {line.split(':', 1)[0]: line.split(':', 1)[1].strip() for line in raw.splitlines() if ':' in line}
+                    ids = fields.get('Uid', '').split()
+                    if len(ids) == 4 and all(item.isdigit() for item in ids):
+                        result['real_uid_matches'] = int(ids[0]) == os.getuid()
+                        result['effective_uid_matches'] = int(ids[1]) == os.getuid()
+                    parent = fields.get('PPid', '')
+                    if parent.isdigit() and 0 <= int(parent) <= 2**31 - 1: result['ppid'] = int(parent)
+                args, result['cmdline_errno'] = attempt(lambda: (path / 'cmdline').read_bytes()[:65536].split(b'\0'))
+                if args is not None:
+                    result.update(profile_arg_matches=args.count(os.fsencode('--user-data-dir=' + str(profile['chromium']))) == 1,
+                                  non_type_process=not any(arg.startswith(b'--type=') for arg in args),
+                                  debug_address_matches=b'--remote-debugging-address=127.0.0.1' in args,
+                                  debug_port_matches=b'--remote-debugging-port=9222' in args,
+                                  sandbox_flags_safe=not any(arg == b'--no-sandbox' or arg.startswith(b'--remote-allow-origins=') for arg in args))
+                executable, result['exe_errno'] = attempt(lambda: Path(os.readlink(path / 'exe')).name)
+                if executable is not None: result['exe_basename'] = executable if executable in {'chromium', 'chromium-browser', 'chrome', 'google-chrome', 'sh', 'dash', 'bash', 'python3', 'python3.13'} else 'OTHER'
+                def descriptors():
+                    entries = list((path / 'fd').iterdir())
+                    if len(entries) > 4096: raise ValueError('bounded')
+                    return {os.readlink(entry) for entry in entries}
+                owned, result['fd_errno'] = attempt(descriptors)
+            else: owned = None
+        else: owned = None
+        for version in (4, 6):
+            table = Path('/proc/net/tcp' + ('6' if version == 6 else ''))
+            raw, result['tcp' + str(version) + '_errno'] = attempt(lambda: table.read_text()[:1048576])
+            if raw is None: continue
+            for line in raw.splitlines()[1:]:
+                row = line.split()
+                if len(row) <= 9 or row[3] != '0A' or row[1].rsplit(':', 1)[-1] != '2406': continue
+                address = row[1].split(':', 1)[0]
+                kind = ({'0100007F': 'LOOPBACK_V4', '00000000': 'ANY_V4'} if version == 4 else
+                        {'00000000000000000000000001000000': 'LOOPBACK_V6', '00000000000000000000000000000000': 'ANY_V6'}).get(address, 'OTHER')
+                inode = int(row[9]) if row[9].isdigit() and len(row[9]) <= 20 else None
+                result['listeners'].append({'address': kind, 'inode': inode, 'uid_matches': row[7].isdigit() and int(row[7]) == os.getuid(),
+                                            'owned_by_browser_fd': None if owned is None else 'socket:[' + row[9] + ']' in owned})
+                if len(result['listeners']) >= 16: break
+        try:
+            verified = supervisor.dispatcher.verify_runtime(str(profile['chromium']))
+            result['verifier_result'] = 'OWNED_PID' if verified == result['browser_pid'] else 'OTHER_PID'
+            if type(verified) is int and 1 < verified <= 2**31 - 1: result['verified_pid'] = verified
+        except Exception as failure:
+            result['verifier_result'] = 'runtime_not_ready' if getattr(failure, 'code', None) == 'runtime_not_ready' else 'OTHER'
+    except Exception: result['verifier_result'] = 'DIAGNOSTIC_INCOMPLETE'
+    try: print(json.dumps(result, sort_keys=True, separators=(',', ':'), allow_nan=False), file=sys.stderr, flush=True)
+    except Exception: pass  # Diagnostic failures must never replace the original startup failure.
+
+
 def session(profile):
     if os.getuid() == 0: raise ValueError('Browser must run as the non-root otcbrowser user; sandbox disabling is forbidden')
     binary = shutil.which('chromium') or shutil.which('chromium-browser') or shutil.which('google-chrome')
@@ -154,6 +236,7 @@ def session(profile):
                     stopping = True
                     if supervisor.browser is not None and supervisor.browser.poll() is None: supervisor.browser.terminate()
                 old_term, old_int = signal.signal(signal.SIGTERM, stop_browser), signal.signal(signal.SIGINT, stop_browser)
+                startup_complete = False
                 try:
                     time.sleep(0.3)
                     if not healthy(time.monotonic() + 10):
@@ -162,6 +245,7 @@ def session(profile):
                     if not healthy(time.monotonic() + 10): raise ValueError('Encrypted default keyring must be unlocked; browser was not started')
                     supervisor.start()
                     supervisor.listen()
+                    startup_complete = True
                     print('Browser started; desktop/profile write lease held.', flush=True)
                     failures = 0
                     while not stopping:
@@ -178,6 +262,9 @@ def session(profile):
                         supervisor.browser = launch()
                         supervisor.wait_ready(time.monotonic() + 14)
                     return 0
+                except Exception as error:
+                    if not startup_complete: startup_failure_diagnostic(supervisor, profile, error)
+                    raise
                 finally:
                     supervisor.close()
                     signal.signal(signal.SIGTERM, old_term)
