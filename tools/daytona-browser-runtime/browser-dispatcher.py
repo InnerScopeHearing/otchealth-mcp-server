@@ -195,6 +195,20 @@ def safe_directory(path):
     return path
 
 
+def process_arguments(raw):
+    decoded = [arg.decode('utf-8', errors='strict') for arg in raw.split(b'\0') if arg]
+    if len(decoded) == 1:
+        # Chromium's Linux SetProcessTitleFromCommandLine joins argv with literal
+        # spaces, without shell quoting. Normalize only that single-field form;
+        # ambiguous quoted/escaped/control-whitespace titles remain untrusted.
+        title = decoded[0]
+        if any(char in title for char in "'\"\\\t\r\n"):
+            return []
+        decoded = title.split(' ')
+        if any(not arg for arg in decoded): return []
+    return decoded
+
+
 def verify_runtime(profile_path, proc_root=Path('/proc')):
     """Prove the loopback listening inode belongs to this exact profile's browser."""
     if os.getuid() == 0: fail('runtime_not_ready')
@@ -203,8 +217,7 @@ def verify_runtime(profile_path, proc_root=Path('/proc')):
         if not entry.name.isdigit(): continue
         try:
             if entry.stat().st_uid != os.getuid(): continue
-            args = (entry / 'cmdline').read_bytes().split(b'\0')
-            decoded = [arg.decode('utf-8', errors='strict') for arg in args if arg]
+            decoded = process_arguments((entry / 'cmdline').read_bytes())
             binary = Path(os.readlink(entry / 'exe')).name
             if binary not in ('chromium', 'chromium-browser', 'chrome', 'google-chrome'): continue
             if any(arg.startswith('--type=') for arg in decoded): continue
