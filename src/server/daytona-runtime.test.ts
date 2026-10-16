@@ -17,11 +17,15 @@ import type { DaytonaBinding } from '../tools/browser-daytona/contract.js';
 const SESSION = randomUUID();
 const env = { DAYTONA_BROWSER_ENABLED: 'true', DAYTONA_BROWSER_API_BASE_URL: 'https://app.daytona.io/api', DAYTONA_BROWSER_ORGANIZATION_ID: '501db94e-10ee-4bc8-9cca-23c793c67524', DAYTONA_BROWSER_SANDBOX_ID: '11111111-1111-4111-8111-111111111111', DAYTONA_VIEWER_GRANT_KEY_BASE64: randomBytes(32).toString('base64'), DAYTONA_BROWSER_VIEWER_CONTROL_SHA256: '17f61b92692760ae7908a3987b593180bed0e8bf2f9a52afb1fa80d9489dcce2', DAYTONA_BROWSER_API_TOKEN: 'SERVER_ONLY_PRIVATE_TEST_TOKEN', CLOUD_BROWSER_DDB_TABLE: 'browser-table', DAYTONA_BROWSER_PREVIEW_DOMAIN: 'proxy.daytona.works', DAYTONA_BROWSER_PREVIEW_PORT: '6080', DAYTONA_BROWSER_PREVIEW_PATH: '/vnc.html', DAYTONA_BROWSER_TOOLBOX_ALLOWED_ORIGINS: '["https://proxy.app.daytona.io"]' };
 
-test('release packages the exact compiled lifecycle helper without changing the existing runtime assets', async () => {
+test('release packages the exact compiled WeFunder helper with its scoped lifecycle pin', async () => {
   const dockerfile = await readFile(new URL('../../Dockerfile', import.meta.url), 'utf8');
   assert.match(dockerfile, /^COPY --chown=app:app tools\/daytona-browser-runtime\/role-browser-helper\.py \.\/tools\/daytona-browser-runtime\/role-browser-helper\.py$/m);
   const helper = await readFile(new URL('../../tools/daytona-browser-runtime/role-browser-helper.py', import.meta.url));
-  assert.equal(createHash('sha256').update(helper).digest('hex'), 'b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51');
+  const helperSha256 = createHash('sha256').update(helper).digest('hex');
+  assert.equal(helperSha256, 'cbd15ea480ccce50d95a32283d90204d1b2aad24ba29454c23c73342c1fe3bed');
+  const lifecycle = await readFile(new URL('../tools/browser-daytona/lifecycle.ts', import.meta.url), 'utf8');
+  assert.ok(lifecycle.includes(`const WEFUNDER_HELPER_SHA256='${helperSha256}';`));
+  assert.ok(lifecycle.includes("const HELPER_SHA256='b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51';"));
 });
 
 test('seven-role map automatically enrolls watchdogs and rejects a role routed to another enrolled desktop before provider calls', async () => {

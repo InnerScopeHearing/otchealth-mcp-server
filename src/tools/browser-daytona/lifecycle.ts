@@ -10,6 +10,7 @@ const HASH=/^[a-f0-9]{64}$/;
 const MASTER='/otchealth/integrations/daytona/company-keyring-unlock-secret';
 const HELPER='/opt/otchealth-browser/role-browser-helper.py';
 const HELPER_SHA256='b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51';
+const WEFUNDER_HELPER_SHA256='cbd15ea480ccce50d95a32283d90204d1b2aad24ba29454c23c73342c1fe3bed';
 const IDLE=600000, GRACE=180000, MONTHLY_WEIGHTED_MS=3100*3600000;
 type Roles=Readonly<Record<string,{sandboxId:string;readinessReceiptSha256:string}>>;
 type Launch={sessionId:string;commandId:string};
@@ -183,8 +184,9 @@ export class RestDaytonaLifecyclePlatform implements LifecyclePlatform {
  private async toolbox(binding:DaytonaBinding):Promise<string>{const proxy=await this.request(this.api(binding,'/toolbox-proxy-url'));if(typeof proxy.url!=='string')return fail();const url=trustedUrl(proxy.url);if(!this.origins.has(url.origin))return fail('daytona_toolbox_origin_forbidden');return `${url.href.replace(/\/+$/,'')}/${binding.sandboxId}`;}
  private command(binding:DaytonaBinding,operationId:string,op:string):string{
   const payload=Buffer.from(JSON.stringify({version:1,op,role:binding.owner,sandboxId:binding.sandboxId,profileKey:daytonaPhysicalProfileKey(binding),operationId})).toString('base64url');
+  const helperSha256=binding.owner==='wefunder-campaign-director'?WEFUNDER_HELPER_SHA256:this.options.helperSha256;
   // Hash the installed helper BEFORE executing it, using fixed system Python -I.
-  const guard=`import hashlib,os,stat; p='${HELPER}'; f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW); s=os.fstat(f); assert stat.S_ISREG(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==493; assert hashlib.sha256(os.read(f,131072)).hexdigest()=='${this.options.helperSha256}'; os.close(f); os.execv('/usr/bin/python3',['python3','-I','-B',p,'--payload','${payload}'])`;
+  const guard=`import hashlib,os,stat; p='${HELPER}'; f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW); s=os.fstat(f); assert stat.S_ISREG(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==493; assert hashlib.sha256(os.read(f,131072)).hexdigest()=='${helperSha256}'; os.close(f); os.execv('/usr/bin/python3',['python3','-I','-B',p,'--payload','${payload}'])`;
   return `sudo -n /usr/bin/python3 -I -B -c ${shell(guard)}`;
  }
  private async execute(base:string,command:string,timeout=15):Promise<Record<string,unknown>>{

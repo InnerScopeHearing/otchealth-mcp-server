@@ -105,9 +105,12 @@ class ConcurrencyTests(unittest.TestCase):
         self.call(); self.call(B, 'b' * 64)
         with patch.object(dispatcher, 'execute', side_effect=dispatcher.DispatchError('provider_connection_lost')):
             with self.assertRaises(dispatcher.DispatchError): self.call(op='execute', action={'type': 'click', 'selector': '#public'})
-        for session, principal, op in [(B, 'b' * 64, 'execute'), (A, 'a' * 64, 'release')]:
-            with self.assertRaises(dispatcher.DispatchError) as error: self.call(session, principal, op=op, action={'type': 'snapshot'} if op == 'execute' else None)
-            self.assertEqual(error.exception.code, 'effect_unknown')
+        with self.assertRaises(dispatcher.DispatchError) as error: self.call(B, 'b' * 64, op='execute', action={'type': 'snapshot'})
+        self.assertEqual(error.exception.code, 'effect_unknown')
+        self.assertTrue(self.call(op='release')['released'])
+        state = json.loads((self.base / 'missions-v2.json').read_text())
+        self.assertIsNone(state['uncertain']); self.assertEqual([mission['sessionId'] for mission in state['missions']], [B])
+        self.call(B, 'b' * 64, op='execute', action={'type': 'snapshot'})
 
     def test_v2_clipboard_routes_only_owned_buffer_and_never_returns_its_text(self):
         self.call(); self.call(B, 'b' * 64)

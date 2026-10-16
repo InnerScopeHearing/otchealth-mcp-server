@@ -682,8 +682,27 @@ class V2Receipt:
         self.receipt.save(self.value)
 
 
+def target_infos(cdp):
+    result = cdp.command('Target.getTargets')
+    if not isinstance(result, dict) or not isinstance(result.get('targetInfos'), list): fail('provider_protocol_error')
+    pages = result['targetInfos']
+    for page in pages:
+        if not isinstance(page, dict) or not isinstance(page.get('targetId'), str) or not TARGET.fullmatch(page['targetId']) or not isinstance(page.get('type'), str) or not page['type']:
+            fail('provider_protocol_error')
+    return pages
+
+
+def wait_owned_targets_absent(cdp, owned, deadline):
+    while True:
+        pages = target_infos(cdp)
+        if not any(page['targetId'] in owned for page in pages): return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0: fail('target_operation_failed')
+        time.sleep(min(0.05, remaining))
+
+
 def preserve_retained_browser(cdp, closing):
-    pages = cdp.command('Target.getTargets').get('targetInfos', [])
+    pages = target_infos(cdp)
     if not any(page.get('type') == 'page' and page.get('targetId') not in closing for page in pages):
         parked = cdp.command('Target.createTarget', {'url': 'about:blank'}).get('targetId')
         if not isinstance(parked, str) or not TARGET.fullmatch(parked): fail('target_create_uncertain')
@@ -695,7 +714,10 @@ def dispatch_v2(payload, deadline, profile, browser_pid):
         with module.Registry(profile.parent, deadline - min(0.1, payload['timeoutMs'] / 10000)) as receipt:
             if os.path.lexists(profile.parent / 'mission.json'): fail('mission_busy', True)
             value = receipt.load(); op, session_id, principal = payload['op'], payload['sessionId'], payload['principalHash']
-            if value['uncertain'] is not None: fail('effect_unknown')
+            if value['uncertain'] is not None:
+                uncertain = value['uncertain']
+                if op != 'release' or uncertain['sessionId'] != session_id or uncertain['principalHash'] != principal:
+                    fail('effect_unknown')
             if op == 'open':
                 if value['human'] is not None: fail('human_active', True)
                 if len(value['missions']) >= module.MAX_MISSIONS or any(m['sessionId'] == session_id or m['principalHash'] == principal for m in value['missions']): fail('mission_busy', True)
@@ -736,8 +758,11 @@ def dispatch_v2(payload, deadline, profile, browser_pid):
                     # Keep a new unowned blank parking tab so closing this
                     # logical mission cannot shut the retained browser down.
                     preserve_retained_browser(cdp, mission['owned'])
+                    pages = target_infos(cdp)
+                    live_targets = {page['targetId'] for page in pages if page['type'] == 'page'}
                     for target in mission['owned']:
-                        if cdp.command('Target.closeTarget', {'targetId': target}).get('success') is not True: fail('target_operation_failed')
+                        if target in live_targets and cdp.command('Target.closeTarget', {'targetId': target}).get('success') is not True: fail('target_operation_failed')
+                    wait_owned_targets_absent(cdp, mission['owned'], deadline)
                     value['missions'].remove(mission); value['human'] = None; value['uncertain'] = None
                     receipt.save(value); return {'released': True, 'browserStopped': False}
                 else:

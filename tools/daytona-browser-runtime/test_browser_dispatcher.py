@@ -222,6 +222,159 @@ class DispatcherTests(unittest.TestCase):
                 self.assertEqual(error.exception.code, 'effect_unknown'); self.assertEqual(control.call_count, 1)
             with dispatcher.Receipt(base) as receipt: self.assertTrue(receipt.read()['uncertain'])
 
+    def test_exact_release_reconciles_only_its_matching_uncertain_mission(self):
+        class Registry:
+            def __init__(self, _base, _deadline): self.state = state
+            def __enter__(self): return self
+            def __exit__(self, *_): pass
+            def load(self): return json.loads(json.dumps(self.state))
+            def save(self, value): self.state.clear(); self.state.update(json.loads(json.dumps(value)))
+
+        def require_mission(value, session_id, principal):
+            for mission in value['missions']:
+                if mission['sessionId'] == session_id and mission['principalHash'] == principal: return mission
+            raise dispatcher.DispatchError('mission_not_owned')
+
+        class Cdp:
+            def __init__(self, _): self.closed = []; self.pages = ['OWNED', 'OTHER']; self.reads = 0
+            def close(self): pass
+            def command(self, method, params=None, session=None):
+                if method == 'Target.getTargets':
+                    self.reads += 1
+                    if self.reads == 4 and 'OWNED' in self.pages: self.pages.remove('OWNED')
+                    return {'targetInfos': [{'type': 'page', 'targetId': target, 'url': 'about:blank'} for target in self.pages]}
+                if method == 'Target.closeTarget':
+                    target = params['targetId']; self.closed.append(target)
+                    if target in self.pages: return {'success': True}
+                    return {'success': False}
+                return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); base.chmod(0o700); profile = base / 'chromium'; profile.mkdir(mode=0o700)
+            payload = {key: value for key, value in self.payload.items() if key != 'action'}
+            payload.update(op='release', profilePath=str(profile), runtimeProtocol=2)
+            state = {'missions': [
+                {'sessionId': payload['sessionId'], 'principalHash': payload['principalHash'], 'selected': 'OWNED', 'owned': ['OWNED'], 'uncertain': True},
+                {'sessionId': '22222222-2222-4222-8222-222222222222', 'principalHash': 'b' * 64, 'selected': 'OTHER', 'owned': ['OTHER'], 'uncertain': False},
+            ], 'human': None, 'uncertain': {'sessionId': payload['sessionId'], 'principalHash': payload['principalHash'], 'operation': 'action'}}
+            cdp = Cdp(None)
+            registry_module = type('RegistryModule', (), {'Registry': Registry, 'RegistryError': dispatcher.DispatchError, 'MAX_MISSIONS': 4,
+                                                            'require_mission': staticmethod(require_mission)})
+            with patch.object(dispatcher, 'safe_directory', side_effect=lambda p: Path(p)), \
+                 patch.object(dispatcher, 'verify_runtime', return_value=101), \
+                 patch.object(dispatcher, 'trusted_registry', return_value=registry_module), \
+                 patch.object(dispatcher, 'Cdp', return_value=cdp):
+                result = dispatcher.dispatch(payload)
+            self.assertEqual(result['released'], True)
+            self.assertEqual(cdp.closed, ['OWNED'])
+            self.assertEqual([mission['sessionId'] for mission in state['missions']], ['22222222-2222-4222-8222-222222222222'])
+            self.assertIsNone(state['uncertain'])
+
+    def test_uncertain_release_requires_exact_authenticated_mission_and_preserves_fence_on_partial_close(self):
+        class Registry:
+            def __init__(self, _base, _deadline): self.state = state
+            def __enter__(self): return self
+            def __exit__(self, *_): pass
+            def load(self): return json.loads(json.dumps(self.state))
+            def save(self, value): self.state.clear(); self.state.update(json.loads(json.dumps(value)))
+
+        def require_mission(value, session_id, principal):
+            for mission in value['missions']:
+                if mission['sessionId'] == session_id and mission['principalHash'] == principal: return mission
+            raise dispatcher.DispatchError('mission_not_owned')
+
+        class Cdp:
+            def __init__(self, _): self.closed = []
+            def close(self): pass
+            def command(self, method, params=None, session=None):
+                if method == 'Target.getTargets': return {'targetInfos': [{'type': 'page', 'targetId': 'OWNED'}, {'type': 'page', 'targetId': 'OTHER'}]}
+                if method == 'Target.closeTarget':
+                    self.closed.append(params['targetId'])
+                    return {'success': params['targetId'] != 'SECOND'}
+                return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); base.chmod(0o700); profile = base / 'chromium'; profile.mkdir(mode=0o700)
+            payload = {key: value for key, value in self.payload.items() if key != 'action'}
+            payload.update(op='release', profilePath=str(profile), runtimeProtocol=2)
+            state = {'missions': [{'sessionId': payload['sessionId'], 'principalHash': payload['principalHash'], 'selected': 'OWNED', 'owned': ['OWNED', 'SECOND'], 'uncertain': True}],
+                     'human': None, 'uncertain': {'sessionId': payload['sessionId'], 'principalHash': payload['principalHash'], 'operation': 'action'}}
+            module = type('RegistryModule', (), {'Registry': Registry, 'RegistryError': dispatcher.DispatchError, 'MAX_MISSIONS': 4,
+                                                   'require_mission': staticmethod(require_mission)})
+            with patch.object(dispatcher, 'safe_directory', side_effect=lambda p: Path(p)), patch.object(dispatcher, 'verify_runtime', return_value=101), patch.object(dispatcher, 'trusted_registry', return_value=module):
+                foreign = {**payload, 'principalHash': 'c' * 64}
+                foreign_cdp = Cdp(None)
+                with patch.object(dispatcher, 'Cdp', return_value=foreign_cdp):
+                    with self.assertRaises(dispatcher.DispatchError): dispatcher.dispatch(foreign)
+                self.assertEqual(foreign_cdp.closed, [])
+                foreign_session = {**payload, 'sessionId': '33333333-3333-4333-8333-333333333333'}
+                with patch.object(dispatcher, 'Cdp', return_value=foreign_cdp):
+                    with self.assertRaises(dispatcher.DispatchError): dispatcher.dispatch(foreign_session)
+                ordinary = {**payload, 'op': 'execute', 'action': {'type': 'snapshot'}}
+                with patch.object(dispatcher, 'Cdp', return_value=foreign_cdp):
+                    with self.assertRaises(dispatcher.DispatchError): dispatcher.dispatch(ordinary)
+                self.assertEqual(foreign_cdp.closed, [])
+                state['human'] = {'sessionId': '22222222-2222-4222-8222-222222222222', 'principalHash': 'b' * 64}
+                fenced_cdp = Cdp(None)
+                with patch.object(dispatcher, 'Cdp', return_value=fenced_cdp):
+                    with self.assertRaises(dispatcher.DispatchError): dispatcher.dispatch(payload)
+                self.assertEqual(fenced_cdp.closed, [])
+                state['human'] = None
+                with patch.object(dispatcher, 'Cdp', Cdp):
+                    with self.assertRaises(dispatcher.DispatchError): dispatcher.dispatch(payload)
+            self.assertEqual(state['uncertain'], {'sessionId': payload['sessionId'], 'principalHash': payload['principalHash'], 'operation': 'release'})
+            self.assertEqual(state['missions'][0]['sessionId'], payload['sessionId'])
+
+    def test_partial_uncertain_release_retry_skips_closed_tabs_and_confirms_absence(self):
+        class Registry:
+            def __init__(self, _base, _deadline): self.state = state
+            def __enter__(self): return self
+            def __exit__(self, *_): pass
+            def load(self): return json.loads(json.dumps(self.state))
+            def save(self, value): self.state.clear(); self.state.update(json.loads(json.dumps(value)))
+
+        def require_mission(value, session_id, principal):
+            for mission in value['missions']:
+                if mission['sessionId'] == session_id and mission['principalHash'] == principal: return mission
+            raise dispatcher.DispatchError('mission_not_owned')
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); base.chmod(0o700); profile = base / 'chromium'; profile.mkdir(mode=0o700)
+            payload = {key: value for key, value in self.payload.items() if key != 'action'}
+            payload.update(op='release', profilePath=str(profile), runtimeProtocol=2)
+            state = {'missions': [{'sessionId': payload['sessionId'], 'principalHash': payload['principalHash'], 'selected': 'OWNED', 'owned': ['OWNED', 'SECOND'], 'uncertain': True}],
+                     'human': None, 'uncertain': {'sessionId': payload['sessionId'], 'principalHash': payload['principalHash'], 'operation': 'action'}}
+            live = ['OWNED', 'SECOND', 'OTHER']; fail_second_once = [True]; target_reads = [0]
+
+            class Cdp:
+                def __init__(self, _): self.closed = []
+                def close(self): pass
+                def command(self, method, params=None, session=None):
+                    if method == 'Target.getTargets':
+                        target_reads[0] += 1
+                        if target_reads[0] == 5: return {}
+                        return {'targetInfos': [{'type': 'page', 'targetId': target} for target in live]}
+                    if method == 'Target.closeTarget':
+                        target = params['targetId']; self.closed.append(target)
+                        if target not in live: return {'success': False}
+                        if target == 'SECOND' and fail_second_once[0]: fail_second_once[0] = False; return {'success': False}
+                        live.remove(target); return {'success': True}
+                    return {}
+
+            module = type('RegistryModule', (), {'Registry': Registry, 'RegistryError': dispatcher.DispatchError, 'MAX_MISSIONS': 4,
+                                                   'require_mission': staticmethod(require_mission)})
+            with patch.object(dispatcher, 'safe_directory', side_effect=lambda p: Path(p)), patch.object(dispatcher, 'verify_runtime', return_value=101), patch.object(dispatcher, 'trusted_registry', return_value=module), patch.object(dispatcher, 'Cdp', Cdp):
+                with self.assertRaises(dispatcher.DispatchError): dispatcher.dispatch(payload)
+                self.assertEqual(state['uncertain']['operation'], 'release')
+                with self.assertRaises(dispatcher.DispatchError): dispatcher.dispatch(payload)
+                self.assertEqual(state['uncertain']['operation'], 'release')
+                self.assertEqual(state['missions'][0]['sessionId'], payload['sessionId'])
+                result = dispatcher.dispatch(payload)
+            self.assertEqual(result['released'], True)
+            self.assertEqual(live, ['OTHER'])
+            self.assertEqual(state['missions'], [])
+            self.assertIsNone(state['uncertain'])
+
     def test_probe_checkpoint_readiness_is_real_exact_profile_status_not_global(self):
         class Cdp:
             def __init__(self, _): pass
