@@ -23,7 +23,7 @@ async function client(options: Record<string, unknown> = {}) {
 }
 function network(runtimeBinding: Pick<DaytonaBinding, 'profileKey' | 'profilePath'> = binding) {
   const requests: Array<{ url: string; init: RequestInit }> = [];
-  const state = { sandbox: { id: binding.sandboxId, organizationId, state: 'started', public: false }, foreignReceipt: false, status: 200, calls: 0, payloads: [] as any[], pageReceipt: undefined as any, checkpointReady: true, checkpointAfter: 102, result: undefined as any, promotionForeign: false, omitPromotionProtocol: false, forgePromotionProtocol: false, afterPrepare: undefined as (() => void) | undefined };
+  const state = { sandbox: { id: binding.sandboxId, organizationId, state: 'started', public: false }, foreignReceipt: false, status: 200, calls: 0, payloads: [] as any[], pageReceipt: undefined as any, checkpointReady: true, checkpointAfter: 102, result: undefined as any, processResponse: undefined as any, promotionForeign: false, omitPromotionProtocol: false, forgePromotionProtocol: false, afterPrepare: undefined as (() => void) | undefined };
   const fetchImpl: typeof fetch = async (input, init = {}) => {
     const url = String(input); requests.push({ url, init }); state.calls++;
     assert.equal(new Headers(init.headers).get('authorization'), `Bearer ${token}`);
@@ -45,7 +45,7 @@ function network(runtimeBinding: Pick<DaytonaBinding, 'profileKey' | 'profilePat
       const result = payload.upload ? (payload.upload.phase === 'prepare' ? { prepared: true } : { fileReceipt: { status: 'attached', ...Object.fromEntries(Object.entries(payload.upload.files[0]).filter(([key]) => key !== 'relativePath')) } }) : state.result ?? (payload.op === 'probe' ? { ready: true, cdpLoopback: true, profileVerified: true, checkpointReady: state.checkpointReady, profileKey: runtimeBinding.profileKey, profilePath: runtimeBinding.profilePath, browserPid: 101, supervisorPid: 100, encryptedKeyringUnlocked: state.checkpointReady } : payload.op === 'checkpoint' ? { checkpointed: true, gracefulClosed: true, keyringSessionRetained: true, cdpLoopback: true, profileVerified: true, profileKey: runtimeBinding.profileKey, profilePath: runtimeBinding.profilePath, sessionId: payload.sessionId, principalHash: payload.principalHash, browserPidBefore: 101, browserPidAfter: state.checkpointAfter, supervisorPid: 100, tabsReset: true } : payload.op === 'open' ? { ready: true, cdpLoopback: true, profileVerified: true } : payload.op === 'release' ? { released: true } : { url: 'https://example.com/', title: 'Example', visibleText: 'Actual fixture page', ...(state.pageReceipt ? { pageReceipt: state.pageReceipt } : {}) });
       if (payload.upload?.phase === 'prepare') state.afterPrepare?.();
       const envelope = { version: 1, ok: true, profileKey: state.foreignReceipt ? 'foreign-profile' : runtimeBinding.profileKey, profilePath: runtimeBinding.profilePath, ...(payload.sessionId ? { sessionId: payload.sessionId } : {}), result };
-      return Response.json({ exitCode: 0, result: JSON.stringify(envelope) }, { status: state.status });
+      return Response.json(state.processResponse ?? { exitCode: 0, result: JSON.stringify(envelope) }, { status: state.status });
     }
     assert.equal(url, 'https://app.daytona.test/api/sandbox/sandbox-one');
     return Response.json(state.sandbox);
@@ -254,6 +254,37 @@ test('open and typed execution use fixed toolbox recipes and validate exact runt
   await c.releaseMission(binding, mission);
   assert.equal(n.state.payloads.at(-1).principalHash, binding.ownerSubjectHash);
   n.state.foreignReceipt = true; await assert.rejects(c.openMission(binding, mission.sessionId));
+});
+test('only exact allowlisted dispatcher failures are projected and oversized stdout has a distinct safe code', async () => {
+  const n = network(), c = await client({ fetchImpl: n.fetchImpl });
+  n.state.processResponse = { exitCode: 1, result: JSON.stringify({ version: 1, ok: false, code: 'provider_context_destroyed' }) };
+  await assert.rejects(c.execute(binding, mission, { type: 'navigate', url: 'https://example.com/' }, 10, binding.ownerSubjectHash), (error: any) => {
+    assert.equal(error.code, 'daytona_runtime_provider_context_destroyed');
+    assert.doesNotMatch(error.message, /PRIVATE-DISPATCHER-TEXT/);
+    return true;
+  });
+  assert.equal(n.requests.filter(request => request.url.endsWith('/process/execute')).length, 1);
+
+  for (const envelope of [
+    { version: 1, ok: false, code: 'PRIVATE-DISPATCHER-TEXT' },
+    { version: 1, ok: false, code: 'provider_context_destroyed', extra: true },
+    { version: 2, ok: false, code: 'provider_context_destroyed' },
+    { version: 1, ok: true, code: 'provider_context_destroyed' },
+    { version: 1, ok: false, code: 'mission_busy', beforeEffect: true },
+  ]) {
+    n.state.processResponse = { exitCode: 1, result: JSON.stringify(envelope) };
+    await assert.rejects(c.execute(binding, mission, { type: 'navigate', url: 'https://example.com/' }, 10, binding.ownerSubjectHash), (error: any) => {
+      assert.equal(error.code, 'daytona_runtime_unavailable');
+      assert.doesNotMatch(error.message, /PRIVATE-DISPATCHER-TEXT/);
+      assert.notEqual(error.code, 'daytona_operation_busy');
+      return true;
+    });
+  }
+  n.state.processResponse = { exitCode: 1, result: 'PRIVATE-DISPATCHER-TEXT' };
+  await assert.rejects(c.execute(binding, mission, { type: 'navigate', url: 'https://example.com/' }, 10, binding.ownerSubjectHash), (error: any) => error.code === 'daytona_runtime_unavailable' && !error.message.includes('PRIVATE-DISPATCHER-TEXT'));
+  n.state.processResponse = { exitCode: 0, result: 'x'.repeat(100001) };
+  await assert.rejects(c.execute(binding, mission, { type: 'navigate', url: 'https://example.com/' }, 10, binding.ownerSubjectHash), (error: any) => error.code === 'daytona_runtime_output_limit');
+  assert.equal(n.requests.filter(request => request.url.endsWith('/process/execute')).length, 8, 'each ambiguous runtime result is one request with no retry');
 });
 test('one shared mission can navigate distinct public domains without a fixture-only allowlist', async () => {
   const n = network(sharedRuntime), c = await client({ fetchImpl: n.fetchImpl });

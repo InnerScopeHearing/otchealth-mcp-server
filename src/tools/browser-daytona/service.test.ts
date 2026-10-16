@@ -7,7 +7,7 @@ const hash = 'a'.repeat(64);
 const binding: DaytonaBinding = { provider: 'daytona', owner: 'cto', ownerSubjectHash: hash, sandboxId: 'sandbox-one', profileKey: 'profile-one', profilePath: '/home/otcbrowser/.local/share/otchealth-browser/profile-one/chromium', readinessReceiptSha256: 'b'.repeat(64) };
 function fixture() {
   let now = 1000; let grantExpiry = 0; const sessions = new Map<string, DaytonaMission>(); const locks = new Map<string, string>(); const leases = new Map<string, string>();
-  const state = { opened: 0, executed: 0, released: 0, checkpoints: 0, grants: 0, revoked: 0, probes: 0, readinessForeign: false, checkpointReady: true, runtimeProtocol: undefined as 2 | undefined, multiMissionReady: true, openBusy: false, executeBusy: false, pauseBusy: false, pauseFails: false, resumeFails: false, public: false, openFails: false, executeFails: false, releaseFails: false, grantFails: false, revokeFails: false, executionResult: undefined as unknown, checkpointSession: undefined as DaytonaMission | undefined, flow: [] as string[] };
+  const state = { opened: 0, executed: 0, released: 0, checkpoints: 0, grants: 0, revoked: 0, probes: 0, readinessForeign: false, checkpointReady: true, runtimeProtocol: undefined as 2 | undefined, multiMissionReady: true, openBusy: false, executeBusy: false, pauseBusy: false, pauseFails: false, resumeFails: false, public: false, openFails: false, executeFails: false, executeError: undefined as Error | undefined, releaseFails: false, grantFails: false, revokeFails: false, executionResult: undefined as unknown, checkpointSession: undefined as DaytonaMission | undefined, flow: [] as string[] };
   const bindings = new Map([[binding.profileKey, binding], ['profile-two', { ...binding, owner: 'cfo', ownerSubjectHash: 'c'.repeat(64), profileKey: 'profile-two', profilePath: '/home/otcbrowser/.local/share/otchealth-browser/profile-two/chromium' }]]);
   const store: DaytonaBrowserStore = {
     loadBinding: async key => bindings.has(key) ? { ...bindings.get(key)! } : null, createBinding: async () => false,
@@ -24,7 +24,7 @@ function fixture() {
     probe: async b => { state.probes++; return { ready: true, profileKey: state.readinessForeign ? 'foreign' : b.profileKey, profilePath: b.profilePath, checkpointReady: state.checkpointReady, browserPid: 101, supervisorPid: 100, ...(state.runtimeProtocol ? { runtimeProtocol: state.runtimeProtocol, multiMissionReady: state.multiMissionReady } : {}), unexpectedSecret: 'must-not-return' }; },
     inspect: async () => ({ sandboxId: binding.sandboxId, state: 'started', public: state.public }),
     openMission: async (_b, id, options) => { state.opened++; assert.equal(options?.runtimeProtocol, sessions.get(id)?.runtimeProtocol); if (state.openBusy) throw new DaytonaBrowserError('daytona_operation_busy'); if (state.openFails) throw new Error('unknown open'); },
-    execute: async (b, _s, _a, _t, principal) => { assert.equal(principal, b.ownerSubjectHash); state.executed++; if (state.executeBusy) throw new DaytonaBrowserError('daytona_operation_busy'); if (state.executeFails) throw new Error('unknown action'); return state.executionResult ?? { url: 'https://example.com', title: 'Example', visibleText: 'public canary' }; },
+    execute: async (b, _s, _a, _t, principal) => { assert.equal(principal, b.ownerSubjectHash); state.executed++; if (state.executeBusy) throw new DaytonaBrowserError('daytona_operation_busy'); if (state.executeError) throw state.executeError; if (state.executeFails) throw new Error('unknown action'); return state.executionResult ?? { url: 'https://example.com', title: 'Example', visibleText: 'public canary' }; },
     pauseAutomation: async (_b, s) => { state.flow.push('pause'); assert.equal(s.runtimeProtocol, 2); assert.equal(s.sensitiveOutputSuppressed, true); assert.equal(s.effectUnknown, true); if (state.pauseBusy) throw new DaytonaBrowserError('daytona_operation_busy'); if (state.pauseFails) throw new Error('unknown pause'); return { paused: true }; },
     resumeAutomation: async (_b, s) => { state.flow.push('resume'); assert.equal(s.sensitiveOutputSuppressed, true); assert.equal(s.effectUnknown, true); if (state.resumeFails) throw new Error('unknown resume'); return { resumed: true }; },
     checkpoint: async (_binding, session) => { state.checkpoints++; state.checkpointSession = session; state.flow.push('checkpoint'); }, releaseMission: async () => { state.released++; if (state.releaseFails) throw new Error('unknown release'); },
@@ -184,6 +184,15 @@ test('transport wrappers unwrap to the existing gateway observation and target r
   const pageReceipt = { selectedTargetId: 'OWNED1', createdTargetId: 'OWNED2', completed: true };
   h.state.executionResult = { observation, pageReceipt };
   assert.deepEqual(await h.service.execute('cto', opened.sessionId, { type: 'tab_create', url: 'https://example.com/' }, 10, hash), pageReceipt);
+});
+test('projected post-action observation errors preserve the unknown-effect fence and are never retried', async () => {
+  const h = fixture(); const opened = await h.service.start('cto', 'profile-one', 180, 5, hash);
+  h.state.executeError = new DaytonaBrowserError('daytona_runtime_provider_context_destroyed', 'PRIVATE-DISPATCHER-TEXT');
+  await assert.rejects(h.service.execute('cto', opened.sessionId, { type: 'navigate', url: 'https://example.com/' }, 10, hash), code('daytona_runtime_provider_context_destroyed'));
+  assert.equal(h.sessions.get(opened.sessionId)!.effectUnknown, true);
+  assert.equal(h.state.executed, 1);
+  await assert.rejects(h.service.snapshot('cto', opened.sessionId, hash), code('effect_unknown'));
+  assert.equal(h.state.executed, 1, 'unknown effect prevents a second provider call');
 });
 test('readiness is exact caller-bound fresh evidence with zero mission or lease effects', async () => {
   const h = fixture(); assert.equal(typeof h.service.readiness, 'function');
