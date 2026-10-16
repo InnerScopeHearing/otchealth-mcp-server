@@ -42,7 +42,7 @@ export const cloudBrowserActionSchema = z.discriminatedUnion("type", [
         .string()
         .url()
         .max(2048)
-        .regex(/^https?:\/\//i),
+        .regex(/^https?:\/\/.+$/i),
     })
     .strict(),
   z

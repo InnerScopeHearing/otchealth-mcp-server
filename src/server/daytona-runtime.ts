@@ -219,7 +219,7 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
     const tickets = dependencies.createTickets?.() ?? new DynamoDaytonaViewerTicketStore({ tableName: table(), region: region() });
     const missions: DaytonaViewerMissionBoundary = {
       loadSession: id => store.loadSession(id),
-      getViewerGrant: async (caller, id, principal, seconds) => { await grantPreflight(caller, id, principal); return service.getViewerGrant(caller, id, principal, seconds); },
+      getViewerGrant: async (caller, id, principal, seconds, notAfter) => { await grantPreflight(caller, id, principal); return service.getViewerGrant(caller, id, principal, seconds, notAfter); },
       resumeViewerGrant: async (caller, id, principal, handle) => { await approvedSession(caller, id, principal); return service.resumeViewerGrant(caller, id, principal, handle); }, completeHumanInput: service.completeHumanInput.bind(service), stop: browser.stop,
     };
     // Admission must reject an unhealthy target inside owned(), BEFORE the

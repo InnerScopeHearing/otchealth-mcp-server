@@ -32,7 +32,7 @@ function fixture() {
     readViewerGrant: async (_b, grantHandle) => ({ url: 'https://6080-synthetic.proxy.daytona.works/', expiresAt: grantExpiry, grantHandle }),
     revokeViewerGrant: async () => { state.revoked++; state.flow.push('revoke'); if (state.revokeFails) throw new Error('unknown revoke'); return { human_input_revoked: true }; },
   };
-  return { service: new DaytonaBrowserService(store, provider, () => now), state, sessions, leases, locks, bindings, store, advance: (ms: number) => { now += ms; } };
+  return { service: new DaytonaBrowserService(store, provider, () => now), state, sessions, leases, locks, bindings, store, provider, advance: (ms: number) => { now += ms; } };
 }
 const code = (expected: string) => (e: unknown) => e instanceof DaytonaBrowserError && e.code === expected;
 test('same tool facade opens only an enrolled private running sandbox and maintains a distinct Daytona mission', async () => {
@@ -102,6 +102,22 @@ test('human control stays suppressed until exact grant revocation precedes check
   assert.deepEqual(h.state.flow, ['revoke', 'checkpoint']); assert.equal(h.sessions.get(opened.sessionId)!.sensitiveOutputSuppressed, false);
   assert.equal(h.state.checkpointSession?.sessionId, opened.sessionId);
   assert.equal(h.sessions.get(opened.sessionId)!.viewerGrantHandle, undefined);
+});
+test('human grant preserves the earlier absolute ticket deadline through delayed pause and mint', async () => {
+  const h = fixture(); h.state.runtimeProtocol = 2;
+  const opened = await h.service.start('cto', 'profile-one', 900, 5, hash);
+  const deadline = 301000, handle = '12345678-1234-1234-1234-123456789abc';
+  h.advance(100);
+  h.provider.pauseAutomation = async () => { h.advance(1_224); return { paused: true }; };
+  h.provider.viewerGrant = async (_binding, seconds, notAfter) => {
+    h.state.grants++; assert.equal(seconds, 299); assert.equal(notAfter, deadline);
+    return { url: 'https://6080-synthetic.proxy.daytona.works/', expiresAt: Math.min(301324, notAfter!), grantHandle: handle };
+  };
+  h.provider.readViewerGrant = async () => ({ url: 'https://6080-synthetic.proxy.daytona.works/', expiresAt: deadline, grantHandle: handle });
+  const grant = await h.service.getViewerGrant('cto', opened.sessionId, hash, 299, deadline);
+  assert.equal(grant.expiresAt, deadline); assert.equal(h.state.grants, 1); assert.equal(h.state.revoked, 0);
+  assert.equal(h.sessions.get(opened.sessionId)!.viewerExpiresAt, deadline);
+  assert.equal(h.sessions.get(opened.sessionId)!.expiresAt, opened.expiresAt);
 });
 test('unknown viewer grant or revocation never releases input ownership or retries provider writes', async () => {
   for (const failure of ['grant', 'revoke']) {
