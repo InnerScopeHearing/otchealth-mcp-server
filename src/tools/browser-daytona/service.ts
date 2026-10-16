@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { CloudBrowserAction } from '../browser-cloud/contract.js';
 import { validateCloudBrowserAction } from '../browser-cloud/actions.js';
-import { DaytonaBrowserError, type DaytonaBinding, type DaytonaBrowserStore, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness } from './contract.js';
+import { DaytonaBrowserError, DaytonaViewerNotMintedError, type DaytonaBinding, type DaytonaBrowserStore, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness } from './contract.js';
 import { assertDaytonaBinding, assertDaytonaMission } from './store.js';
 const HASH = /^[a-f0-9]{64}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -151,7 +151,23 @@ export class DaytonaBrowserService {
         try { const paused = await this.provider.pauseAutomation!(binding, session); if (paused.paused !== true) return fail('daytona_pause_unconfirmed'); }
         catch (error) { if (beforeEffectBusy(session, error)) { session.sensitiveOutputSuppressed = false; session.effectUnknown = false; await this.store.saveSessionUnderLock(session, lock); } throw error; }
       }
-      const grant = await this.provider.viewerGrant(binding, seconds, grantDeadline);
+      let grant: Awaited<ReturnType<DaytonaProvider['viewerGrant']>>;
+      try {
+        if (Math.floor((grantDeadline - this.now()) / 1000) < 1) throw new DaytonaViewerNotMintedError();
+        grant = await this.provider.viewerGrant(binding, seconds, grantDeadline);
+      } catch (error) {
+        if (error instanceof DaytonaViewerNotMintedError) {
+          // No viewer port was invoked. Restore only the acknowledged pause;
+          // an unknown resume or any ordinary mint failure retains the fence.
+          if (session.runtimeProtocol === 2) {
+            const receipt = await this.provider.resumeAutomation!(binding, session);
+            if (receipt.resumed !== true) return fail('daytona_resume_unconfirmed');
+          }
+          session.sensitiveOutputSuppressed = false; session.effectUnknown = false;
+          await this.store.saveSessionUnderLock(session, lock);
+        }
+        throw error;
+      }
       if (!UUID.test(grant.grantHandle)) return fail('viewer_grant_invalid');
       // A UUID alone is not ownership proof. The trusted vault read is bound to
       // this enrollment; a foreign handle must never become a cleanup target.

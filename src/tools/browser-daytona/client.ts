@@ -4,7 +4,7 @@ import type { BrowserFileBroker } from '../browser-cloud/file-broker.js';
 import type { BrowserFileTransferReceipt } from '../browser-cloud/provider-files.js';
 import type { TrustedBrowserBinaryValidator } from '../browser-cloud/binary-validation.js';
 import { validateCloudBrowserAction } from '../browser-cloud/actions.js';
-import { DaytonaBrowserError, daytonaPhysicalProfileKey, type DaytonaBinding, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness } from './contract.js';
+import { DaytonaBrowserError, DaytonaViewerNotMintedError, daytonaPhysicalProfileKey, type DaytonaBinding, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness } from './contract.js';
 export type { DaytonaRuntimeReadiness } from './contract.js';
 import { assertDaytonaBinding, assertDaytonaMission } from './store.js';
 import { DaytonaTransferBridge, type DaytonaUploadDescriptor, type DaytonaDirectoryReceipt } from './transfer-bridge.js';
@@ -264,10 +264,18 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
   }
   async viewerGrant(binding: DaytonaBinding, expiresSeconds: number, notAfter?: number): Promise<ViewerGrant> {
     assertDaytonaBinding(binding); if (!Number.isSafeInteger(expiresSeconds) || expiresSeconds < 1 || expiresSeconds > 300) return fail('invalid_duration');
-    if (notAfter !== undefined && (!Number.isSafeInteger(notAfter) || notAfter <= Date.now())) return fail('invalid_duration');
+    if (notAfter !== undefined && !Number.isSafeInteger(notAfter)) return fail('invalid_duration');
+    // This is the only trusted no-mint negative: no viewer port has been called.
+    if (notAfter !== undefined && notAfter <= Date.now()) throw new DaytonaViewerNotMintedError();
     // With a mission deadline the service must first retain the known owned
     // handle before rejecting a late/invalid receipt. Do not lose it here.
-    return this.bounded(async () => { const value = await this.viewer().mint(binding, expiresSeconds, notAfter); if (notAfter !== undefined) return value; const grant = this.grant(value); if (grant.expiresAt > Date.now() + expiresSeconds * 1000) return fail('daytona_viewer_invalid'); return grant; });
+    return this.bounded(async () => {
+      let value: ViewerGrant;
+      try { value = await this.viewer().mint(binding, expiresSeconds, notAfter); }
+      catch (error) { if (error instanceof DaytonaViewerNotMintedError) return fail('daytona_viewer_unavailable'); throw error; }
+      if (notAfter !== undefined) return value;
+      const grant = this.grant(value); if (grant.expiresAt > Date.now() + expiresSeconds * 1000) return fail('daytona_viewer_invalid'); return grant;
+    });
   }
   async readViewerGrant(binding: DaytonaBinding, grantHandle: string): Promise<ViewerGrant> {
     assertDaytonaBinding(binding); if (!UUID.test(grantHandle)) return fail('daytona_viewer_invalid'); return this.bounded(async () => this.grant(await this.viewer().read(binding, grantHandle), grantHandle));
