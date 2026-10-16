@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { callerSurfaceFingerprint } from './caller-surface-fingerprint.js';
+import { callerSurfaceFingerprint, lazyCallerSurfaceEntry } from './caller-surface-fingerprint.js';
 
 test('caller surface fingerprint sorts tool names and object keys but preserves schema array order', () => {
   const first = callerSurfaceFingerprint([
@@ -26,4 +26,18 @@ test('caller surface fingerprint changes for schema and exposure drift', () => {
   const baseline = callerSurfaceFingerprint([{ name: 'safe_read', inputSchema: { type: 'object', properties: { q: { type: 'string' } } } }]);
   assert.notEqual(baseline, callerSurfaceFingerprint([{ name: 'safe_read', inputSchema: { type: 'object', properties: { q: { type: 'number' } } } }]));
   assert.notEqual(baseline, callerSurfaceFingerprint([{ name: 'write_action', inputSchema: { type: 'object', properties: { q: { type: 'string' } } } }]));
+});
+
+test('unused caller contract capture does not materialize its schema factory', () => {
+  let materializations = 0;
+  const getEntry = lazyCallerSurfaceEntry(() => {
+    materializations += 1;
+    return { name: 'expensive_schema', inputSchema: { type: 'object' } };
+  });
+
+  assert.equal(materializations, 0);
+  assert.equal(getEntry().name, 'expensive_schema');
+  assert.equal(materializations, 1);
+  assert.equal(getEntry().name, 'expensive_schema');
+  assert.equal(materializations, 1);
 });

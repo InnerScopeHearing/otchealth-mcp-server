@@ -5,6 +5,14 @@ export type CallerSurfaceTool = {
   [key: string]: unknown;
 };
 
+export function lazyCallerSurfaceEntry(factory: () => CallerSurfaceTool): () => CallerSurfaceTool {
+  let value: CallerSurfaceTool | undefined;
+  return () => {
+    value ??= factory();
+    return value;
+  };
+}
+
 function sortObjectKeys(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortObjectKeys);
   if (value === null || typeof value !== 'object') return value;
