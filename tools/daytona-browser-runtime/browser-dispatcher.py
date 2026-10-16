@@ -429,10 +429,10 @@ def snapshot(cdp, session, target):
         if node.get('ignored') or role not in ('StaticText', 'heading', 'link', 'button'): continue
         name = node.get('name', {}).get('value')
         if isinstance(name, str): names.append(name[:2000])
-    if url == 'about:blank' and any(name.strip() for name in names):
-        fail('destination_forbidden')
     # Guard again before releasing observations; this is not network interception/pinning.
     if current_url(cdp, session) != url: fail('navigation_changed')
+    if url == 'about:blank' and any(name.strip() for name in names):
+        fail('destination_forbidden')
     return {'url': url, 'title': title[:512] if isinstance(title, str) else '', 'visibleText': '\n'.join(names)[:12000]}
 
 
