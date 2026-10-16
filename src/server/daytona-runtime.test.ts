@@ -21,7 +21,7 @@ test('release packages the exact compiled lifecycle helper without changing the 
   const dockerfile = await readFile(new URL('../../Dockerfile', import.meta.url), 'utf8');
   assert.match(dockerfile, /^COPY --chown=app:app tools\/daytona-browser-runtime\/role-browser-helper\.py \.\/tools\/daytona-browser-runtime\/role-browser-helper\.py$/m);
   const helper = await readFile(new URL('../../tools/daytona-browser-runtime/role-browser-helper.py', import.meta.url));
-  assert.equal(createHash('sha256').update(helper).digest('hex'), 'e39a1e0f9df08ec6db68fea1d696eb6f860cd08878e062be562b463541c1a529');
+  assert.equal(createHash('sha256').update(helper).digest('hex'), 'b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51');
 });
 
 test('seven-role map automatically enrolls watchdogs and rejects a role routed to another enrolled desktop before provider calls', async () => {
@@ -235,6 +235,29 @@ test('dedicated company start holds one admission through enrollment and the rea
       assert.equal(admissions, 2);
     } finally { f.controller.shutdown(); }
   }
+});
+
+test('disabling new company enrollment preserves the existing-binding dedicated start path', async () => {
+  let admissions = 0;
+  const roles = ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director'];
+  const agents = Object.fromEntries(roles.map((role, i) => [role, { sandboxId: `${i + 1}1111111-1111-4111-8111-111111111111`, readinessReceiptSha256: String(i + 1).repeat(64) }]));
+  const f = fixture({ DAYTONA_COMPANY_ENROLLMENT_ENABLED: 'false', DAYTONA_AGENT_DESKTOP_TEMPLATES: JSON.stringify({ schema: 'daytona-agent-desktops/v1', agents }) }, {
+    withReady: async (_binding, run) => { admissions++; return run(); }, tick: async () => {}, touch: async () => {}, shutdown: () => {},
+  });
+  const principal = 'a'.repeat(64), profileKey = `cto-${principal}`;
+  f.state.bindings = new Map([[profileKey, { provider: 'daytona', owner: 'cto', ownerSubjectHash: principal, profileKey, sharedProfileKey: 'company-browser', profilePath: '/home/otcbrowser/.local/share/otchealth-browser/company-browser/chromium', ...agents.cto! }]]);
+  f.state.enrollmentReady = true; f.store.acquireProfileLease = async () => true; f.store.acquireSessionLock = async () => true;
+  f.store.createSession = async session => { f.state.session = structuredClone(session); return true; };
+  f.store.saveSessionUnderLock = async session => { f.state.session = structuredClone(session); };
+  try {
+    await f.controller.initialize(); const browser = (await f.controller.adapter.get())!.browser;
+    assert.equal(browser.startCompany, undefined, 'the gateway must retain the existing adapter path when new enrollment is off');
+    const profile = await browser.discover('cto', principal);
+    assert.equal((await browser.readiness('cto', profile.profileId, principal)).runtimeProtocol, 2);
+    const result = await browser.start('cto', profile.profileId, 180, 5, principal, { requireMultiMission: true });
+    assert.equal(result.runtimeProtocol, 2); assert.equal(admissions, 2);
+    assert.equal(f.calls.includes('create-binding'), false); assert.equal(f.calls.filter(call => call === 'open').length, 1);
+  } finally { f.controller.shutdown(); }
 });
 
 test('Daytona runtime is off by default and malformed/partial private viewer configuration never creates a provider', async () => {

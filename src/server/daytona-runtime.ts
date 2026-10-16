@@ -183,7 +183,7 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
     };
     const browser: DaytonaGatewayRuntime['browser'] = {
       discover: async (caller, principal, profile) => { await enrollment.ensure(caller, principal, profile); const result = await service.discover(caller, principal, profile); await approved(caller, result.profileId, principal); return result; },
-      ...(env.DAYTONA_AGENT_DESKTOP_TEMPLATES === undefined ? {} : { startCompany: async (caller: string, seconds: number, budget: number | undefined, principal: string) => {
+      ...(env.DAYTONA_AGENT_DESKTOP_TEMPLATES === undefined || !template ? {} : { startCompany: async (caller: string, seconds: number, budget: number | undefined, principal: string) => {
         if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 28800) fail('invalid_duration');
         if (budget !== undefined && (!Number.isSafeInteger(budget) || budget < 1 || budget > 10000)) fail('invalid_action_budget');
         if (!template || !roleLifecycle) fail('daytona_role_configuration_invalid');
