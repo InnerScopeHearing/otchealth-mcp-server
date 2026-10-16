@@ -382,11 +382,28 @@ class Cdp:
             # their original bound; no caller-supplied method reaches this API.
             message = self.message(6 * 1024 * 1024 if method in ('Page.captureScreenshot', 'Page.printToPDF') else MAX_FRAME)
             if message.get('id') != self.identifier: continue
-            if 'error' in message: fail('provider_action_failed')
+            if 'error' in message:
+                error = message['error']
+                # Only these read-side document/context teardown responses may
+                # be retried. Never classify an input/navigation command as safe
+                # to replay, and never release provider error text.
+                if method in ('Page.getFrameTree', 'Accessibility.getFullAXTree', 'Target.getTargetInfo', 'Target.attachToTarget') and isinstance(error, dict) and type(error.get('code')) is int and error['code'] in (-32000, -32001) and error.get('message') in (
+                    'Cannot find context with specified id', 'Execution context was destroyed.',
+                    'Cannot find default execution context', 'Inspected target navigated or closed',
+                    'Session with given id not found.'):
+                    fail('provider_context_destroyed')
+                fail('provider_action_failed')
             if not isinstance(message.get('result'), dict): fail('provider_protocol_error')
             return message['result']
     def close(self):
         if self.sock: self.sock.close()
+
+
+def allow_observed_url(url):
+    # Only CDP metadata may transiently omit a document URL during navigation.
+    # User-supplied URLs still go directly through the unchanged allow_url.
+    if url == '': fail('provider_document_pending')
+    allow_url(url, allow_blank=True)
 
 
 def current_url(cdp, session):
@@ -398,7 +415,7 @@ def current_url(cdp, session):
         frame = pending.pop()
         count += 1
         if count > 256: fail('provider_response_too_large')
-        allow_url(frame.get('frame', {}).get('url'), allow_blank=True)
+        allow_observed_url(frame.get('frame', {}).get('url'))
         pending.extend(frame.get('childFrames', []))
     return url
 
@@ -419,10 +436,10 @@ def snapshot(cdp, session, target):
         if node.get('ignored') or role not in ('StaticText', 'heading', 'link', 'button'): continue
         name = node.get('name', {}).get('value')
         if isinstance(name, str): names.append(name[:2000])
-    if url == 'about:blank' and any(name.strip() for name in names):
-        fail('destination_forbidden')
     # Guard again before releasing observations; this is not network interception/pinning.
     if current_url(cdp, session) != url: fail('navigation_changed')
+    if url == 'about:blank' and any(name.strip() for name in names):
+        fail('destination_forbidden')
     return {'url': url, 'title': title[:512] if isinstance(title, str) else '', 'visibleText': '\n'.join(names)[:12000]}
 
 
@@ -431,12 +448,26 @@ def selected(cdp, state):
     if not target or target not in state['owned']: fail('target_not_owned')
     info = cdp.command('Target.getTargetInfo', {'targetId': target}).get('targetInfo', {})
     if info.get('type') != 'page': fail('target_not_owned')
-    allow_url(info.get('url'), allow_blank=True)
+    allow_observed_url(info.get('url'))
     result = cdp.command('Target.attachToTarget', {'targetId': target, 'flatten': True})
     session = result.get('sessionId')
     if not text(session): fail('provider_protocol_error')
     current_url(cdp, session)
     return target, session
+
+
+def post_action_snapshot(cdp, state, navigation=False):
+    """Retry observations only after an acknowledged action, never the action."""
+    deadline = min(cdp.deadline, time.monotonic() + 2) if navigation else None
+    while True:
+        try:
+            target, session = selected(cdp, state)
+            return snapshot(cdp, session, target)
+        except DispatchError as error:
+            if not navigation or error.code not in ('provider_context_destroyed', 'navigation_changed', 'provider_document_pending'): raise
+            remaining = min(cdp.remaining(), deadline - time.monotonic())
+            if remaining <= 0: raise
+            time.sleep(min(0.05, remaining))
 
 
 def key(cdp, session, name, modifiers=0):
@@ -484,7 +515,6 @@ def execute(cdp, state, action):
         allow_url(action['url'])
         result = cdp.command('Page.navigate', {'url': action['url']}, session)
         if result.get('errorText'): fail('navigation_failed')
-        current_url(cdp, session)
     elif kind in ('navigate_back', 'navigate_forward'):
         history = cdp.command('Page.getNavigationHistory', {}, session)
         entries, index = history.get('entries', []), history.get('currentIndex')
@@ -560,7 +590,9 @@ def execute(cdp, state, action):
                 params = {'x': x, 'y': y, 'button': action.get('button', 'left'), 'clickCount': count}
                 try: cdp.command('Input.dispatchMouseEvent', {'type': 'mousePressed', **params}, session)
                 finally: cdp.command('Input.dispatchMouseEvent', {'type': 'mouseReleased', **params}, session)
-    current_url(cdp, session)
+    # Navigation may destroy the attached document after the input ACK. The
+    # caller performs guarded read-only reattachment/snapshot, not input replay.
+    if kind not in ('navigate', 'click'): current_url(cdp, session)
     return {'completed': True, 'selectedTargetId': state['selected']}
 
 
@@ -638,7 +670,7 @@ def perform_action(cdp, state, payload, profile):
     if kind == 'snapshot': return action_result
     if state['selected'] is None: result = {'url': None, 'title': None, 'visibleText': ''}
     else:
-        target, attached_session = selected(cdp, state); result = snapshot(cdp, attached_session, target)
+        result = post_action_snapshot(cdp, state, kind in ('navigate', 'click'))
     if kind in ('tab_create', 'tab_select', 'tab_close'): result['pageReceipt'] = action_result
     return result
 
@@ -815,8 +847,7 @@ def dispatch(payload):
                 if state['selected'] is None:
                     result = {'url': None, 'title': None, 'visibleText': ''}
                 else:
-                    target, attached_session = selected(cdp, state)
-                    result = snapshot(cdp, attached_session, target)
+                    result = post_action_snapshot(cdp, state, kind in ('navigate', 'click'))
                 if payload['action']['type'] in ('tab_create', 'tab_select', 'tab_close'):
                     result['pageReceipt'] = action_result
             state['uncertain'] = False
