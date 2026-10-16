@@ -126,7 +126,10 @@ export interface CloudBrowserGatewayRuntime {
 }
 export interface DaytonaGatewayRuntime {
   capabilities: Readonly<{ checkpoint: boolean; humanViewer: boolean }>;
-  browser: Pick<DaytonaBrowserService, 'discover' | 'readiness' | 'start' | 'execute' | 'snapshot' | 'savePersistentProfile' | 'stop'>;
+  browser: Pick<DaytonaBrowserService, 'discover' | 'readiness' | 'start' | 'execute' | 'snapshot' | 'savePersistentProfile' | 'stop'> & {
+    /** Internal dedicated-desktop composition, never a caller-selected binding. */
+    startCompany?(caller: string, maxSeconds: number, actionBudget: number | undefined, principal: string): ReturnType<DaytonaBrowserService['start']>;
+  };
   viewers: Pick<DaytonaViewerHandoffService, 'issue'>;
 }
 /** A consistent server-store lookup, never an untrusted provider hint, selects UUID routing. */
@@ -574,12 +577,17 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
             const principal = daytonaPrincipal(ctx.callerAgent);
             const company = await daytona?.get();
             if (!company) throw new DaytonaBrowserError('daytona_not_configured');
-            const profile = await company.browser.discover(ctx.callerAgent, principal);
-            const readiness = await company.browser.readiness(ctx.callerAgent, profile.profileId, principal);
-            if (readiness.ready !== true || readiness.profileKey !== profile.profileId || readiness.runtimeProtocol !== 2 || readiness.multiMissionReady !== true) throw new DaytonaBrowserError('daytona_multimission_unavailable');
-            // The service must re-probe at the effect boundary and forbid a V1
-            // fallback if readiness changed after the gateway's observation.
-            const started = await company.browser.start(ctx.callerAgent, profile.profileId, input.max_seconds, input.action_budget, principal, { requireMultiMission: true });
+            let started: Awaited<ReturnType<DaytonaBrowserService['start']>>;
+            if (company.browser.startCompany) {
+              // Production dedicated desktops hold one admission through signed
+              // enrollment and the service's final fresh no-V1-fallback guard.
+              started = await company.browser.startCompany(ctx.callerAgent, input.max_seconds, input.action_budget, principal);
+            } else {
+              const profile = await company.browser.discover(ctx.callerAgent, principal);
+              const readiness = await company.browser.readiness(ctx.callerAgent, profile.profileId, principal);
+              if (readiness.ready !== true || readiness.profileKey !== profile.profileId || readiness.runtimeProtocol !== 2 || readiness.multiMissionReady !== true) throw new DaytonaBrowserError('daytona_multimission_unavailable');
+              started = await company.browser.start(ctx.callerAgent, profile.profileId, input.max_seconds, input.action_budget, principal, { requireMultiMission: true });
+            }
             if (started.runtimeProtocol !== 2) throw new DaytonaBrowserError('daytona_multimission_unavailable');
             return { data: { sessionId: started.sessionId, expiresAt: started.expiresAt, profile_id: 'daytona-company', provider: 'daytona', runtime_protocol: 2, status: 'ready' }, summary: 'Owned company-browser automation mission started with confirmed V2 runtime routing. No human viewer or AWS session was created.' };
           }

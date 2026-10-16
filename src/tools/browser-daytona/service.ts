@@ -45,7 +45,7 @@ export class DaytonaBrowserService {
     const proof = this.provider.probe ? await this.readiness(caller, profileKey, principal) : undefined;
     const multiMission = proof?.runtimeProtocol === 2 && proof.multiMissionReady === true;
     if (proof?.runtimeProtocol === 2 && !multiMission) return fail('daytona_operation_busy');
-    if (options?.requireMultiMission && !multiMission) return fail('daytona_multimission_unavailable');
+    if (options?.requireMultiMission && (!multiMission || proof?.checkpointReady !== true)) return fail('daytona_multimission_unavailable');
     const sessionId = randomUUID(); const expiresAt = this.now() + maxSeconds * 1000;
     if (!multiMission && !await this.store.acquireProfileLease(displayLease(binding), sessionId, expiresAt + 300000)) return fail('profile_busy');
     if (!await this.store.acquireProfileLease(profileKey, sessionId, expiresAt + 300000)) { if (!multiMission) await this.store.releaseProfileLease(displayLease(binding), sessionId); return fail('profile_busy'); }

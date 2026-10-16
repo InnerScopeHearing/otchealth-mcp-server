@@ -188,8 +188,54 @@ function fixture(overrides: NodeJS.ProcessEnv = {}, lifecycle?: DaytonaRuntimeDe
   const tickets: DaytonaViewerTicketStore = { create: async (hash, row) => { if (state.tickets.has(hash)) return false; state.tickets.set(hash, structuredClone(row)); return true; }, load: async hash => structuredClone(state.tickets.get(hash) ?? null), transition: async (hash, phase, row) => { const current = state.tickets.get(hash); if (current?.phase !== phase || row.version !== current.version + 1) return false; state.ticketTransitions.push(row.phase); state.tickets.set(hash, structuredClone(row)); return true; }, acquireMissionLease: async () => true, ownsMissionLease: async () => true, releaseMissionLease: async () => {} };
   const controller = createDaytonaRuntimeController({ env: { ...env, ...overrides }, ...(lifecycle ? { lifecycle } : {}), createTickets: () => tickets, createGrantStore: () => grants, createStore: () => { calls.push('store'); return store; }, createProvider: options => { assert.equal(options.organizationId, env.DAYTONA_BROWSER_ORGANIZATION_ID); state.uploadConfigured = typeof options.files?.forUpload === 'function'; state.captureConfigured = typeof options.captures?.createCapture === 'function'; if (!Object.hasOwn(overrides, 'DAYTONA_BROWSER_PREVIEW_PATH')) assert.ok(options.viewer instanceof EncryptedDaytonaViewerGrantPort); calls.push('provider'); return provider; },
     scheduleTick: (tick, milliseconds) => { assert.equal(milliseconds, 1000); if (state.scheduleFails) throw new Error('PRIVATE_SCHEDULER_ERROR'); state.scheduled++; state.tick = tick; state.ticks.push(tick); return () => { state.cancelled++; }; }, onWatchdogStatus: () => {} });
-  return { controller, calls, state };
+  return { controller, calls, state, store, provider };
 }
+
+test('dedicated company start holds one admission through enrollment and the real final service readiness guard', async () => {
+  for (const existing of [false, true]) {
+    let admissions = 0, admitted = false, reserved = 0, wakeUnknown = false;
+    const roles = ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director'];
+    const agents = Object.fromEntries(roles.map((role, i) => [role, { sandboxId: `${i + 1}1111111-1111-4111-8111-111111111111`, readinessReceiptSha256: String(i + 1).repeat(64) }]));
+    const f = fixture({ DAYTONA_COMPANY_ENROLLMENT_ENABLED: 'true', DAYTONA_AGENT_DESKTOP_TEMPLATES: JSON.stringify({ schema: 'daytona-agent-desktops/v1', agents }) }, {
+      withReady: async (_binding, run, options) => { if (wakeUnknown) throw new Error('owned wake remains unknown'); admissions++; reserved = options?.maxSeconds ?? 0; admitted = true; try { return await run(); } finally { admitted = false; } },
+      tick: async () => {}, touch: async () => {}, shutdown: () => {},
+    });
+    const connection = '22222222-2222-4222-8222-222222222222';
+    const principal = createHash('sha256').update(`cto\0connection:${connection}`).digest('hex');
+    const binding: DaytonaBinding = { provider: 'daytona', owner: 'cto', ownerSubjectHash: principal, profileKey: `cto-${principal}`, sharedProfileKey: 'company-browser', profilePath: '/home/otcbrowser/.local/share/otchealth-browser/company-browser/chromium', ...agents.cto! };
+    f.state.bindings = new Map(existing ? [[binding.profileKey, binding]] : []); f.state.enrollmentReady = true;
+    f.store.acquireProfileLease = async () => true; f.store.acquireSessionLock = async () => true;
+    f.store.createSession = async session => { assert.equal(admitted, true); f.state.session = structuredClone(session); return true; };
+    f.store.saveSessionUnderLock = async session => { f.state.session = structuredClone(session); };
+    const originalProbe = f.provider.probe!;
+    f.provider.probe = async binding => { assert.equal(admitted, true); return originalProbe(binding); };
+    const originalOpen = f.provider.openMission;
+    f.provider.openMission = async (...args) => { assert.equal(admitted, true); return originalOpen(...args); };
+    try {
+      await f.controller.initialize(); const browser = (await f.controller.adapter.get())!.browser;
+      assert.equal(typeof browser.startCompany, 'function');
+      const start = browser.startCompany!;
+      const ownStart = () => requestContext.run({ callerAgent: 'cto', callerHash: 'a'.repeat(64), correlationId: 'synthetic', authKind: 'oauth', authSubject: 'signed-client', authConnectionId: connection }, () => start('cto', 600, 5, principal));
+      const result = await ownStart();
+      assert.equal(result.runtimeProtocol, 2); assert.equal(admissions, 1); assert.equal(reserved, 600);
+      assert.equal(f.calls.filter(call => call === 'probe').length, existing ? 1 : 2);
+      assert.equal(f.calls.filter(call => call === 'create-binding').length, existing ? 0 : 1);
+      assert.equal(f.calls.filter(call => call === 'open').length, 1);
+      // Readiness is not cached: the next final service proof can forbid V1
+      // before any new logical mission even though enrollment is unchanged.
+      f.calls.length = 0;
+      f.provider.probe = async binding => { assert.equal(admitted, true); return { ready: true, profileKey: binding.profileKey, profilePath: binding.profilePath, checkpointReady: true }; };
+      await assert.rejects(ownStart(), error => (error as { code?: string }).code === 'daytona_multimission_unavailable');
+      assert.equal(admissions, 2); assert.equal(f.calls.includes('open'), false); assert.equal(f.calls.includes('create-binding'), false);
+      f.calls.length = 0; wakeUnknown = true;
+      await assert.rejects(ownStart(), /wake remains unknown/);
+      assert.equal(admissions, 2); assert.equal(f.calls.includes('probe'), false); assert.equal(f.calls.includes('open'), false);
+      assert.equal(f.calls.includes('create-binding'), false);
+      await assert.rejects(start('cto', 600, 5, principal)); // missing signed request context
+      assert.equal(admissions, 2);
+    } finally { f.controller.shutdown(); }
+  }
+});
 
 test('Daytona runtime is off by default and malformed/partial private viewer configuration never creates a provider', async () => {
   const f = fixture({ DAYTONA_BROWSER_ENABLED: undefined });
