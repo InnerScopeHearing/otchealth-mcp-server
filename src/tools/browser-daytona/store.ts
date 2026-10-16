@@ -1,6 +1,9 @@
+import { createHash } from 'node:crypto';
 import { resolveAwsCredentials, signRequest, type AwsCredentials } from '../../search/sigv4.js';
 import { DaytonaBrowserError, daytonaPhysicalProfileKey, type DaytonaBinding, type DaytonaMission, type DaytonaBrowserStore } from './contract.js';
 export interface DaytonaStoreOptions { tableName?: string; region?: string; now?: () => number; resolveCredentials?: () => Promise<AwsCredentials | null>; fetchImpl?: typeof fetch }
+export interface DaytonaBindingMigrationEntry { expectedRawPayload: string; next: DaytonaBinding }
+export interface DaytonaBindingMigrationGuards { organizationId: string; viewerGrantTableName: string }
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const KEY = /^[a-z0-9][a-z0-9_-]{0,95}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -31,11 +34,19 @@ export class DynamoDaytonaBrowserStore implements DaytonaBrowserStore {
   private async call(operation: string, payload: Record<string, unknown>): Promise<{ Item?: Item }> {
     try {
       const credentials = await this.credentials(); if (!credentials) throw new DaytonaBrowserError('daytona_store_unavailable');
-      const host = `dynamodb.${this.region}.amazonaws.com`; const body = JSON.stringify({ TableName: this.table, ...payload });
+      const host = `dynamodb.${this.region}.amazonaws.com`; const body = JSON.stringify({ ...(operation === 'TransactWriteItems' ? {} : { TableName: this.table }), ...payload });
       const signed = signRequest({ method: 'POST', host, path: '/', body, region: this.region, service: 'dynamodb', credentials, extraHeaders: { 'content-type': 'application/x-amz-json-1.0', 'x-amz-target': `DynamoDB_20120810.${operation}` } });
       const response = await this.fetcher(`https://${host}/`, { method: 'POST', headers: signed.headers, body, redirect: 'error', signal: AbortSignal.timeout(5000) });
-      const result = await response.json() as { Item?: Item; __type?: string };
-      if (!response.ok) { if (typeof result.__type === 'string' && result.__type.endsWith('ConditionalCheckFailedException')) throw new ConditionalConflict(); throw new DaytonaBrowserError('daytona_store_unavailable'); }
+      const result = await response.json() as { Item?: Item; __type?: string; CancellationReasons?: { Code?: string }[] };
+      if (!response.ok) {
+        const kind = result.__type?.split('#').at(-1);
+        if (kind === 'ConditionalCheckFailedException') throw new ConditionalConflict();
+        if (kind === 'TransactionCanceledException' && Array.isArray(result.CancellationReasons)) {
+          const codes = result.CancellationReasons.map(value => value?.Code);
+          if (codes.includes('ConditionalCheckFailed') && codes.every(code => code === 'None' || code === 'ConditionalCheckFailed')) throw new ConditionalConflict();
+        }
+        throw new DaytonaBrowserError('daytona_store_unavailable');
+      }
       return result;
     } catch (error) { if (error instanceof ConditionalConflict || error instanceof DaytonaBrowserError) throw error; throw new DaytonaBrowserError('daytona_store_unavailable'); }
   }
@@ -48,6 +59,47 @@ export class DynamoDaytonaBrowserStore implements DaytonaBrowserStore {
   async createBinding(binding: DaytonaBinding): Promise<boolean> {
     assertDaytonaBinding(binding);
     try { await this.call('PutItem', { Item: { pk: { S: this.key('PROFILE', binding.profileKey) }, payload: { S: JSON.stringify(binding) } }, ConditionExpression: 'attribute_not_exists(pk)' }); return true; } catch (error) { if (error instanceof ConditionalConflict) return false; throw error; }
+  }
+  /** Operator-only CAS, not discovery or a tool. Caller durably reviews/backs up
+   * exact raw payloads first. No provider effects, retries, lease expiry or grants
+   * are inferred here; an unknown acknowledgement requires read-only recovery. */
+  async migrateBinding(expectedRawPayload: string, next: DaytonaBinding, guards: DaytonaBindingMigrationGuards): Promise<boolean> {
+    return this.migrateBindings([{ expectedRawPayload, next }], guards);
+  }
+  async migrateBindings(entries: readonly DaytonaBindingMigrationEntry[], guards: DaytonaBindingMigrationGuards): Promise<boolean> {
+    const invalid = () => { throw new DaytonaBrowserError('daytona_binding_migration_invalid'); };
+    if (!Array.isArray(entries) || entries.length < 1 || entries.length > 7 || !guards || !/^[a-f0-9-]{36}$/.test(guards.organizationId) || !UUID.test(guards.organizationId)
+      || !/^[A-Za-z0-9_.-]{3,255}$/.test(guards.viewerGrantTableName)) return invalid();
+    const owners = new Set(['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director']);
+    const seenProfiles = new Set<string>(), seenOwners = new Set<string>(), seenNextSandboxes = new Set<string>();
+    const parsed = entries.map(entry => {
+      if (!entry || typeof entry.expectedRawPayload !== 'string' || entry.expectedRawPayload.length > 8192) return invalid();
+      let old: unknown; try { old = JSON.parse(entry.expectedRawPayload); } catch { return invalid(); }
+      assertDaytonaBinding(old); assertDaytonaBinding(entry.next);
+      if (!owners.has(old.owner) || old.sharedProfileKey !== 'company-browser' || entry.next.sharedProfileKey !== 'company-browser'
+        || !UUID.test(old.sandboxId) || !UUID.test(entry.next.sandboxId) || seenProfiles.has(old.profileKey) || seenOwners.has(old.owner)
+        || Object.keys(old).length !== Object.keys(entry.next).length || Object.entries(old).some(([key, value]) => !['sandboxId', 'readinessReceiptSha256'].includes(key) && entry.next[key as keyof DaytonaBinding] !== value)) return invalid();
+      seenProfiles.add(old.profileKey); seenOwners.add(old.owner); seenNextSandboxes.add(entry.next.sandboxId.toLowerCase());
+      return { old, ...entry };
+    });
+    if (entries.length === 7 && seenNextSandboxes.size !== 7) return invalid();
+    const checks = new Map<string, { ConditionCheck: Record<string, unknown> }>();
+    const absent = (tableName: string, pk: string) => checks.set(`${tableName}/${pk}`, { ConditionCheck: { TableName: tableName, Key: { pk: { S: pk } }, ConditionExpression: 'attribute_not_exists(pk)' } });
+    const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+    const updates = [];
+    for (const entry of parsed) {
+      const pk = this.key('PROFILE', entry.old.profileKey);
+      const current = await this.call('GetItem', { Key: { pk: { S: pk } }, ConsistentRead: true });
+      if (current.Item?.pk?.S !== pk || current.Item.payload?.S !== entry.expectedRawPayload) return false;
+      updates.push({ Update: { TableName: this.table, Key: { pk: { S: pk } }, UpdateExpression: 'SET payload = :next', ConditionExpression: 'payload = :expected', ExpressionAttributeValues: { ':expected': { S: entry.expectedRawPayload }, ':next': { S: JSON.stringify(entry.next) } } } });
+      absent(this.table, this.key('LEASE', entry.old.profileKey));
+      for (const sid of [entry.old.sandboxId, entry.next.sandboxId]) {
+        absent(this.table, this.key('LEASE', `display-${hash(sid).slice(0, 40)}`));
+        absent(guards.viewerGrantTableName, `DAYTONA#VIEWER_SCOPE#${hash(JSON.stringify(['daytona-viewer-scope-v1', guards.organizationId, sid]))}`);
+      }
+    }
+    try { await this.call('TransactWriteItems', { TransactItems: [...updates, ...checks.values()] }); return true; }
+    catch (error) { if (error instanceof ConditionalConflict) return false; throw error; }
   }
   async loadBinding(key: string): Promise<DaytonaBinding | null> { const value = await this.load('PROFILE', key); if (value === null) return null; assertDaytonaBinding(value); if (value.profileKey !== key) throw new DaytonaBrowserError('daytona_store_invalid'); return value; }
   async createSession(session: DaytonaMission): Promise<boolean> {

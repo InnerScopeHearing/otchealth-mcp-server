@@ -32,7 +32,7 @@ function fixture() {
     readViewerGrant: async (_b, grantHandle) => ({ url: 'https://6080-synthetic.proxy.daytona.works/', expiresAt: grantExpiry, grantHandle }),
     revokeViewerGrant: async () => { state.revoked++; state.flow.push('revoke'); if (state.revokeFails) throw new Error('unknown revoke'); return { human_input_revoked: true }; },
   };
-  return { service: new DaytonaBrowserService(store, provider, () => now), state, sessions, leases, locks, advance: (ms: number) => { now += ms; } };
+  return { service: new DaytonaBrowserService(store, provider, () => now), state, sessions, leases, locks, bindings, store, advance: (ms: number) => { now += ms; } };
 }
 const code = (expected: string) => (e: unknown) => e instanceof DaytonaBrowserError && e.code === expected;
 test('same tool facade opens only an enrolled private running sandbox and maintains a distinct Daytona mission', async () => {
@@ -43,6 +43,29 @@ test('same tool facade opens only an enrolled private running sandbox and mainta
   await h.service.savePersistentProfile('cto', opened.sessionId, hash); assert.equal(h.state.checkpoints, 1);
   assert.equal(h.state.checkpointSession?.sessionId, opened.sessionId);
   await h.service.stop('cto', opened.sessionId, hash); assert.equal(h.state.released, 1); assert.equal(h.sessions.get(opened.sessionId)!.phase, 'CLOSED'); assert.equal(h.leases.size, 0);
+});
+test('binding cutover after initial inspection but before profile acquisition never opens the stale desktop or creates a mission', async () => {
+  const h = fixture(); h.state.runtimeProtocol = 2;
+  const acquire = h.store.acquireProfileLease.bind(h.store);
+  h.store.acquireProfileLease = async (...args) => {
+    h.bindings.set(binding.profileKey, { ...binding, sandboxId: 'dedicated-desktop' });
+    return acquire(...args);
+  };
+  await assert.rejects(h.service.start('cto', binding.profileKey, 180, 5, hash), code('daytona_binding_changed'));
+  assert.equal(h.state.opened, 0); assert.equal(h.sessions.size, 0); assert.equal(h.leases.size, 0);
+});
+test('historical CLOSED session stop after binding migration is owner-bound and cannot touch a successor or call the provider', async () => {
+  const h = fixture(); h.state.runtimeProtocol = 2;
+  const opened = await h.service.start('cto', binding.profileKey, 180, 5, hash); await h.service.stop('cto', opened.sessionId, hash);
+  h.bindings.set(binding.profileKey, { ...binding, sandboxId: 'dedicated-desktop' });
+  h.leases.set(binding.profileKey, 'successor');
+  await h.service.stop('cto', opened.sessionId, hash);
+  assert.equal(h.state.released, 1); assert.equal(h.leases.get(binding.profileKey), 'successor');
+  await assert.rejects(h.service.stop('cfo', opened.sessionId, hash), code('owner_forbidden'));
+  await assert.rejects(h.service.stop('cto', opened.sessionId, 'd'.repeat(64)), code('owner_forbidden'));
+  h.sessions.get(opened.sessionId)!.effectUnknown = true;
+  await assert.rejects(h.service.stop('cto', opened.sessionId, hash));
+  assert.equal(h.state.released, 1);
 });
 test('foreign owner, connection, missing enrollment, public sandbox and invalid limits have zero mission effects', async () => {
   for (const invalid of ['owner', 'principal', 'profile', 'public', 'duration', 'budget']) {

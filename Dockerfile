@@ -74,6 +74,9 @@ RUN groupadd --system app && useradd --system --gid app --home-dir /app --shell 
 COPY --from=build --chown=app:app /app/node_modules ./node_modules
 COPY --from=build --chown=app:app /app/dist ./dist
 COPY --from=build --chown=app:app /app/package.json ./package.json
+# Source-pinned lifecycle installer artifact only; execution remains on the
+# exact enrolled private desktop after installed root-owned SHA verification.
+COPY --chown=app:app tools/daytona-browser-runtime/role-browser-helper.py ./tools/daytona-browser-runtime/role-browser-helper.py
 COPY --from=build --chown=app:app /app/tools/brain-runtime-check.mjs ./tools/brain-runtime-check.mjs
 COPY --from=build --chown=app:app /app/tools/browser-capture-runtime-check.mjs ./tools/browser-capture-runtime-check.mjs
 COPY --from=build --chown=app:app /app/tools/identity-registry-exporter-task.mjs ./tools/identity-registry-exporter-task.mjs

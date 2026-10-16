@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { logger } from '../audit/logger.js';
 import { DaytonaApiBrowserProvider, type DaytonaApiBrowserProviderOptions, type DaytonaViewerGrantPort } from '../tools/browser-daytona/client.js';
-import { DaytonaBrowserError, type DaytonaBrowserStore, type DaytonaProvider } from '../tools/browser-daytona/contract.js';
+import { createConfiguredDaytonaRoleLifecycle } from '../tools/browser-daytona/lifecycle.js';
+import { DaytonaBrowserError, type DaytonaBinding, type DaytonaBrowserStore, type DaytonaProvider } from '../tools/browser-daytona/contract.js';
 import { DaytonaBrowserService } from '../tools/browser-daytona/service.js';
 import { assertDaytonaBinding, assertDaytonaMission, DynamoDaytonaBrowserStore } from '../tools/browser-daytona/store.js';
 import { EncryptedDaytonaViewerGrantPort } from '../tools/browser-daytona/viewer-grants.js';
@@ -11,13 +12,19 @@ import type { DaytonaGatewayAdapter, DaytonaGatewayRuntime } from '../tools/brow
 import { DaytonaViewerHandoffService, DynamoDaytonaViewerTicketStore, type DaytonaViewerMissionBoundary, type DaytonaViewerTicketStore } from './daytona-viewer-service.js';
 import { registerDaytonaViewerRoutes, type DaytonaViewerOptions, type DaytonaViewerService } from './daytona-viewer.js';
 import { createConfiguredDaytonaArtifactPorts } from './daytona-artifact-ports.js';
-import { companyEnrollmentTemplate, DaytonaCompanyEnrollment } from './daytona-company-enrollment.js';
+import { agentDesktopTemplates, companyEnrollmentTemplate, companyTemplateForRole, DaytonaCompanyEnrollment } from './daytona-company-enrollment.js';
 
 type CapableProvider = DaytonaProvider & { capabilities: Readonly<{ checkpoint: boolean }> };
 export interface DaytonaRuntimeDependencies {
   env?: NodeJS.ProcessEnv;
   /** Trusted boot/test composition only. Never supplied by a tool/route caller. */
   resolveApiToken?: () => Promise<string>;
+  lifecycle?: {
+    withReady<T>(binding: DaytonaBinding, run: () => Promise<T>, options?: { maxSeconds?: number }): Promise<T>;
+    tick(): Promise<void>;
+    shutdown(): void;
+    touch(binding: DaytonaBinding): Promise<void>;
+  };
   viewer?: () => DaytonaViewerGrantPort | undefined;
   createProvider?: (options: DaytonaApiBrowserProviderOptions) => CapableProvider;
   createStore?: () => DaytonaBrowserStore;
@@ -45,14 +52,19 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
   const region = () => env.AWS_REGION ?? 'us-east-1';
   const sandboxIds = (): readonly string[] => {
     const legacy = env.DAYTONA_BROWSER_SANDBOX_ID;
+    let dedicated: ReturnType<typeof agentDesktopTemplates>;
+    // Broken new enrollment must never erase existing revocation workers.
+    try { dedicated = agentDesktopTemplates(env); } catch { dedicated = undefined; }
+    const mapped = dedicated ? Object.values(dedicated.agents).map(value => value.sandboxId) : [];
     if (env.DAYTONA_BROWSER_SANDBOX_IDS === undefined) {
-      if (!UUID.test(legacy ?? '')) return fail('daytona_sandbox_enrollment_invalid'); return [legacy!];
+      if (legacy === undefined && mapped.length) return mapped;
+      if (!UUID.test(legacy ?? '')) return fail('daytona_sandbox_enrollment_invalid'); return [...new Set([legacy!, ...mapped])];
     }
     let values: unknown;
     try { values = JSON.parse(env.DAYTONA_BROWSER_SANDBOX_IDS); } catch { return fail('daytona_sandbox_enrollment_invalid'); }
     if (!Array.isArray(values) || values.length < 1 || values.length > 3 || !values.every(value => typeof value === 'string' && UUID.test(value))
       || new Set(values).size !== values.length || (legacy !== undefined && legacy !== values[0])) return fail('daytona_sandbox_enrollment_invalid');
-    return values as string[];
+    return [...new Set([...(values as string[]), ...mapped])];
   };
   const token = (): string => {
     const value = env.DAYTONA_BROWSER_API_TOKEN;
@@ -83,10 +95,17 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
     try { origins(); } catch { missing.push('DAYTONA_BROWSER_TOOLBOX_ALLOWED_ORIGINS'); } return missing;
   };
   const enrollmentMissing = (): string[] => {
+    if (env.DAYTONA_AGENT_DESKTOP_TEMPLATES !== undefined) {
+      try { agentDesktopTemplates(env); } catch { return ['DAYTONA_AGENT_DESKTOP_TEMPLATES']; }
+      if (lifecycleConfigurationInvalid) return ['DAYTONA_AGENT_DESKTOP_TEMPLATES/LIFECYCLE'];
+    }
     if (env.DAYTONA_COMPANY_ENROLLMENT_ENABLED === undefined || env.DAYTONA_COMPANY_ENROLLMENT_ENABLED === 'false') return [];
     try { companyEnrollmentTemplate(env, sandboxIds()); return []; }
-    catch { return ['DAYTONA_COMPANY_ENROLLMENT_ENABLED/SANDBOX_ID/READINESS_SHA256']; }
+    catch { return [env.DAYTONA_AGENT_DESKTOP_TEMPLATES !== undefined ? 'DAYTONA_AGENT_DESKTOP_TEMPLATES' : 'DAYTONA_COMPANY_ENROLLMENT_ENABLED/SANDBOX_ID/READINESS_SHA256']; }
   };
+  let roleLifecycle = dependencies.lifecycle;
+  let lifecycleInitialized = Boolean(roleLifecycle);
+  let lifecycleConfigurationInvalid = false;
   const viewerOptions = (): DaytonaViewerOptions => {
     const previewDomain = env.DAYTONA_BROWSER_PREVIEW_DOMAIN ?? '', previewPort = Number(env.DAYTONA_BROWSER_PREVIEW_PORT), viewerPath = env.DAYTONA_BROWSER_PREVIEW_PATH ?? '';
     if (!/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(previewDomain) || !Number.isInteger(previewPort) || previewPort < 1 || previewPort > 65535
@@ -133,12 +152,27 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
     }
     const provider = (dependencies.createProvider ?? (options => new DaytonaApiBrowserProvider(options)))({ apiBaseUrl: env.DAYTONA_BROWSER_API_BASE_URL!, organizationId: env.DAYTONA_BROWSER_ORGANIZATION_ID!, resolveApiToken, toolboxAllowedOrigins: origins(), ...createConfiguredDaytonaArtifactPorts({ env }), ...(viewer ? { viewer } : {}) });
     const store = sessionStore(), service = new DaytonaBrowserService(store, provider);
+    if (!lifecycleInitialized) {
+      lifecycleInitialized = true;
+      try { roleLifecycle = createConfiguredDaytonaRoleLifecycle({ env, resolveApiToken }); }
+      catch { roleLifecycle = undefined; lifecycleConfigurationInvalid = true; /* invalid new setup cannot destroy sealed cleanup */ }
+    }
     // Opt-out or broken enrollment configuration cannot break sealed cleanup.
     const template = status().enrollmentConfigured ? companyEnrollmentTemplate(env, sandboxIds()) : undefined;
-    const enrollment = new DaytonaCompanyEnrollment(template, store, provider, requireExpiry);
+    const withReady = <T>(binding: DaytonaBinding, run: () => Promise<T>, maxSeconds = 180): Promise<T> => {
+      if (env.DAYTONA_AGENT_DESKTOP_TEMPLATES === undefined) return run();
+      if (!roleLifecycle) return fail('daytona_role_configuration_invalid');
+      return roleLifecycle.withReady(binding, run, { maxSeconds });
+    };
+    const enrollment = new DaytonaCompanyEnrollment(template, store, provider, requireExpiry, withReady);
     const approved = async (caller: string, profile: string, principal?: string) => {
       const binding = await store.loadBinding(profile); assertDaytonaBinding(binding);
       if (binding.profileKey !== profile || binding.owner !== caller || binding.ownerSubjectHash !== principal || !sandboxIds().includes(binding.sandboxId)) fail('owner_forbidden');
+      if (env.DAYTONA_AGENT_DESKTOP_TEMPLATES !== undefined) {
+        const dedicated = agentDesktopTemplates(env)!;
+        const expected = companyTemplateForRole(dedicated, caller);
+        if (binding.sharedProfileKey !== 'company-browser' || binding.sandboxId !== expected.sandboxId || binding.readinessReceiptSha256 !== expected.readinessReceiptSha256) fail('owner_forbidden');
+      }
       requireExpiry(binding.sandboxId); return binding;
     };
     const approvedSession = async (caller: string, id: string, principal?: string) => {
@@ -149,11 +183,25 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
     };
     const browser: DaytonaGatewayRuntime['browser'] = {
       discover: async (caller, principal, profile) => { await enrollment.ensure(caller, principal, profile); const result = await service.discover(caller, principal, profile); await approved(caller, result.profileId, principal); return result; },
-      readiness: async (caller, profile, principal) => { await approved(caller, profile, principal); return service.readiness(caller, profile, principal); },
-      start: async (caller, profile, seconds, budget, principal, options) => { await approved(caller, profile, principal); return service.start(caller, profile, seconds, budget, principal, options); },
+      readiness: async (caller, profile, principal) => { const binding = await approved(caller, profile, principal); return withReady(binding, async () => { await approved(caller, profile, principal); return service.readiness(caller, profile, principal); }); },
+      start: async (caller, profile, seconds, budget, principal, options) => {
+        if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 28800) fail('invalid_duration');
+        if (budget !== undefined && (!Number.isSafeInteger(budget) || budget < 1 || budget > 10000)) fail('invalid_action_budget');
+        const binding = await approved(caller, profile, principal); return withReady(binding, async () => { await approved(caller, profile, principal); return service.start(caller, profile, seconds, budget, principal, options); }, seconds);
+      },
       execute: async (caller, id, action, seconds, principal) => { await approvedSession(caller, id, principal); return service.execute(caller, id, action, seconds, principal); },
       snapshot: async (caller, id, principal) => { await approvedSession(caller, id, principal); return service.snapshot(caller, id, principal); },
-      savePersistentProfile: async (caller, id, principal) => { await approvedSession(caller, id, principal); return service.savePersistentProfile(caller, id, principal); }, stop: service.stop.bind(service),
+      savePersistentProfile: async (caller, id, principal) => { await approvedSession(caller, id, principal); return service.savePersistentProfile(caller, id, principal); },
+      stop: async (caller, id, principal) => {
+        const previous = roleLifecycle && env.DAYTONA_AGENT_DESKTOP_TEMPLATES !== undefined ? await store.loadSession(id) : null;
+        await service.stop(caller, id, principal);
+        if (previous && previous.phase !== 'CLOSED' && roleLifecycle) {
+          assertDaytonaMission(previous);
+          if (previous.sessionId !== id || previous.owner !== caller || previous.ownerSubjectHash !== principal) return fail('owner_forbidden');
+          const binding = await store.loadBinding(previous.profileKey); assertDaytonaBinding(binding);
+          if (binding.owner === caller && binding.ownerSubjectHash === principal && binding.sandboxId === previous.sandboxId) await roleLifecycle.touch(binding);
+        }
+      },
     };
     const grantPreflight = async (caller: string, id: string, principal: string) => {
       const session = await approvedSession(caller, id, principal);
@@ -163,7 +211,7 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
     const missions: DaytonaViewerMissionBoundary = {
       loadSession: id => store.loadSession(id),
       getViewerGrant: async (caller, id, principal, seconds) => { await grantPreflight(caller, id, principal); return service.getViewerGrant(caller, id, principal, seconds); },
-      resumeViewerGrant: async (caller, id, principal, handle) => { await approvedSession(caller, id, principal); return service.resumeViewerGrant(caller, id, principal, handle); }, completeHumanInput: service.completeHumanInput.bind(service), stop: service.stop.bind(service),
+      resumeViewerGrant: async (caller, id, principal, handle) => { await approvedSession(caller, id, principal); return service.resumeViewerGrant(caller, id, principal, handle); }, completeHumanInput: service.completeHumanInput.bind(service), stop: browser.stop,
     };
     // Admission must reject an unhealthy target inside owned(), BEFORE the
     // ticket CAS. Another healthy worker cannot strand this ticket in ISSUING
@@ -193,9 +241,14 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
     if (closed || !status().configured) return false; if (running && !initializing) return expiryReady(); if (initializing) return initializing;
     initializing = (async () => {
       build(); running = true; await Promise.all([...expiries].map(([id, expiry]) => runTick(id, expiry)));
+      if (roleLifecycle) await roleLifecycle.tick().catch(() => undefined);
       if (!closed) {
         for (const [id, expiry] of expiries) {
           const callback = () => { void runTick(id, expiry).catch(() => undefined); };
+          cancelTicks.push(dependencies.scheduleTick?.(callback, 1000) ?? (() => { const timer = setInterval(callback, 1000); timer.unref(); return () => clearInterval(timer); })());
+        }
+        if (roleLifecycle) {
+          const callback = () => { if (running) void roleLifecycle!.tick().catch(() => undefined); };
           cancelTicks.push(dependencies.scheduleTick?.(callback, 1000) ?? (() => { const timer = setInterval(callback, 1000); timer.unref(); return () => clearInterval(timer); })());
         }
       }
@@ -205,7 +258,7 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
     catch { running = false; for (const cancel of cancelTicks.splice(0)) cancel(); return false; }
     finally { initializing = undefined; }
   };
-  const shutdown = () => { closed = true; running = false; for (const cancel of cancelTicks.splice(0)) cancel(); };
+  const shutdown = () => { if (closed) return; closed = true; running = false; for (const cancel of cancelTicks.splice(0)) cancel(); roleLifecycle?.shutdown(); };
   const adapter: DaytonaGatewayAdapter = {
     get: async () => status().configured && anyExpiryReady() ? build() : undefined,
     forSession: async id => {
