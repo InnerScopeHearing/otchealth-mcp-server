@@ -26,7 +26,7 @@ after(() => {
   }
 });
 
-function captureHandler(handlerFn: (args: Record<string, unknown>) => Promise<{ data: unknown }>): RegisteredHandler {
+function captureHandler(handlerFn: (args: Record<string, unknown>) => Promise<{ data: unknown }>, name = 'synthetic_timing_tool'): RegisteredHandler {
   let handler: RegisteredHandler | undefined;
   const server = {
     registerTool(_name: string, _config: unknown, candidate: RegisteredHandler) {
@@ -35,7 +35,7 @@ function captureHandler(handlerFn: (args: Record<string, unknown>) => Promise<{ 
     },
   } as unknown as McpServer;
   registerTool(server, {
-    name: 'synthetic_timing_tool',
+    name,
     category: 'read',
     annotations: { title: 'synthetic timing', description: 'synthetic', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputShape: {},
@@ -129,5 +129,48 @@ test('actual callback classifies input rejection and deferred output conservativ
     assert.equal(withheldEvent.outcome, 'rejected');
   } finally {
     capture.restore();
+  }
+});
+
+test('actual Xero callback adds bounded HTTP timing categories without changing public errors', async () => {
+  const { XeroHttpError } = await import('./xero/diagnostic-error.js');
+  const context = { callerHash: 'synthetic-caller-hash', correlationId: 'parent-xero', parentCorrelationId: 'parent-xero', callerAgent: 'cto' };
+  for (const [status, code] of [
+    [401, 'xero_http_unauthorized'], [403, 'xero_http_forbidden'], [429, 'xero_http_rate_limited'],
+    [503, 'xero_http_upstream_error'], [400, 'xero_http_request_error'],
+  ] as const) {
+    const legacyMessage = `synthetic HTTP ${status} SYNTHETIC_PRIVATE_BODY`;
+    const handler = captureHandler(async () => { throw new XeroHttpError('accounting_get', status, legacyMessage); }, 'xero_synthetic_timing');
+    const capture = captureTimingEvents();
+    try {
+      const response = await requestContext.run(context, () => handler({}));
+      assert.equal(response.isError, true);
+      assert.equal(response.structuredContent?.error?.code, 'tool_error');
+      assert.equal(response.structuredContent?.error?.message, legacyMessage);
+      const event = capture.events.find((entry) => entry.type === 'tool_phase_timing' && entry.phase === 'operation');
+      assert.ok(event);
+      assert.equal(event.error_code, code);
+      assert.equal(event.outcome, 'error');
+      assert.equal(JSON.stringify(event).includes('SYNTHETIC_PRIVATE_BODY'), false);
+    } finally { capture.restore(); }
+  }
+});
+
+test('non-Xero and untyped errors keep generic callback diagnostics', async () => {
+  const { XeroHttpError } = await import('./xero/diagnostic-error.js');
+  const context = { callerHash: 'synthetic-caller-hash', correlationId: 'parent-xero-negative', parentCorrelationId: 'parent-xero-negative', callerAgent: 'cto' };
+  for (const [name, error] of [
+    ['synthetic_timing_tool', new XeroHttpError('accounting_get', 429, 'synthetic')],
+    ['xero_synthetic_timing', Object.assign(new Error('HTTP 401 SYNTHETIC_PRIVATE_BODY'), { name: 'XeroHttpError', status: 401, stage: 'accounting_get' })],
+  ] as const) {
+    const handler = captureHandler(async () => { throw error; }, name);
+    const capture = captureTimingEvents();
+    try {
+      await requestContext.run(context, () => handler({}));
+      const event = capture.events.find((entry) => entry.type === 'tool_phase_timing' && entry.phase === 'operation');
+      assert.ok(event);
+      assert.equal(event.error_code, 'tool_error');
+      assert.equal(JSON.stringify(event).includes('SYNTHETIC_PRIVATE_BODY'), false);
+    } finally { capture.restore(); }
   }
 });
