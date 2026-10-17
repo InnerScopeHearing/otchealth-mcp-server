@@ -81,9 +81,13 @@ test('registered compact view rejects non-Developer and M365 callers before read
   finally { for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } }
   assert.ok(handler);
   const forbidden = await requestContext.run({ callerHash: 'synthetic', correlationId: 'synthetic', callerAgent: 'cto' }, () => handler!({ view: 'developer_compact' }));
-  assert.match(JSON.stringify(forbidden), /authenticated Developer identity required/);
+  assert.equal(forbidden.isError, true);
+  assert.match(JSON.stringify(forbidden.structuredContent), /authenticated Developer identity required/);
+  assert.equal(JSON.stringify(forbidden.structuredContent).includes('memory_records'), false);
   const staticAuth = await requestContext.run({ callerHash: 'synthetic', correlationId: 'synthetic', callerAgent: 'developer', m365StaticAuth: true }, () => handler!({ view: 'developer_compact' }));
-  assert.match(JSON.stringify(staticAuth), /unsupported_view/);
+  assert.equal(staticAuth.isError, true);
+  assert.match(JSON.stringify(staticAuth.structuredContent), /unsupported_view/);
+  assert.equal(JSON.stringify(staticAuth.structuredContent).includes('memory_records'), false);
   const briefOnly = await requestContext.run({ callerHash: 'synthetic', correlationId: 'synthetic', callerAgent: 'developer' }, () => handler!({ brief: true }));
   assert.notEqual(briefOnly.isError, true, 'brief remains a valid independent wake mode');
   const combined = await requestContext.run({ callerHash: 'synthetic', correlationId: 'synthetic', callerAgent: 'developer' }, () => handler!({ view: 'developer_compact', brief: true }));

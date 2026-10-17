@@ -810,10 +810,10 @@ export function registerWake(
       handler: async (input, ctx) => {
         const compact = input.view === 'developer_compact';
         if (compact && ctx.callerAgent?.trim().toLowerCase() !== 'developer') {
-          return { data: { agent: '', view: 'developer_compact', pack: null, memory_records: [], tasks: null, inbox: null, inbound: null, errors: ['forbidden_view: authenticated Developer identity required.'], doctrine: buildDoctrine() }, summary: 'wake: developer_compact requires an authenticated Developer caller.', compactText: true };
+          throw new Error('forbidden_view: authenticated Developer identity required.');
         }
         if (compact && isM365StaticAuth()) {
-          return { data: { agent: 'developer', view: 'developer_compact', pack: null, memory_records: [], tasks: null, inbox: null, inbound: null, errors: ['unsupported_view: developer_compact is unavailable for M365 static-auth callers.'], doctrine: buildDoctrine() }, summary: 'wake: developer_compact is unsupported for M365 static-auth callers; use the existing M365 wake view.', compactText: true };
+          throw new Error('unsupported_view: developer_compact is unavailable for M365 static-auth callers.');
         }
         if (compact && input.brief === true) {
           throw new Error('invalid_view: developer_compact and brief cannot be combined.');
