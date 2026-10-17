@@ -52,17 +52,33 @@ timeout 90s docker run --rm --platform "$PLATFORM" --network none \
       // Dedicated browser image bytes: begin
       const expectedRoleHelper = "62ee69b6c51685248ee45c3c51a8abbc3386918a76fb57ede8a1da4dd77782d6";
       const expectedLegacyHelperPin = "b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51";
+      const expectedCommonNextHelper = "46537a2e997d55e270e737f455d6b9c46eb48333a07e342a74f5c7ea38705075";
+      const expectedWeFunderNextHelper = "d6c00bcb0047b761c0364fd3c3936be8f6687ce45a4f0b627a3429cfcff6dc1c";
       const roleHelperBytes = fs.readFileSync("/app/tools/daytona-browser-runtime/role-browser-helper.py");
       const roleHelperDigest = createHash("sha256").update(roleHelperBytes).digest("hex");
       if (roleHelperDigest !== expectedRoleHelper) throw Error("image role helper hash mismatch");
       const compiledLifecycleBytes = fs.readFileSync("/app/dist/tools/browser-daytona/lifecycle.js");
       const compiledLifecycleText = compiledLifecycleBytes.toString("utf8");
+      // lifecycle acceptance contract begin
+      function assertLifecycleHelperContract(text, expectedLegacy, expectedWeFunder, expectedCommonNext, expectedWeFunderNext) {
+        const normalized = text.replace(/\s+/g, " ");
+        const pin = name => [...text.matchAll(new RegExp(`^const ${name} = ([\"\\x27])([a-f0-9]{64})\\1;$`, "gm"))];
+        const legacyPins = pin("HELPER_SHA256"), wefunderPins = pin("WEFUNDER_HELPER_SHA256");
+        if (legacyPins.length !== 1 || legacyPins[0][2] !== expectedLegacy) throw Error("compiled lifecycle legacy helper pin mismatch");
+        if (wefunderPins.length !== 1 || wefunderPins[0][2] !== expectedWeFunder) throw Error("compiled lifecycle WeFunder helper pin mismatch");
+        const exactDeclaration = (name, expected) => {
+          const rows = [...text.matchAll(new RegExp(`^const ${name} = \\[([^\\]]*)\\];$`, "gm"))];
+          return rows.length === 1 && rows[0][0].replace(/\s+/g, " ") === expected;
+        };
+        if (!exactDeclaration("HELPER_SHA256_ALLOWLIST", `const HELPER_SHA256_ALLOWLIST = [HELPER_SHA256, \x27${expectedCommonNext}\x27];`)) throw Error("compiled lifecycle common helper allowlist mismatch");
+        if (!exactDeclaration("WEFUNDER_HELPER_SHA256_ALLOWLIST", `const WEFUNDER_HELPER_SHA256_ALLOWLIST = [WEFUNDER_HELPER_SHA256, \x27${expectedWeFunderNext}\x27];`)) throw Error("compiled lifecycle WeFunder helper allowlist mismatch");
+        if (!normalized.includes("const helperHashes = binding.owner === \x27wefunder-campaign-director\x27 ? WEFUNDER_HELPER_SHA256_ALLOWLIST : HELPER_SHA256_ALLOWLIST;")) throw Error("compiled lifecycle helper role selection mismatch");
+        if (!/const guard = `[^`]*hexdigest\(\) in \$\{JSON\.stringify\(helperHashes\)\};[^`]*`/.test(text)) throw Error("compiled lifecycle helper guard does not enforce the selected allowlist");
+      }
+      // lifecycle acceptance contract end
+      assertLifecycleHelperContract(compiledLifecycleText, expectedLegacyHelperPin, expectedRoleHelper, expectedCommonNextHelper, expectedWeFunderNextHelper);
       const legacyHelperPins = [...compiledLifecycleText.matchAll(/^const HELPER_SHA256 = (["\x27])([a-f0-9]{64})\1;$/gm)];
       const wefunderHelperPins = [...compiledLifecycleText.matchAll(/^const WEFUNDER_HELPER_SHA256 = (["\x27])([a-f0-9]{64})\1;$/gm)];
-      if (legacyHelperPins.length !== 1 || legacyHelperPins[0][2] !== expectedLegacyHelperPin) throw Error("image compiled lifecycle legacy helper pin mismatch");
-      if (wefunderHelperPins.length !== 1 || wefunderHelperPins[0][2] !== expectedRoleHelper) throw Error("image compiled lifecycle WeFunder helper pin mismatch");
-      const fixedRoleAssignment = compiledLifecycleText.replace(/\s+/g, " ").includes("const helperSha256 = binding.owner === \x27wefunder-campaign-director\x27 ? WEFUNDER_HELPER_SHA256 : this.options.helperSha256;");
-      if (!fixedRoleAssignment) throw Error("image compiled lifecycle WeFunder role assignment mismatch");
       console.log(JSON.stringify({role_helper_sha256:roleHelperDigest, compiled_lifecycle_sha256:createHash("sha256").update(compiledLifecycleBytes).digest("hex"), compiled_helper_pin:legacyHelperPins[0][2], compiled_wefunder_helper_pin:wefunderHelperPins[0][2], provider_calls:0, network:"disabled"}));
       // Dedicated browser image bytes: end
       console.log(JSON.stringify({node: process.versions.node, modules: process.versions.modules, arch: process.arch, glibc: process.report.getReport().header.glibcVersionRuntime, extraCa: extraStats, systemCa: systemStats, datadogElfMachine: machine, nativeProfilerLoaded: true}));

@@ -28,6 +28,29 @@ test('release packages the exact compiled WeFunder helper with its scoped lifecy
   assert.ok(lifecycle.includes("const HELPER_SHA256='b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51';"));
 });
 
+test('offline image acceptance validates compiled role-specific helper allowlists and rejects mutations', async () => {
+  const script = await readFile(new URL('../../tools/accept-image.sh', import.meta.url), 'utf8');
+  const begin = '// lifecycle acceptance contract begin';
+  const end = '// lifecycle acceptance contract end';
+  const start = script.indexOf(begin), finish = script.indexOf(end, start);
+  assert.ok(start >= 0 && finish > start, 'accept-image must expose its exact lifecycle contract block');
+  const contract = script.slice(start + begin.length, finish);
+  const verify = new Function(`${contract}; return assertLifecycleHelperContract;`)() as (text: string, legacy: string, wefunder: string, commonNext: string, wefunderNext: string) => void;
+  const compiled = await readFile(new URL('../../dist/tools/browser-daytona/lifecycle.js', import.meta.url), 'utf8');
+  const legacy = 'b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51';
+  const wefunder = '62ee69b6c51685248ee45c3c51a8abbc3386918a76fb57ede8a1da4dd77782d6';
+  const commonNext = '46537a2e997d55e270e737f455d6b9c46eb48333a07e342a74f5c7ea38705075';
+  const wefunderNext = 'd6c00bcb0047b761c0364fd3c3936be8f6687ce45a4f0b627a3429cfcff6dc1c';
+  verify(compiled, legacy, wefunder, commonNext, wefunderNext);
+  const correctSelection = "const helperHashes = binding.owner === 'wefunder-campaign-director' ? WEFUNDER_HELPER_SHA256_ALLOWLIST : HELPER_SHA256_ALLOWLIST;";
+  const wrongRole = "const helperHashes = binding.owner === 'wefunder-campaign-director' ? HELPER_SHA256_ALLOWLIST : WEFUNDER_HELPER_SHA256_ALLOWLIST;";
+  assert.notEqual(compiled.replace(correctSelection, wrongRole), compiled);
+  assert.throws(() => verify(compiled.replace(correctSelection, wrongRole), legacy, wefunder, commonNext, wefunderNext), /helper role selection mismatch/);
+  const arbitraryHash = 'a'.repeat(64);
+  assert.throws(() => verify(compiled.replace(commonNext, arbitraryHash), legacy, wefunder, commonNext, wefunderNext), /common helper allowlist mismatch/);
+  assert.throws(() => verify(compiled.replace('hexdigest() in ${JSON.stringify(helperHashes)}', `hexdigest() == '${arbitraryHash}'`), legacy, wefunder, commonNext, wefunderNext), /guard does not enforce/);
+});
+
 test('seven-role map automatically enrolls watchdogs and rejects a role routed to another enrolled desktop before provider calls', async () => {
   const roles = ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director'];
   const agents = Object.fromEntries(roles.map((role, i) => [role, { sandboxId: `${i + 1}1111111-1111-4111-8111-111111111111`, readinessReceiptSha256: String(i + 1).repeat(64) }]));
