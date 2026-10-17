@@ -84,9 +84,13 @@ test('registered compact view rejects non-Developer and M365 callers before read
   assert.match(JSON.stringify(forbidden), /authenticated Developer identity required/);
   const staticAuth = await requestContext.run({ callerHash: 'synthetic', correlationId: 'synthetic', callerAgent: 'developer', m365StaticAuth: true }, () => handler!({ view: 'developer_compact' }));
   assert.match(JSON.stringify(staticAuth), /unsupported_view/);
+  const briefOnly = await requestContext.run({ callerHash: 'synthetic', correlationId: 'synthetic', callerAgent: 'developer' }, () => handler!({ brief: true }));
+  assert.notEqual(briefOnly.isError, true, 'brief remains a valid independent wake mode');
   const combined = await requestContext.run({ callerHash: 'synthetic', correlationId: 'synthetic', callerAgent: 'developer' }, () => handler!({ view: 'developer_compact', brief: true }));
-  assert.match(JSON.stringify(combined), /invalid_view/);
-  assert.match(JSON.stringify(combined), /cannot be combined/);
+  assert.equal(combined.isError, true);
+  assert.match(JSON.stringify(combined.structuredContent), /invalid_view/);
+  assert.match(JSON.stringify(combined.structuredContent), /cannot be combined/);
+  assert.equal(JSON.stringify(combined.structuredContent).includes('memory_records'), false);
 });
 
 test('compact text serialization is opt-in and keeps structured data unchanged', () => {

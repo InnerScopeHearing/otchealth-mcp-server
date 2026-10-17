@@ -816,7 +816,7 @@ export function registerWake(
           return { data: { agent: 'developer', view: 'developer_compact', pack: null, memory_records: [], tasks: null, inbox: null, inbound: null, errors: ['unsupported_view: developer_compact is unavailable for M365 static-auth callers.'], doctrine: buildDoctrine() }, summary: 'wake: developer_compact is unsupported for M365 static-auth callers; use the existing M365 wake view.', compactText: true };
         }
         if (compact && input.brief === true) {
-          return { data: { agent: 'developer', view: 'developer_compact', pack: null, memory_records: [], tasks: null, inbox: null, inbound: null, errors: ['invalid_view: developer_compact and brief cannot be combined.'], doctrine: buildDoctrine() }, summary: 'wake: choose developer_compact or brief, not both.', compactText: true };
+          throw new Error('invalid_view: developer_compact and brief cannot be combined.');
         }
         const scope = resolveAgentReadScope(input.agent, ctx.callerAgent);
         if (!scope) {
