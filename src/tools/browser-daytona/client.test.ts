@@ -410,6 +410,36 @@ test('only exact allowlisted dispatcher failures are projected and oversized std
   await assert.rejects(c.execute(binding, mission, { type: 'navigate', url: 'https://example.com/' }, 10, binding.ownerSubjectHash), (error: any) => error.code === 'daytona_runtime_output_limit');
   assert.equal(n.requests.filter(request => request.url.endsWith('/process/execute')).length, 13, 'each runtime result is one request with no retry');
 });
+test('destination guard diagnostics project only exact finite stage and reason codes', async () => {
+  const n = network(), c = await client({ fetchImpl: n.fetchImpl });
+  const reasons = ['invalid_url', 'scheme_or_credentials', 'port', 'dns_unavailable', 'nonpublic_address'];
+  const acceptedCodes = [
+    ...['requested_navigation', 'target_metadata', 'observed_main', 'observed_child'].flatMap(stage => reasons.map(reason => `destination_forbidden_${stage}_${reason}`)),
+    'destination_forbidden_populated_blank_blank_has_content',
+  ];
+  for (const accepted of acceptedCodes) {
+    n.state.processResponse = { exitCode: 1, result: JSON.stringify({ version: 1, ok: false, code: accepted }) };
+    await assert.rejects(c.execute(binding, mission, { type: 'snapshot' }, 10, binding.ownerSubjectHash), (error: any) => {
+      assert.equal(error.code, `daytona_runtime_${accepted}`);
+      assert.doesNotMatch(error.message, /wefunder|private|127\.0\.0\.1|provider/i);
+      return true;
+    });
+  }
+
+  for (const envelope of [
+    { version: 1, ok: false, code: 'destination_forbidden_observed_child_secret_detail' },
+    { version: 1, ok: false, code: 'destination_forbidden_requested_navigation_dns_unavailable', detail: 'private hostname' },
+  ]) {
+    n.state.processResponse = { exitCode: 1, result: JSON.stringify(envelope) };
+    await assert.rejects(c.execute(binding, mission, { type: 'snapshot' }, 10, binding.ownerSubjectHash), (error: any) => {
+      assert.equal(error.code, 'daytona_runtime_unavailable');
+      assert.doesNotMatch(error.message, /private hostname|secret_detail/i);
+      return true;
+    });
+  }
+  n.state.processResponse = { exitCode: 2, result: JSON.stringify({ version: 1, ok: false, code: acceptedCodes[0] }) };
+  await assert.rejects(c.execute(binding, mission, { type: 'snapshot' }, 10, binding.ownerSubjectHash), (error: any) => error.code === 'daytona_runtime_unavailable');
+});
 test('one shared mission can navigate distinct public domains without a fixture-only allowlist', async () => {
   const n = network(sharedRuntime), c = await client({ fetchImpl: n.fetchImpl });
   const urls = ['https://www.linkedin.com/', 'https://wefunder.com/', 'https://www.wikipedia.org/'];

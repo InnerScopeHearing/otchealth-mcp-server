@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import select
+import secrets
 import signal
 import socket
 import stat
@@ -29,6 +30,9 @@ KEY = re.compile(r'[a-z0-9][a-z0-9_-]{0,95}\Z')
 UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z')
 HASH = re.compile(r'[0-9a-f]{64}\Z')
 TARGET = re.compile(r'[A-Za-z0-9_-]{1,256}\Z')
+OBSERVED_HANDLE_PREFIX = 'otc-observed:'
+OBSERVED_HANDLE = re.compile(r'otc-observed:[0-9a-f]{32}\Z')
+LOCATOR_TAGS = {'button', 'a', 'input', 'textarea', 'select', 'div', 'span'}
 KEYS = {'Enter': 13, 'Tab': 9, 'Escape': 27, 'Backspace': 8, 'Delete': 46,
         'Space': 32, 'ArrowUp': 38, 'ArrowDown': 40, 'ArrowLeft': 37, 'ArrowRight': 39,
         'Home': 36, 'End': 35, 'PageUp': 33, 'PageDown': 34, 'F5': 116,
@@ -160,6 +164,12 @@ def validate_payload(payload):
     if payload.get('runtimeProtocol') == 2 and not (isinstance(payload.get('principalHash'), str) and HASH.fullmatch(payload['principalHash'])): fail('invalid_payload')
     if payload['op'] == 'execute':
         validate_action(payload.get('action'))
+        selector = payload['action'].get('selector') if isinstance(payload.get('action'), dict) else None
+        if isinstance(selector, str) and selector.startswith(OBSERVED_HANDLE_PREFIX):
+            if not OBSERVED_HANDLE.fullmatch(selector) or payload.get('runtimeProtocol') != 2 or payload['action']['type'] not in ('click', 'focus', 'type'):
+                fail('invalid_action')
+        elif isinstance(selector, str) and selector.startswith('otc-observed'):
+            fail('invalid_action')
         if payload['action']['type'] == 'upload':
             try:
                 trusted_transfers().validate_descriptor(payload.get('upload'))
@@ -170,21 +180,40 @@ def validate_payload(payload):
     return payload
 
 
-def allow_url(url, allow_blank=False):
+DESTINATION_REASONS = {'invalid_url', 'scheme_or_credentials', 'port', 'dns_unavailable', 'nonpublic_address'}
+DESTINATION_STAGES = {'requested_navigation', 'target_metadata', 'observed_main', 'observed_child'}
+
+
+def destination_denied(stage, reason):
+    if stage == 'populated_blank' and reason == 'blank_has_content':
+        fail('destination_forbidden_populated_blank_blank_has_content')
+    if stage in DESTINATION_STAGES and reason in DESTINATION_REASONS:
+        fail(f'destination_forbidden_{stage}_{reason}')
+    fail('destination_forbidden')
+
+
+def allow_url(url, allow_blank=False, stage='requested_navigation'):
     if allow_blank and url == 'about:blank': return
-    if not text(url, 1, 2048): fail('destination_forbidden')
+    if not text(url, 1, 2048): destination_denied(stage, 'invalid_url')
     try:
         parsed = urlsplit(url)
-        if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username is not None or parsed.password is not None:
-            fail('destination_forbidden')
-        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
-        if port not in (80, 443): fail('destination_forbidden')
-        addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
-        resolved = [ipaddress.ip_address(entry[4][0].split('%')[0]) for entry in addresses]
+        if not parsed.scheme: destination_denied(stage, 'invalid_url')
+        if parsed.scheme not in ('http', 'https') or parsed.username is not None or parsed.password is not None:
+            destination_denied(stage, 'scheme_or_credentials')
+        if not parsed.hostname: destination_denied(stage, 'invalid_url')
+        try: port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+        except ValueError: destination_denied(stage, 'port')
+        if port not in (80, 443): destination_denied(stage, 'port')
+        try: addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+        except OSError: destination_denied(stage, 'dns_unavailable')
+        if not addresses: destination_denied(stage, 'dns_unavailable')
+        try: resolved = [ipaddress.ip_address(entry[4][0].split('%')[0]) for entry in addresses]
+        except (ValueError, IndexError, TypeError, AttributeError): destination_denied(stage, 'dns_unavailable')
         if not resolved or any(not address.is_global or address.is_multicast or address.is_reserved for address in resolved):
-            fail('destination_forbidden')
+            destination_denied(stage, 'nonpublic_address')
     except DispatchError: raise
-    except (ValueError, OSError): fail('destination_forbidden')
+    except ValueError: destination_denied(stage, 'invalid_url')
+    except OSError: destination_denied(stage, 'dns_unavailable')
 
 
 def safe_directory(path):
@@ -407,7 +436,7 @@ def allow_observed_url(url):
     # Only CDP metadata may transiently omit a document URL during navigation.
     # User-supplied URLs still go directly through the unchanged allow_url.
     if url == '': fail('provider_document_pending')
-    allow_url(url, allow_blank=True)
+    allow_url(url, allow_blank=True, stage='observed_main')
 
 
 def current_url(cdp, session):
@@ -419,9 +448,53 @@ def current_url(cdp, session):
         frame = pending.pop()
         count += 1
         if count > 256: fail('provider_response_too_large')
-        allow_observed_url(frame.get('frame', {}).get('url'))
+        frame_node = frame.get('frame', {})
+        frame_url = frame_node.get('url')
+        if frame is tree: allow_observed_url(frame_url)
+        else:
+            if frame_url == '': fail('provider_document_pending')
+            allow_url(frame_url, allow_blank=True, stage='observed_child')
         pending.extend(frame.get('childFrames', []))
     return url
+
+
+def document_identity(cdp, session):
+    tree = cdp.command('Page.getFrameTree', {}, session).get('frameTree', {})
+    frame = tree.get('frame', {}) if isinstance(tree, dict) else {}
+    frame_id, loader_id = frame.get('id'), frame.get('loaderId')
+    if not isinstance(frame_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,256}', frame_id): fail('provider_document_pending')
+    if not isinstance(loader_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,256}', loader_id): fail('provider_document_pending')
+    document = cdp.command('DOM.getDocument', {'depth': 0}, session).get('root', {})
+    backend = document.get('backendNodeId') if isinstance(document, dict) else None
+    if not integer(backend, 1, 2 ** 31): fail('provider_protocol_error')
+    return frame_id, loader_id, backend
+
+
+def locator_semantic_hash(role, tag, label, attrs):
+    keys = ('id', 'name', 'aria-label', 'aria-disabled', 'title', 'placeholder', 'data-testid', 'type',
+            'autocomplete', 'contenteditable', 'href', 'formaction', 'formmethod', 'formtarget',
+            'form', 'formnovalidate', 'disabled', 'readonly', 'hidden')
+    selected = {key: attrs[key] for key in keys if key in attrs}
+    # Full routing attributes participate only in this private digest. Never
+    # persist or emit their plaintext; omitting query/fragment data would let
+    # a changed destination reuse an old observed handle.
+    semantic = {'role': role, 'tag': tag, 'name': label, 'attrs': selected}
+    serialized = json.dumps(semantic, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    return hashlib.sha256(serialized.encode('utf-8')).hexdigest()
+
+
+def bounded_dom_subtree_backend_ids(node, max_depth=6, max_nodes=256):
+    result, pending = set(), [(node, 0)]
+    while pending:
+        current, depth = pending.pop()
+        if not isinstance(current, dict): continue
+        backend = current.get('backendNodeId')
+        if integer(backend, 1, 2 ** 31): result.add(backend)
+        children = current.get('children', [])
+        if depth < max_depth and isinstance(children, list):
+            for child in children[:max_nodes]: pending.append((child, depth + 1))
+        if len(result) + len(pending) > max_nodes: break
+    return result
 
 
 def authentication_node(node):
@@ -504,7 +577,7 @@ def has_content_quads(result):
                and max(q[::2]) > min(q[::2]) and max(q[1::2]) > min(q[1::2]) for q in quads)
 
 
-def editable_observations(cdp, session, nodes):
+def editable_observations(cdp, session, nodes, mission=None, target=None, browser_epoch=None, identity=None, previous_locators=()):
     """Describe only visible, writable, non-secret controls in the main frame."""
     candidates = [ax for ax in nodes if isinstance(ax, dict) and not ax.get('ignored') and (editable_node(ax) or
                   (isinstance(ax.get('role'), dict) and ax['role'].get('value') in ('button', 'link')))]
@@ -513,18 +586,23 @@ def editable_observations(cdp, session, nodes):
     document = cdp.command('DOM.getDocument', {'depth': 0}, session)
     root = document.get('root', {}).get('nodeId')
     if not integer(root, 1, 2 ** 31): fail('provider_protocol_error')
-    observed, count = [], 0
+    observed, count, locators = [], 0, []
+    seen_backends = set()
+    editable_count, action_count = 0, 0
     for ax in candidates:
         if not isinstance(ax, dict) or ax.get('ignored') or authentication_node(ax): continue
         role = ax.get('role', {}).get('value', '') if isinstance(ax.get('role'), dict) else ''
         is_editable = editable_node(ax)
         is_action = role in ('button', 'link')
         if not (is_editable or is_action): continue
+        if (is_editable and editable_count >= 10) or (is_action and action_count >= 10): continue
         backend = ax.get('backendDOMNodeId')
         if not integer(backend, 1, 2 ** 31): continue
+        if backend in seen_backends: continue
+        seen_backends.add(backend)
         count += 1
         if count > 80: break
-        described = cdp.command('DOM.describeNode', {'backendNodeId': backend, 'depth': 0}, session).get('node', {})
+        described = cdp.command('DOM.describeNode', {'backendNodeId': backend, 'depth': 6}, session).get('node', {})
         tag = described.get('nodeName', '').lower()
         attrs = dom_attributes(described)
         if is_editable and tag not in ('input', 'textarea') and not (attrs.get('contenteditable', '').lower() == 'true' or attrs.get('role') in ('textbox', 'combobox', 'searchbox')): continue
@@ -542,7 +620,7 @@ def editable_observations(cdp, session, nodes):
         label = ax.get('name', {}).get('value', '') if isinstance(ax.get('name'), dict) else ''
         if not isinstance(label, str): label = ''
         semantic = ' '.join([label, *(attrs.get(k, '') for k in ('id', 'name', 'placeholder', 'aria-label', 'data-testid', 'autocomplete', 'type'))])
-        if is_editable and re.search(r'(?i)(password|passcode|one.?time|otp|token|secret|api[_ -]?key|credential|bearer)', semantic): continue
+        if re.search(r'(?i)(password|passcode|one.?time|otp|token|secret|api[_ -]?key|credential|bearer)', semantic): continue
         def css_string(value):
             return '"' + re.sub(r'[\\"\n\r\f]', lambda m: '\\' + format(ord(m.group(0)), 'x') + ' ', value) + '"'
         selectors = []
@@ -558,16 +636,52 @@ def editable_observations(cdp, session, nodes):
             if isinstance(matches, list) and len(matches) == 1 and matches[0] == node_id:
                 selector = candidate
                 break
-        if not selector:
-            observed.append(f"Locator unavailable for {role} label={label[:120]!r}")
-            continue
         value = ax.get('value', {}).get('value', '') if is_editable and isinstance(ax.get('value'), dict) else ''
         if not isinstance(value, str): value = ''
         if is_editable and re.search(r'(?i)(sk_(?:live|test)_|xox[baprs]-|gh[pousr]_|bearer\s|eyJ[A-Za-z0-9_-]{10,}\.)', value): continue
+        if not selector:
+            # Opaque handles currently cover ordinary navigation/action
+            # controls only. Keep existing verified CSS editable locators;
+            # do not broaden anonymous text-input dispatch semantics.
+            if not is_action or tag not in LOCATOR_TAGS:
+                observed.append(f"Locator unavailable for {role} label={label[:120]!r}")
+                continue
+            if (mission is not None and isinstance(target, str) and integer(browser_epoch, 1, 2 ** 31)
+                and isinstance(identity, tuple) and len(identity) == 3):
+                quad = model.get('model', {}).get('content', [])
+                x, y = round(sum(quad[::2]) / 4), round(sum(quad[1::2]) / 4)
+                try:
+                    hit = cdp.command('DOM.getNodeForLocation', {'x': x, 'y': y, 'includeUserAgentShadowDOM': False}, session)
+                except DispatchError as error:
+                    if error.code != 'provider_action_failed': raise
+                    observed.append(f"Locator unavailable for {role} label={label[:120]!r}")
+                    continue
+                if (hit.get('frameId') != identity[0]
+                    or hit.get('backendNodeId') not in bounded_dom_subtree_backend_ids(described)):
+                    observed.append(f"Locator unavailable for {role} label={label[:120]!r}")
+                    continue
+                semantic_hash = locator_semantic_hash(role, tag, label, attrs)
+                if semantic_hash is None:
+                    observed.append(f"Locator unavailable for {role} label={label[:120]!r}")
+                    continue
+                fields = (target, identity[0], identity[1], identity[2], browser_epoch, backend, role, tag, semantic_hash)
+                prior = next((item for item in previous_locators if (item.get('target'), item.get('frameId'), item.get('loaderId'),
+                              item.get('documentBackendNodeId'), item.get('browserEpoch'), item.get('backendDOMNodeId'),
+                              item.get('role'), item.get('tag'), item.get('nameHash')) == fields), None)
+                handle = prior['handle'] if prior else OBSERVED_HANDLE_PREFIX + secrets.token_hex(16)
+                locators.append({'handle': handle, 'target': target, 'frameId': identity[0], 'loaderId': identity[1],
+                                 'documentBackendNodeId': identity[2], 'browserEpoch': browser_epoch,
+                                 'backendDOMNodeId': backend, 'role': role, 'tag': tag, 'nameHash': semantic_hash})
+                selector = handle
+            else:
+                observed.append(f"Locator unavailable for {role} label={label[:120]!r}")
+                continue
         value_digest = hashlib.sha256(value.encode('utf-8')).hexdigest() if is_editable else ''
-        safe_attrs = {key: attrs[key][:60] for key in ('type', 'name', 'placeholder', 'aria-label', 'data-testid') if isinstance(attrs.get(key), str)}
-        observed.append(f"{'Editable' if is_editable else 'Action'} {tag} label={label[:100]!r} selector={selector!r} attrs={safe_attrs!r}" + (f" value={value[:200]!r} valueLength={len(value)} valueSha256={value_digest}" if is_editable else ''))
-        if len(observed) >= 10: break
+        safe_attrs = {key: attrs[key][:20] for key in ('type', 'name', 'placeholder', 'aria-label', 'data-testid') if isinstance(attrs.get(key), str)}
+        observed.append(f"{'Editable' if is_editable else 'Action'} {tag} selector={selector!r} label={label[:60]!r} attrs={safe_attrs!r}" + (f" value={value[:80]!r} valueLength={len(value)} valueSha256={value_digest}" if is_editable else ''))
+        if is_editable: editable_count += 1
+        else: action_count += 1
+    if mission is not None: mission['observedLocators'] = locators[:20]
     return observed
 
 
@@ -587,6 +701,48 @@ def preflight_target(cdp, session, selector):
     return node_id, described, attrs
 
 
+def file_input_observations(cdp, session):
+    """Report only fixed, read-only native file-control metadata, never its value/path."""
+    document = cdp.command('DOM.getDocument', {'depth': 0}, session)
+    root = document.get('root', {}).get('nodeId')
+    if not integer(root, 1, 2 ** 31): fail('provider_protocol_error')
+    result = cdp.command('DOM.querySelectorAll', {'nodeId': root, 'selector': 'input[type="file" i]'}, session)
+    nodes = result.get('nodeIds', []) if isinstance(result, dict) else None
+    if not isinstance(nodes, list) or len(nodes) > 100 or any(not integer(node, 1, 2 ** 31) for node in nodes): fail('provider_protocol_error')
+    output = []
+    for node_id in nodes[:10]:
+        described = cdp.command('DOM.describeNode', {'nodeId': node_id, 'depth': 0}, session).get('node', {})
+        attrs = dom_attributes(described)
+        attrs.pop('value', None)
+        if 'disabled' in attrs: continue
+        if re.search(r'(?i)(password|passcode|one.?time|otp|token|secret|api[_ -]?key|credential|bearer)',
+                     ' '.join(str(attrs.get(key, '')) for key in ('id', 'name', 'data-testid', 'accept'))): continue
+        selector = None
+        for key in ('id', 'name', 'data-testid'):
+            value = attrs.get(key)
+            if not isinstance(value, str) or not value or len(value) > 120: continue
+            escaped = '"' + re.sub(r'[\\"\n\r\f]', lambda match: '\\' + format(ord(match.group(0)), 'x') + ' ', value) + '"'
+            candidate = f'input[type="file" i][{key}={escaped}]'
+            if len(candidate) > 256: continue
+            matches = cdp.command('DOM.querySelectorAll', {'nodeId': root, 'selector': candidate}, session).get('nodeIds', [])
+            if isinstance(matches, list) and len(matches) == 1 and matches[0] == node_id:
+                selector = candidate; break
+        if selector is None:
+            candidate = 'input[type="file" i]'
+            matches = cdp.command('DOM.querySelectorAll', {'nodeId': root, 'selector': candidate}, session).get('nodeIds', [])
+            if isinstance(matches, list) and len(matches) == 1 and matches[0] == node_id:
+                selector = candidate
+        accept = attrs.get('accept', '')
+        accept = accept[:120] if isinstance(accept, str) else ''
+        options = {'accept': accept, 'multiple': 'multiple' in attrs,
+                   'directory': 'webkitdirectory' in attrs or 'directory' in attrs}
+        if selector:
+            output.append(f'File input selector={selector!r} options={options!r}')
+        else:
+            output.append(f'File input locator unavailable options={options!r}')
+    return output
+
+
 def preflight_editable(cdp, session, selector):
     """Require a unique, visible, writable text control."""
     node_id, described, attrs = preflight_target(cdp, session, selector)
@@ -597,8 +753,64 @@ def preflight_editable(cdp, session, selector):
     return node_id
 
 
-def snapshot(cdp, session, target, reject_auth=False):
+def observed_record(state, selector, browser_epoch):
+    if not isinstance(selector, str) or not selector.startswith(OBSERVED_HANDLE_PREFIX): return None
+    if not OBSERVED_HANDLE.fullmatch(selector): fail('selector_not_found')
+    if not isinstance(state, dict) or not integer(browser_epoch, 1, 2 ** 31): fail('selector_not_found')
+    for locator in state.get('observedLocators', []):
+        if locator.get('handle') == selector and locator.get('target') == state.get('selected') and locator.get('target') in state.get('owned', []) and locator.get('browserEpoch') == browser_epoch:
+            return locator
+    fail('selector_not_found')
+
+
+def preflight_observed(cdp, session, state, selector, browser_epoch, require_editable=False):
+    locator = observed_record(state, selector, browser_epoch)
+    if locator is None: return None
+    cdp.command('DOM.enable', {}, session)
+    if document_identity(cdp, session) != (locator['frameId'], locator['loaderId'], locator['documentBackendNodeId']): fail('selector_not_found')
+    pushed = cdp.command('DOM.pushNodesByBackendIdsToFrontend', {'backendNodeIds': [locator['backendDOMNodeId']]}, session).get('nodeIds', [])
+    if not isinstance(pushed, list) or len(pushed) != 1 or not integer(pushed[0], 1, 2 ** 31): fail('selector_not_found')
+    node_id = pushed[0]
+    described = cdp.command('DOM.describeNode', {'nodeId': node_id, 'depth': 6}, session).get('node', {})
+    attrs = dom_attributes(described)
+    tag = described.get('nodeName', '').lower()
+    if tag != locator['tag'] or described.get('backendNodeId') != locator['backendDOMNodeId']: fail('selector_not_found')
+    if any(name in attrs for name in ('disabled', 'hidden')): fail('selector_not_interactable')
+    if require_editable and (tag not in ('input', 'textarea') and attrs.get('contenteditable', '').lower() != 'true' or 'readonly' in attrs or attrs.get('type', '').lower() == 'hidden'):
+        fail('selector_not_interactable')
+    quads = cdp.command('DOM.getContentQuads', {'nodeId': node_id}, session)
+    if not has_content_quads(quads): fail('selector_not_interactable')
+    quad = next(q for q in quads['quads'] if isinstance(q, list) and len(q) == 8 and all(type(v) in (int, float) and math.isfinite(v) for v in q)
+                and max(q[::2]) > min(q[::2]) and max(q[1::2]) > min(q[1::2]))
+    x, y = round(sum(quad[::2]) / 4), round(sum(quad[1::2]) / 4)
+    hit = cdp.command('DOM.getNodeForLocation', {'x': x, 'y': y, 'includeUserAgentShadowDOM': False}, session)
+    if (hit.get('frameId') != locator['frameId']
+        or hit.get('backendNodeId') not in bounded_dom_subtree_backend_ids(described)):
+        fail('selector_not_interactable')
+    tree = cdp.command('Accessibility.getPartialAXTree', {'backendNodeId': locator['backendDOMNodeId'], 'fetchRelatives': False}, session)
+    nodes = tree.get('nodes', []) if isinstance(tree, dict) else []
+    matches = [node for node in nodes if isinstance(node, dict) and node.get('backendDOMNodeId') == locator['backendDOMNodeId']]
+    if len(matches) != 1: fail('selector_not_found')
+    node = matches[0]
+    role = node.get('role', {}).get('value', '') if isinstance(node.get('role'), dict) else ''
+    name = node.get('name', {}).get('value', '') if isinstance(node.get('name'), dict) else ''
+    if (node.get('ignored') or role != locator['role'] or not isinstance(name, str)
+        or locator_semantic_hash(role, tag, name, attrs) != locator['nameHash']): fail('selector_not_found')
+    return node_id, described, attrs
+
+
+def preflight_selector(cdp, session, state, selector, browser_epoch, require_editable=False):
+    if isinstance(selector, str) and selector.startswith(OBSERVED_HANDLE_PREFIX):
+        return preflight_observed(cdp, session, state, selector, browser_epoch, require_editable)
+    if require_editable: return preflight_editable(cdp, session, selector), None, None
+    return preflight_target(cdp, session, selector)
+
+
+def snapshot(cdp, session, target, reject_auth=False, mission=None, browser_epoch=None):
+    previous_locators = mission.get('observedLocators', []) if mission is not None else []
+    if mission is not None: mission['observedLocators'] = []
     url = current_url(cdp, session)
+    identity = document_identity(cdp, session) if mission is not None else None
     nodes = cdp.command('Accessibility.getFullAXTree', {}, session).get('nodes', [])
     if not isinstance(nodes, list): fail('provider_protocol_error')
     # Catch navigation that races the accessibility read before any blank-page guard.
@@ -628,11 +840,32 @@ def snapshot(cdp, session, target, reject_auth=False):
         if node.get('ignored') or role not in ('StaticText', 'heading', 'link', 'button'): continue
         name = node.get('name', {}).get('value')
         if isinstance(name, str): names.append(name[:2000])
-    editable = editable_observations(cdp, session, nodes)
-    # Guard again after control metadata reads, before releasing observations.
+    editable = editable_observations(cdp, session, nodes, mission, target, browser_epoch, identity, previous_locators)
+    file_inputs = file_input_observations(cdp, session) if mission is not None else []
+    # Guard again after all DOM/AX metadata reads, before releasing observations.
     if current_url(cdp, session) != url: fail('navigation_changed')
-    visible = '\n'.join(editable + names)[:12000]
-    if url == 'about:blank' and visible.strip(): fail('destination_forbidden')
+    # Keep complete locator lines (never a truncated opaque handle), then file
+    # controls and text within the historical output bound.
+    lines, used = [], 0
+    for line in editable:
+        if len(line) > 600: continue
+        if used + len(line) + bool(lines) > 10000: break
+        lines.append(line); used += len(line) + bool(lines)
+    for line in file_inputs:
+        if len(line) > 500 or used + len(line) + bool(lines) > 10500: continue
+        lines.append(line); used += len(line) + bool(lines)
+    for line in names:
+        line = line[:2000]
+        if used + len(line) + bool(lines) > 12000: break
+        lines.append(line); used += len(line) + bool(lines)
+    if mission is not None:
+        emitted = '\n'.join(lines)
+        mission['observedLocators'] = [item for item in mission.get('observedLocators', []) if item['handle'] in emitted]
+        if mission['observedLocators']:
+            instruction = 'Observed handles are mission and document bound; use the exact selector from the latest snapshot.'
+            if len(instruction) + 1 + len(emitted) <= 12000: lines.insert(0, instruction)
+    visible = '\n'.join(lines)
+    if url == 'about:blank' and (visible.strip() or has_editable): destination_denied('populated_blank', 'blank_has_content')
     return {'url': url, 'title': title[:512] if isinstance(title, str) else '', 'visibleText': visible}
 
 
@@ -641,7 +874,8 @@ def selected(cdp, state):
     if not target or target not in state['owned']: fail('target_not_owned')
     info = cdp.command('Target.getTargetInfo', {'targetId': target}).get('targetInfo', {})
     if info.get('type') != 'page': fail('target_not_owned')
-    allow_observed_url(info.get('url'))
+    if info.get('url') == '': fail('provider_document_pending')
+    allow_url(info.get('url'), allow_blank=True, stage='target_metadata')
     result = cdp.command('Target.attachToTarget', {'targetId': target, 'flatten': True})
     session = result.get('sessionId')
     if not text(session): fail('provider_protocol_error')
@@ -649,13 +883,13 @@ def selected(cdp, state):
     return target, session
 
 
-def post_action_snapshot(cdp, state, navigation=False):
+def post_action_snapshot(cdp, state, navigation=False, browser_epoch=None, v2=False):
     """Retry observations only after an acknowledged action, never the action."""
     deadline = min(cdp.deadline, time.monotonic() + 2) if navigation else None
     while True:
         try:
             target, session = selected(cdp, state)
-            return snapshot(cdp, session, target)
+            return snapshot(cdp, session, target, mission=state if v2 else None, browser_epoch=browser_epoch)
         except DispatchError as error:
             if not navigation or error.code not in ('provider_context_destroyed', 'navigation_changed', 'provider_document_pending'): raise
             remaining = min(cdp.remaining(), deadline - time.monotonic())
@@ -683,7 +917,7 @@ def find_node(cdp, session, selector):
     return node
 
 
-def execute(cdp, state, action):
+def execute(cdp, state, action, browser_epoch=None, v2=False):
     kind = action['type']
     if kind == 'tab_create':
         allow_url(action['url'])
@@ -696,17 +930,22 @@ def execute(cdp, state, action):
         target = action['targetId']
         if target not in state['owned']: fail('target_not_owned')
         info = cdp.command('Target.getTargetInfo', {'targetId': target}).get('targetInfo', {})
-        allow_url(info.get('url'), allow_blank=True)
+        allow_url(info.get('url'), allow_blank=True, stage='target_metadata')
         if kind == 'tab_select':
             cdp.command('Target.activateTarget', {'targetId': target})
             state['selected'] = target
+            state.pop('observedLocators', None)
         else:
             if cdp.command('Target.closeTarget', {'targetId': target}).get('success') is not True: fail('target_operation_failed')
             state['owned'].remove(target)
-            if state['selected'] == target: state['selected'] = None
+            if state['selected'] == target:
+                state['selected'] = None
+                state.pop('observedLocators', None)
+            elif isinstance(state.get('observedLocators'), list):
+                state['observedLocators'] = [item for item in state['observedLocators'] if item.get('target') != target]
         return {'selectedTargetId': state['selected'], 'completed': True, **({'closedTargetId': target} if kind == 'tab_close' else {})}
     target, session = selected(cdp, state)
-    if kind == 'snapshot': return snapshot(cdp, session, target)
+    if kind == 'snapshot': return snapshot(cdp, session, target, mission=state if v2 else None, browser_epoch=browser_epoch)
     if kind == 'navigate':
         allow_url(action['url'])
         result = cdp.command('Page.navigate', {'url': action['url']}, session)
@@ -744,7 +983,13 @@ def execute(cdp, state, action):
     else:
         while True:
             try:
-                node = find_node(cdp, session, action['selector'])
+                handle = isinstance(action.get('selector'), str) and action['selector'].startswith(OBSERVED_HANDLE_PREFIX)
+                if handle:
+                    resolved = preflight_observed(cdp, session, state, action['selector'], browser_epoch,
+                                                  require_editable=kind == 'type')
+                    node = resolved[0] if resolved else None
+                else:
+                    node = find_node(cdp, session, action['selector'])
                 break
             except DispatchError as error:
                 if kind != 'wait_for' or error.code != 'selector_not_found': raise
@@ -752,7 +997,8 @@ def execute(cdp, state, action):
                 time.sleep(min(0.1, cdp.remaining()))
         if kind == 'wait_for': pass
         elif kind in ('focus', 'type'):
-            node = preflight_editable(cdp, session, action['selector']) if kind == 'type' else preflight_target(cdp, session, action['selector'])[0]
+            if not handle:
+                node = preflight_editable(cdp, session, action['selector']) if kind == 'type' else preflight_target(cdp, session, action['selector'])[0]
             cdp.command('DOM.focus', {'nodeId': node}, session)
             if kind == 'type': cdp.command('Input.insertText', {'text': action['text']}, session)
         elif kind == 'select':
@@ -780,9 +1026,20 @@ def execute(cdp, state, action):
             if selected_value != [labels[values.index(action['value'])]]: fail('select_postcondition_failed')
         elif kind == 'click':
             cdp.command('DOM.scrollIntoViewIfNeeded', {'nodeId': node}, session)
+            if handle:
+                locator = observed_record(state, action['selector'], browser_epoch)
+                fresh = preflight_observed(cdp, session, state, action['selector'], browser_epoch)
+                if not locator or not fresh or fresh[1].get('backendNodeId') != locator['backendDOMNodeId']:
+                    fail('selector_not_interactable')
+                node = fresh[0]
             quad = cdp.command('DOM.getBoxModel', {'nodeId': node}, session).get('model', {}).get('content')
             if not isinstance(quad, list) or len(quad) != 8 or any(type(v) not in (int, float) or not math.isfinite(v) for v in quad): fail('selector_not_interactable')
             x, y = sum(quad[::2]) / 4, sum(quad[1::2]) / 4
+            if handle:
+                x, y = round(x), round(y)
+                hit = cdp.command('DOM.getNodeForLocation', {'x': x, 'y': y, 'includeUserAgentShadowDOM': False}, session)
+                if hit.get('frameId') != locator['frameId'] or hit.get('backendNodeId') not in bounded_dom_subtree_backend_ids(fresh[1]):
+                    fail('selector_not_interactable')
             for count in range(1, action.get('clickCount', 1) + 1):
                 params = {'x': x, 'y': y, 'button': action.get('button', 'left'), 'clickCount': count}
                 try: cdp.command('Input.dispatchMouseEvent', {'type': 'mousePressed', **params}, session)
@@ -839,12 +1096,13 @@ def checkpoint(receipt, state, payload, deadline, old_pid):
             info = cdp.command('Target.getTargetInfo', {'targetId': target}).get('targetInfo', {})
             if info.get('type') != 'page' or info.get('url') != 'about:blank': fail('checkpoint_unverified')
         state['selected'], state['owned'], state['uncertain'] = target, [target], False
+        state.pop('observedLocators', None)
         receipt.write(state)
         return {**result, 'tabsReset': True}
     finally: cdp.close()
 
 
-def perform_action(cdp, state, payload, profile):
+def perform_action(cdp, state, payload, profile, browser_epoch=None, v2=False):
     kind = payload['action']['type']
     if kind in ('capture', 'upload'):
         transfers = trusted_transfers()
@@ -863,11 +1121,11 @@ def perform_action(cdp, state, payload, profile):
             if current_url(cdp, attached_session) != before_url: fail('navigation_changed')
             return result
         except transfers.TransferError as error: fail(error.code)
-    action_result = execute(cdp, state, payload['action'])
+    action_result = execute(cdp, state, payload['action'], browser_epoch, v2)
     if kind == 'snapshot': return action_result
     if state['selected'] is None: result = {'url': None, 'title': None, 'visibleText': ''}
     else:
-        result = post_action_snapshot(cdp, state, kind in ('navigate', 'click'))
+        result = post_action_snapshot(cdp, state, kind in ('navigate', 'click'), browser_epoch, v2)
     if kind in ('tab_create', 'tab_select', 'tab_close'): result['pageReceipt'] = action_result
     return result
 
@@ -938,12 +1196,12 @@ def dispatch_v2(payload, deadline, profile, browser_pid):
             try:
                 # A safe locator rejection must precede even tab activation and
                 # the uncertain receipt write so V2 can acknowledge zero input effects.
-                if op == 'execute' and payload['action']['type'] in ('focus', 'type'):
+                if op == 'execute' and payload['action']['type'] in ('focus', 'type', 'click'):
                     try:
                         target, attached = selected(cdp, mission)
                         action = payload['action']
-                        if action['type'] == 'type': preflight_editable(cdp, attached, action['selector'])
-                        else: preflight_target(cdp, attached, action['selector'])
+                        preflight_selector(cdp, attached, mission, action['selector'], browser_pid,
+                                           require_editable=action['type'] == 'type')
                     except DispatchError as error:
                         if error.code in ('selector_not_found', 'selector_not_interactable'):
                             error.before_effect = True
@@ -989,7 +1247,7 @@ def dispatch_v2(payload, deadline, profile, browser_pid):
                         if not isinstance(private, dict) or private.keys() != {'clipboardText', 'changed'} or type(private['changed']) is not bool or not isinstance(private['clipboardText'], str): fail('clipboard_provider_unavailable')
                         mission['clipboardText'] = private['clipboardText']
                         result = {'url': observed['url'], 'title': observed['title'], 'visibleText': ''}
-                    else: result = perform_action(cdp, mission, payload, profile)
+                    else: result = perform_action(cdp, mission, payload, profile, browser_pid, True)
                 mission['uncertain'] = False; adapter.write(mission); return result
             finally: cdp.close()
     except module.RegistryError as error: fail(error.code, error.before_effect)
@@ -1049,7 +1307,7 @@ def dispatch(payload):
                 pages = [target for target in targets if target.get('type') == 'page' and isinstance(target.get('targetId'), str) and TARGET.fullmatch(target['targetId'])]
                 if not pages: fail('runtime_not_ready')
                 target = pages[0]
-                allow_url(target.get('url'), allow_blank=True)
+                allow_url(target.get('url'), allow_blank=True, stage='target_metadata')
                 state = {'sessionId': session_id, 'selected': target['targetId'], 'owned': [target['targetId']], 'uncertain': False}
                 if principal is not None: state['principalHash'] = principal
                 receipt.write(state)

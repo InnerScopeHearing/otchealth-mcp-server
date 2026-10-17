@@ -30,7 +30,11 @@ class Cdp:
         if method == 'Target.getTargetInfo': return {'targetInfo': {'type': 'page', 'url': self.targets[params['targetId']], 'title': ''}}
         if method == 'Target.attachToTarget': return {'sessionId': params['targetId']}
         if method == 'Target.closeTarget': del self.targets[params['targetId']]; return {'success': True}
-        if method == 'Page.getFrameTree': return {'frameTree': {'frame': {'url': self.targets[session]}}}
+        if method == 'Page.getFrameTree': return {'frameTree': {'frame': {'id': 'FRAME_' + session, 'loaderId': 'LOADER_' + session, 'url': self.targets[session]}}}
+        if method == 'DOM.getDocument': return {'root': {'nodeId': 1, 'backendNodeId': 1}}
+        if method == 'DOM.querySelectorAll': return {'nodeIds': [7] if params.get('selector') == '#public' else []}
+        if method == 'DOM.describeNode': return {'node': {'nodeId': 7, 'backendNodeId': 7, 'nodeName': 'BUTTON', 'attributes': ['id', 'public']}}
+        if method == 'DOM.getContentQuads': return {'quads': [[0, 0, 10, 0, 10, 10, 0, 10]]}
         if method == 'Accessibility.getFullAXTree': return {'nodes': []}
         return {}
 

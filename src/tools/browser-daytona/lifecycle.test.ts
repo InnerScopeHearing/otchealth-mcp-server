@@ -51,9 +51,10 @@ test('factory absent map has no effects; malformed map fails closed',()=>{
 });
 test('role command accepts only the reviewed old/new helper hashes by runtime family',async()=>{
  const commonHashes=['b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51','46537a2e997d55e270e737f455d6b9c46eb48333a07e342a74f5c7ea38705075'];
- const wefunderHashes=['62ee69b6c51685248ee45c3c51a8abbc3386918a76fb57ede8a1da4dd77782d6','d6c00bcb0047b761c0364fd3c3936be8f6687ce45a4f0b627a3429cfcff6dc1c'];
+ const wefunderHashes=['62ee69b6c51685248ee45c3c51a8abbc3386918a76fb57ede8a1da4dd77782d6','d6c00bcb0047b761c0364fd3c3936be8f6687ce45a4f0b627a3429cfcff6dc1c','9c60da6657081918c707a8e0352d18e649cc9fb3614a37cbc30f40ff2a4ffe47'];
  const lifecycleSource=await readFile(new URL('./lifecycle.ts',import.meta.url),'utf8');
  const locatorHash=lifecycleSource.match(/const WEFUNDER_LOCATOR_HELPER_SHA256='([a-f0-9]{64})';/)?.[1];
+ assert.ok(lifecycleSource.includes("'9c60da6657081918c707a8e0352d18e649cc9fb3614a37cbc30f40ff2a4ffe47',WEFUNDER_LOCATOR_HELPER_SHA256]"), 'retain accepted gateway243 WeFunder helper beside the new observed-handle cohort');
  assert.ok(locatorHash,'explicit WeFunder locator helper hash is configured');
  const arbitrary='a'.repeat(64);
  const platform=new RestDaytonaLifecyclePlatform({tableName:'lifecycle',grantTable:'grants',region:'us-east-1',fetchImpl:fetch,resolveCredentials:async()=>null,

@@ -62,6 +62,211 @@ class DispatcherTests(unittest.TestCase):
             with self.assertRaises(dispatcher.DispatchError):
                 dispatcher.allow_url('https://example.com/')
 
+    def test_destination_denial_reasons_are_finite_and_do_not_disclose_origin(self):
+        cases = [
+            ('not a url', 'destination_forbidden_requested_navigation_invalid_url'),
+            ('file:///etc/passwd', 'destination_forbidden_requested_navigation_scheme_or_credentials'),
+            ('https://example.com:444/', 'destination_forbidden_requested_navigation_port'),
+            ('https://example.com:invalid/', 'destination_forbidden_requested_navigation_port'),
+        ]
+        for url, expected in cases:
+            with self.subTest(url=url), self.assertRaises(dispatcher.DispatchError) as error:
+                dispatcher.allow_url(url, stage='requested_navigation')
+            self.assertEqual(error.exception.code, expected)
+            self.assertNotIn('example.com', error.exception.code)
+        with patch.object(dispatcher.socket, 'getaddrinfo', side_effect=OSError('private detail')):
+            with self.assertRaises(dispatcher.DispatchError) as error:
+                dispatcher.allow_url('https://example.com/', stage='observed_child')
+        self.assertEqual(error.exception.code, 'destination_forbidden_observed_child_dns_unavailable')
+        codes = set()
+        for stage in ('requested_navigation', 'target_metadata', 'observed_main', 'observed_child'):
+            for reason in ('invalid_url', 'scheme_or_credentials', 'port', 'dns_unavailable', 'nonpublic_address'):
+                with self.assertRaises(dispatcher.DispatchError) as denial:
+                    dispatcher.destination_denied(stage, reason)
+                codes.add(denial.exception.code)
+        with self.assertRaises(dispatcher.DispatchError) as denial:
+            dispatcher.destination_denied('populated_blank', 'blank_has_content')
+        codes.add(denial.exception.code)
+        self.assertEqual(len(codes), 21)
+
+    def test_snapshot_issues_nonmutating_v2_handles_for_controls_without_unique_css(self):
+        class Cdp:
+            def command(self, method, params=None, session=None):
+                if method == 'Page.getFrameTree':
+                    return {'frameTree': {'frame': {'url': 'https://example.com/editor', 'id': 'FRAME', 'loaderId': 'LOADER'}}}
+                if method == 'Target.getTargetInfo': return {'targetInfo': {'title': 'Editor'}}
+                if method == 'Accessibility.getFullAXTree': return {'nodes': [
+                    {'role': {'value': 'button'}, 'name': {'value': 'Preview'}, 'backendDOMNodeId': 88}]}
+                if method == 'DOM.getDocument': return {'root': {'nodeId': 1, 'backendNodeId': 2}}
+                if method == 'DOM.describeNode': return {'node': {'nodeName': 'BUTTON', 'backendNodeId': 88, 'attributes': []}}
+                if method == 'DOM.pushNodesByBackendIdsToFrontend': return {'nodeIds': [8]}
+                if method == 'DOM.getBoxModel': return {'model': {'content': [0, 0, 10, 0, 10, 10, 0, 10]}}
+                if method == 'DOM.getNodeForLocation': return {'frameId': 'FRAME', 'backendNodeId': 88}
+                if method == 'DOM.querySelectorAll': return {'nodeIds': [7, 8]}
+                return {}
+        mission = {'sessionId': self.payload['sessionId'], 'principalHash': self.payload['principalHash'],
+                   'selected': 'PAGE1', 'owned': ['PAGE1'], 'uncertain': False}
+        with patch.object(dispatcher, 'allow_url'):
+            result = dispatcher.snapshot(Cdp(), 'SESSION', 'PAGE1', mission=mission, browser_epoch=456)
+        self.assertRegex(result['visibleText'], r"selector='otc-observed:[0-9a-f]{32}'")
+        self.assertEqual(len(mission['observedLocators']), 1)
+        locator = mission['observedLocators'][0]
+        self.assertEqual((locator['target'], locator['frameId'], locator['loaderId'], locator['documentBackendNodeId'], locator['browserEpoch']),
+                         ('PAGE1', 'FRAME', 'LOADER', 2, 456))
+        self.assertEqual(locator['backendDOMNodeId'], 88)
+        self.assertNotIn('Preview', json.dumps(locator))
+
+    def test_verified_css_for_nonregistry_contenteditable_tag_is_preserved(self):
+        class Cdp:
+            def command(self, method, params=None, session=None):
+                if method == 'DOM.getDocument': return {'root': {'nodeId': 1}}
+                if method == 'DOM.describeNode': return {'node': {'nodeName': 'P', 'backendNodeId': 88,
+                    'attributes': ['id', 'editor', 'contenteditable', 'true']}}
+                if method == 'DOM.pushNodesByBackendIdsToFrontend': return {'nodeIds': [8]}
+                if method == 'DOM.getBoxModel': return {'model': {'content': [0, 0, 10, 0, 10, 10, 0, 10]}}
+                if method == 'DOM.querySelectorAll': return {'nodeIds': [8]}
+                return {}
+        nodes = [{'role': {'value': 'textbox'}, 'name': {'value': 'Editor'}, 'backendDOMNodeId': 88,
+                  'properties': [{'name': 'editable', 'value': {'value': True}}]}]
+        lines = dispatcher.editable_observations(Cdp(), 'SESSION', nodes)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("selector='[id=\"editor\"]'", lines[0])
+
+        class NonUniqueCdp(Cdp):
+            def command(self, method, params=None, session=None):
+                if method == 'DOM.describeNode': return {'node': {'nodeName': 'P', 'backendNodeId': 88,
+                    'attributes': ['contenteditable', 'true']}}
+                if method == 'DOM.querySelectorAll': return {'nodeIds': [8, 9]}
+                return super().command(method, params, session)
+        mission = {'observedLocators': []}
+        unavailable = dispatcher.editable_observations(NonUniqueCdp(), 'SESSION', nodes, mission,
+                                                        'PAGE1', 456, ('FRAME', 'LOADER', 2))
+        self.assertTrue(any('Locator unavailable' in line for line in unavailable))
+        self.assertEqual(mission['observedLocators'], [])
+
+    def test_observation_hit_test_provider_action_failure_skips_only_that_control(self):
+        class Cdp:
+            def __init__(self): self.hit_calls = 0
+            def command(self, method, params=None, session=None):
+                if method == 'DOM.getDocument': return {'root': {'nodeId': 1}}
+                if method == 'DOM.describeNode':
+                    backend = params.get('backendNodeId')
+                    return {'node': {'nodeName': 'BUTTON', 'backendNodeId': backend, 'attributes': []}}
+                if method == 'DOM.pushNodesByBackendIdsToFrontend': return {'nodeIds': [params['backendNodeIds'][0]]}
+                if method == 'DOM.getBoxModel': return {'model': {'content': [0, 0, 10, 0, 10, 10, 0, 10]}}
+                if method == 'DOM.querySelectorAll': return {'nodeIds': [88, 89]}
+                if method == 'DOM.getNodeForLocation':
+                    self.hit_calls += 1
+                    if self.hit_calls == 1: raise dispatcher.DispatchError('provider_action_failed')
+                    return {'frameId': 'FRAME', 'backendNodeId': 89}
+                return {}
+        nodes = [{'role': {'value': 'button'}, 'name': {'value': label}, 'backendDOMNodeId': backend}
+                 for label, backend in (('First', 88), ('Second', 89))]
+        mission = {'observedLocators': []}
+        lines = dispatcher.editable_observations(Cdp(), 'SESSION', nodes, mission, 'PAGE1', 456,
+                                                  ('FRAME', 'LOADER', 2))
+        self.assertTrue(any('label=\'Second\'' in line for line in lines))
+        self.assertEqual(len(mission['observedLocators']), 1)
+        class TimeoutCdp(Cdp):
+            def command(self, method, params=None, session=None):
+                if method == 'DOM.getNodeForLocation': raise dispatcher.DispatchError('provider_timeout')
+                return super().command(method, params, session)
+        with self.assertRaises(dispatcher.DispatchError) as error:
+            dispatcher.editable_observations(TimeoutCdp(), 'SESSION', nodes[:1], {'observedLocators': []},
+                                               'PAGE1', 456, ('FRAME', 'LOADER', 2))
+        self.assertEqual(error.exception.code, 'provider_timeout')
+
+    def test_observed_handle_resolution_is_bound_to_mission_document_epoch_and_ax_identity(self):
+        handle = 'otc-observed:' + 'a' * 32
+        locator = {'handle': handle, 'target': 'PAGE1', 'frameId': 'FRAME', 'loaderId': 'LOADER',
+                   'documentBackendNodeId': 2, 'browserEpoch': 456, 'backendDOMNodeId': 88,
+                   'role': 'button', 'tag': 'button',
+                   'nameHash': dispatcher.locator_semantic_hash('button', 'button', 'Preview', {})}
+        state = {'selected': 'PAGE1', 'owned': ['PAGE1'], 'observedLocators': [locator]}
+        class Cdp:
+            def __init__(self, frame='FRAME', loader='LOADER', label='Preview', hit=88, backend=88, document=2, changed_attr=False):
+                self.frame, self.loader, self.label, self.hit, self.backend, self.document, self.changed_attr = frame, loader, label, hit, backend, document, changed_attr
+                self.methods = []
+            def command(self, method, params=None, session=None):
+                self.methods.append(method)
+                if method == 'DOM.getDocument': return {'root': {'nodeId': 1, 'backendNodeId': self.document}}
+                if method == 'DOM.pushNodesByBackendIdsToFrontend': return {'nodeIds': [9]}
+                if method == 'DOM.describeNode': return {'node': {'nodeName': 'BUTTON', 'backendNodeId': self.backend,
+                    'attributes': ['aria-label', 'Preview changed'] if self.changed_attr else [],
+                    'children': [{'backendNodeId': 89, 'nodeName': 'SPAN'}] if self.hit == 89 else []}}
+                if method == 'DOM.getContentQuads': return {'quads': [[0, 0, 10, 0, 10, 10, 0, 10]]}
+                if method == 'DOM.getNodeForLocation': return {'frameId': 'FRAME', 'backendNodeId': self.hit}
+                if method == 'Page.getFrameTree': return {'frameTree': {'frame': {'id': self.frame, 'loaderId': self.loader}}}
+                if method == 'Accessibility.getPartialAXTree': return {'nodes': [
+                    {'backendDOMNodeId': 88, 'role': {'value': 'button'}, 'name': {'value': self.label}}]}
+                return {}
+        cdp = Cdp()
+        resolved = dispatcher.preflight_selector(cdp, 'SESSION', state, handle, 456)
+        self.assertEqual(resolved[0], 9)
+        self.assertNotIn('Runtime.evaluate', cdp.methods)
+        for params, expected in (({'frame': 'OTHER'}, 'selector_not_found'),
+                                 ({'loader': 'OTHER'}, 'selector_not_found'),
+                                 ({'label': 'Different'}, 'selector_not_found')):
+            with self.subTest(params=params), self.assertRaises(dispatcher.DispatchError) as error:
+                dispatcher.preflight_selector(Cdp(**params), 'SESSION', state, handle, 456)
+            self.assertEqual(error.exception.code, expected)
+        with self.assertRaises(dispatcher.DispatchError) as error:
+            dispatcher.preflight_selector(Cdp(), 'SESSION', state, handle, 457)
+        self.assertEqual(error.exception.code, 'selector_not_found')
+        foreign = {'selected': 'PAGE2', 'owned': ['PAGE2'], 'observedLocators': [locator]}
+        with self.assertRaises(dispatcher.DispatchError) as error:
+            dispatcher.preflight_selector(Cdp(), 'SESSION', foreign, handle, 456)
+        self.assertEqual(error.exception.code, 'selector_not_found')
+        with self.assertRaises(dispatcher.DispatchError) as error:
+            dispatcher.preflight_selector(Cdp(backend=89), 'SESSION', state, handle, 456)
+        self.assertEqual(error.exception.code, 'selector_not_found')
+        with self.assertRaises(dispatcher.DispatchError) as error:
+            dispatcher.preflight_selector(Cdp(hit=99), 'SESSION', state, handle, 456)
+        self.assertEqual(error.exception.code, 'selector_not_interactable')
+        self.assertEqual(dispatcher.preflight_selector(Cdp(hit=89), 'SESSION', state, handle, 456)[0], 9)
+        for params in ({'document': 3}, {'changed_attr': True}):
+            with self.subTest(params=params), self.assertRaises(dispatcher.DispatchError) as error:
+                dispatcher.preflight_selector(Cdp(**params), 'SESSION', state, handle, 456)
+            self.assertEqual(error.exception.code, 'selector_not_found')
+
+    def test_observed_handles_are_v2_only_exact_and_not_css_fallbacks(self):
+        valid = 'otc-observed:' + 'a' * 32
+        payload = {**self.payload, 'runtimeProtocol': 2,
+                   'action': {'type': 'click', 'selector': valid}}
+        self.assertEqual(dispatcher.validate_payload(payload)['action']['selector'], valid)
+        for protocol, selector in ((None, valid), (2, 'otc-observed:bad'), (2, 'otc-observedx:' + 'a' * 32)):
+            candidate = {**payload, 'action': {'type': 'click', 'selector': selector}}
+            if protocol is None: candidate.pop('runtimeProtocol')
+            with self.subTest(protocol=protocol, selector=selector), self.assertRaises(dispatcher.DispatchError):
+                dispatcher.validate_payload(candidate)
+        first = dispatcher.locator_semantic_hash('link', 'a', 'Campaign', {'href': '/company-a?next=1'})
+        self.assertIsInstance(first, str)
+        self.assertNotEqual(first, dispatcher.locator_semantic_hash('link', 'a', 'Campaign', {'href': '/company-a?next=2'}))
+        self.assertNotEqual(first, dispatcher.locator_semantic_hash('link', 'a', 'Campaign', {'href': '/company-b?next=1'}))
+        self.assertNotEqual(dispatcher.locator_semantic_hash('button', 'button', 'Preview', {'formaction': '/save?draft=1'}),
+                            dispatcher.locator_semantic_hash('button', 'button', 'Preview', {'formaction': '/save?draft=2'}))
+        self.assertNotEqual(dispatcher.locator_semantic_hash('link', 'a', 'Campaign', {'href': '/company-a'}),
+                            dispatcher.locator_semantic_hash('link', 'a', 'Campaign', {'href': '/company-b'}))
+
+    def test_file_control_diagnostic_never_exports_value_and_uses_verified_unique_selector(self):
+        class Cdp:
+            def command(self, method, params=None, session=None):
+                if method == 'DOM.getDocument': return {'root': {'nodeId': 1}}
+                if method == 'DOM.querySelectorAll':
+                    if params['selector'] == 'input[type="file" i]': return {'nodeIds': [5]}
+                    if params['selector'] == 'input[type="file" i][id="assets"]': return {'nodeIds': [5]}
+                    return {'nodeIds': []}
+                if method == 'DOM.describeNode':
+                    return {'node': {'nodeName': 'INPUT', 'attributes': ['type', 'file', 'id', 'assets',
+                        'accept', '.pdf', 'multiple', '', 'value', 'C:\\private\\secret.pdf']}}
+                return {}
+        lines = dispatcher.file_input_observations(Cdp(), 'SESSION')
+        self.assertEqual(len(lines), 1)
+        self.assertIn('input[type="file" i][id="assets"]', lines[0])
+        self.assertIn("'multiple': True", lines[0])
+        self.assertNotIn('private', lines[0])
+        self.assertNotIn('secret.pdf', lines[0])
+
     def test_receipts_are_exact_session_fenced_private_and_symlink_safe(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -183,7 +388,7 @@ class DispatcherTests(unittest.TestCase):
                 dispatcher.snapshot(Cdp('about:blank', 'Body field'), 'SESSION', 'PAGE1')
         self.assertNotIn('sk_live_super_secret', result['visibleText'])
         self.assertNotIn('Ignored', result['visibleText'])
-        self.assertEqual(error.exception.code, 'destination_forbidden')
+        self.assertEqual(error.exception.code, 'destination_forbidden_populated_blank_blank_has_content')
 
     def test_private_login_password_type_remains_allowed_and_busy_ack_shape_is_unchanged(self):
         class Cdp:

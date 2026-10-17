@@ -46,7 +46,8 @@ class SnapshotNavigationOrderTests(unittest.TestCase):
             cdp = self.cdp(['about:blank', 'about:blank', final])
             with self.subTest(final=final), patch.object(dispatcher.socket, 'getaddrinfo', side_effect=lambda host, *a, **k: [(2, 1, 6, '', ('127.0.0.1' if host == '127.0.0.1' else '93.184.216.34', 443))]), self.assertRaises(dispatcher.DispatchError) as failure:
                 dispatcher.post_action_snapshot(cdp, self.state, True)
-            self.assertEqual(failure.exception.code, 'destination_forbidden')
+            expected = 'destination_forbidden_populated_blank_blank_has_content' if final == 'about:blank' else 'destination_forbidden_observed_main_nonpublic_address'
+            self.assertEqual(failure.exception.code, expected)
             self.assertEqual(cdp.methods.count('Accessibility.getFullAXTree'), 1)
 
 
