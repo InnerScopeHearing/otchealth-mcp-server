@@ -52,6 +52,7 @@ function validatedView(result: DaytonaViewerConnection, options: DaytonaViewerOp
   if (url.protocol !== 'https:' || url.port || url.username || url.password || url.hash || !new RegExp(`^${options.previewPort}-[a-z0-9-]+$`).test(label) || url.pathname !== options.viewerPath) throw new Error('invalid_viewer');
   const values: Record<string, readonly string[]> = { autoconnect: ['true', '1'], resize: ['scale', 'remote', 'off'], path: ['websockify'] };
   for (const [key, value] of url.searchParams) if (!values[key]?.includes(value) || url.searchParams.getAll(key).length !== 1) throw new Error('invalid_viewer');
+  url.searchParams.set('resize', 'scale');
   return { signed_url: url.href, expires_at: result.expires_at };
 }
 function deadlines(value: DaytonaViewerDeadlines, id: string, now: number): DaytonaViewerDeadlines {
