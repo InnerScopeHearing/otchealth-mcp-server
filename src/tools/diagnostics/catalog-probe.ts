@@ -66,6 +66,7 @@ export function registerCatalogProbe(server: McpServer, callerHash: CallerHashPr
           schema_omitted_reason: z.enum(['exact_tool_name_required', 'schema_too_large', 'schema_unavailable']).optional(),
         }).optional(),
         known_tools_present: z.record(z.boolean()),
+        known_tools_present_scope: z.literal('caller_surface'),
         request_context: z.object({
           caller_agent: z.string(),
           is_m365_static_auth: z.boolean(),
@@ -76,7 +77,7 @@ export function registerCatalogProbe(server: McpServer, callerHash: CallerHashPr
       handler: async ({ include_cto_workspace, discovery_query, discovery_limit, include_schema }) => {
         const registered = allTools().map((t) => t.name);
         const callerTools = callerSurfaceToolsFor(server);
-        const registeredSet = new Set(registered);
+        const callerToolNames = new Set(callerTools.map((tool) => tool.name));
         // Auth is derived ONLY from the server request context; input cannot pick a lane.
         const workspace = ctoWorkspaceForRequest(include_cto_workspace, currentCallerAgent(), registered);
         const probeNames = [
@@ -88,7 +89,7 @@ export function registerCatalogProbe(server: McpServer, callerHash: CallerHashPr
           'catalog_probe',
         ];
         const knownToolsPresent: Record<string, boolean> = {};
-        for (const n of probeNames) knownToolsPresent[n] = registeredSet.has(n);
+        for (const n of probeNames) knownToolsPresent[n] = callerToolNames.has(n);
 
         const data = {
           build_tag: BUILD_TAG,
@@ -125,6 +126,7 @@ export function registerCatalogProbe(server: McpServer, callerHash: CallerHashPr
             })(),
           }),
           known_tools_present: knownToolsPresent,
+          known_tools_present_scope: 'caller_surface',
           request_context: {
             caller_agent: currentCallerAgent(),
             is_m365_static_auth: isM365StaticAuth(),

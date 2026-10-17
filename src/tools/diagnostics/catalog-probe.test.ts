@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerCatalogProbe } from './catalog-probe.js';
 import { requestContext } from '../../server/request-context.js';
+import { recordTool } from '../../catalog/catalog.js';
 
 // Pins the 2026-07-26 diagnostic tool built to resolve the M365 Developer agent's live ambiguity:
 // is the M365 app not ingesting the new manifest, or is the auth-detection branch broken, or is
@@ -103,6 +104,20 @@ test('catalog_probe reports itself as present in the known_tools_present probe l
   registerCatalogProbe(server, () => 'caller-hash');
   const result = (await handlers.catalog_probe!({})) as { structuredContent: { result: { known_tools_present: Record<string, boolean> } } };
   assert.equal(result.structuredContent.result.known_tools_present['catalog_probe'], true);
+});
+
+test('known_tools_present is caller-surface scoped, not a global catalog false positive', async () => {
+  // Model a canonical tool present in the global registry but omitted from this server's tools/list.
+  recordTool({ name: 'github_repo_get', service: 'github', category: 'read', title: 'fixture',
+    description: 'fixture', readOnly: true });
+  const { server, handlers } = fakeServer();
+  registerCatalogProbe(server, () => 'caller-hash');
+  const result = (await handlers.catalog_probe!({})) as {
+    structuredContent: { result: { known_tools_present: Record<string, boolean>; known_tools_present_scope: string } };
+  };
+  assert.equal(result.structuredContent.result.known_tools_present['github_repo_get'], false);
+  assert.equal(result.structuredContent.result.known_tools_present['catalog_probe'], true);
+  assert.equal(result.structuredContent.result.known_tools_present_scope, 'caller_surface');
 });
 
 test('CTO workspace summary version matches the structured profile returned by the registered handler', async () => {
