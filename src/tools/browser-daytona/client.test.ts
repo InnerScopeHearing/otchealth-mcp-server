@@ -275,7 +275,12 @@ test('WeFunder type, select, and dialog input travel only through suppressed pri
         finalReceipt = { version: 1, ok: true, profileKey: wefunderBinding.profileKey, profilePath: wefunderBinding.profilePath, sessionId: wefunderMission.sessionId, result: { inputProcessed: true, actionType: publicPayload.actionType } };
         return Response.json({ cmdId: '12345678-1234-4234-8234-123456789abc' });
       }
-      if (url.endsWith('/logs')) return Response.json({ stdout: submitted ? JSON.stringify(ready) + '\n' + JSON.stringify(finalReceipt) + '\n' : JSON.stringify(ready) + '\n' });
+      if (url.endsWith('/logs')) {
+        const sdkVersion = new Headers(init.headers).get('x-daytona-sdk-version');
+        const output = submitted ? JSON.stringify(ready) + '\n' + JSON.stringify(finalReceipt) + '\n' : JSON.stringify(ready) + '\n';
+        // Legacy combined logs can be empty while the asynchronous command starts.
+        return sdkVersion === '0.224.1' ? Response.json({ output, stdout: output, stderr: '' }) : new Response('', { headers: { 'content-type': 'text/plain' } });
+      }
       if (url.endsWith('/input')) { submitted = JSON.parse(JSON.parse(String(init.body)).data); return Response.json({}); }
       return Response.json({ exitCode: submitted ? 0 : null });
     }

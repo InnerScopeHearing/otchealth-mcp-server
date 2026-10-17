@@ -89,7 +89,10 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
       if (typeof token !== 'string' || token.length < 1 || token.length > 8192 || /[\r\n]/.test(token)) return fail('daytona_credentials_unavailable');
       context.token = token;
     }
-    const response = await this.fetchImpl(url, { ...init, headers: { authorization: `Bearer ${context.token}`, 'content-type': 'application/json' }, signal: context.signal, redirect: 'error' });
+    const headers = new Headers(init.headers);
+    headers.set('authorization', `Bearer ${context.token}`);
+    headers.set('content-type', 'application/json');
+    const response = await this.fetchImpl(url, { ...init, headers, signal: context.signal, redirect: 'error' });
     context.remaining(); if (!response.ok) { await response.body?.cancel().catch(() => undefined); return fail('daytona_provider_unavailable'); }
     if (!response.body) return fail('daytona_provider_invalid');
     const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let total = 0;
@@ -166,7 +169,8 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     if (typeof launch.cmdId !== 'string' || !UUID.test(launch.cmdId)) return fail('daytona_runtime_invalid');
     const commandPath = `${root}/${encodeURIComponent(privateSessionId)}/command/${encodeURIComponent(launch.cmdId)}`;
     const readLogs = async (): Promise<string> => {
-      const logs = await this.json(context, `${commandPath}/logs`);
+      // Negotiate separated JSON logs; legacy SDK clients receive combined text.
+      const logs = await this.json(context, `${commandPath}/logs`, { headers: { 'X-Daytona-SDK-Version': '0.224.1' } });
       if (typeof logs.stdout !== 'string' || logs.stdout.length > ORDINARY_RESULT_CHARS) return fail('daytona_runtime_output_limit');
       return logs.stdout;
     };
