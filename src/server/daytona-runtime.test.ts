@@ -35,25 +35,27 @@ test('offline image acceptance validates compiled role-specific helper allowlist
   const start = script.indexOf(begin), finish = script.indexOf(end, start);
   assert.ok(start >= 0 && finish > start, 'accept-image must expose its exact lifecycle contract block');
   const contract = script.slice(start + begin.length, finish);
-  const verify = new Function(`${contract}; return assertLifecycleHelperContract;`)() as (text: string, legacy: string, wefunder: string, commonNext: string, wefunderNext: string, locator: string) => void;
+  const verify = new Function(`${contract}; return assertLifecycleHelperContract;`)() as (text: string, legacy: string, wefunder: string, commonNext: string, wefunderNext: string, retainedWeFunder: string, locator: string) => void;
   const compiled = await readFile(new URL('../../dist/tools/browser-daytona/lifecycle.js', import.meta.url), 'utf8');
   const legacy = 'b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51';
   const wefunder = '62ee69b6c51685248ee45c3c51a8abbc3386918a76fb57ede8a1da4dd77782d6';
   const commonNext = '46537a2e997d55e270e737f455d6b9c46eb48333a07e342a74f5c7ea38705075';
   const wefunderNext = 'd6c00bcb0047b761c0364fd3c3936be8f6687ce45a4f0b627a3429cfcff6dc1c';
+  const retainedWeFunder = '9c60da6657081918c707a8e0352d18e649cc9fb3614a37cbc30f40ff2a4ffe47';
   const helper = await readFile(new URL('../../tools/daytona-browser-runtime/role-browser-helper.py', import.meta.url));
   const locator = createHash('sha256').update(helper).digest('hex');
-  verify(compiled, legacy, wefunder, commonNext, wefunderNext, locator);
+  verify(compiled, legacy, wefunder, commonNext, wefunderNext, retainedWeFunder, locator);
   const correctSelection = "const helperHashes = binding.owner === 'wefunder-campaign-director' ? WEFUNDER_HELPER_SHA256_ALLOWLIST : HELPER_SHA256_ALLOWLIST;";
   const wrongRole = "const helperHashes = binding.owner === 'wefunder-campaign-director' ? HELPER_SHA256_ALLOWLIST : WEFUNDER_HELPER_SHA256_ALLOWLIST;";
   assert.notEqual(compiled.replace(correctSelection, wrongRole), compiled);
-  assert.throws(() => verify(compiled.replace(correctSelection, wrongRole), legacy, wefunder, commonNext, wefunderNext, locator), /helper role selection mismatch/);
+  assert.throws(() => verify(compiled.replace(correctSelection, wrongRole), legacy, wefunder, commonNext, wefunderNext, retainedWeFunder, locator), /helper role selection mismatch/);
   const arbitraryHash = 'a'.repeat(64);
-  assert.throws(() => verify(compiled.replace(locator, arbitraryHash), legacy, wefunder, commonNext, wefunderNext, locator), /locator helper pin mismatch/);
-  assert.throws(() => verify(compiled.replace('WEFUNDER_LOCATOR_HELPER_SHA256', 'REMOVED_LOCATOR_PIN'), legacy, wefunder, commonNext, wefunderNext, locator), /locator helper pin mismatch/);
-  assert.throws(() => verify(compiled.replace('WEFUNDER_LOCATOR_HELPER_SHA256];', 'REMOVED_LOCATOR_PIN];'), legacy, wefunder, commonNext, wefunderNext, locator), /WeFunder helper allowlist mismatch/);
-  assert.throws(() => verify(compiled.replace(commonNext, arbitraryHash), legacy, wefunder, commonNext, wefunderNext, locator), /common helper allowlist mismatch/);
-  assert.throws(() => verify(compiled.replace('hexdigest() in ${JSON.stringify(helperHashes)}', `hexdigest() == '${arbitraryHash}'`), legacy, wefunder, commonNext, wefunderNext, locator), /guard does not enforce/);
+  assert.throws(() => verify(compiled.replace(locator, arbitraryHash), legacy, wefunder, commonNext, wefunderNext, retainedWeFunder, locator), /locator helper pin mismatch/);
+  assert.throws(() => verify(compiled.replace('WEFUNDER_LOCATOR_HELPER_SHA256', 'REMOVED_LOCATOR_PIN'), legacy, wefunder, commonNext, wefunderNext, retainedWeFunder, locator), /locator helper pin mismatch/);
+  assert.throws(() => verify(compiled.replace('WEFUNDER_LOCATOR_HELPER_SHA256];', 'REMOVED_LOCATOR_PIN];'), legacy, wefunder, commonNext, wefunderNext, retainedWeFunder, locator), /WeFunder helper allowlist mismatch/);
+  assert.throws(() => verify(compiled.replace(`${wefunderNext}', '${retainedWeFunder}`, `${wefunderNext}', '${arbitraryHash}`), legacy, wefunder, commonNext, wefunderNext, retainedWeFunder, locator), /WeFunder helper allowlist mismatch/);
+  assert.throws(() => verify(compiled.replace(commonNext, arbitraryHash), legacy, wefunder, commonNext, wefunderNext, retainedWeFunder, locator), /common helper allowlist mismatch/);
+  assert.throws(() => verify(compiled.replace('hexdigest() in ${JSON.stringify(helperHashes)}', `hexdigest() == '${arbitraryHash}'`), legacy, wefunder, commonNext, wefunderNext, retainedWeFunder, locator), /guard does not enforce/);
 });
 
 test('seven-role map automatically enrolls watchdogs and rejects a role routed to another enrolled desktop before provider calls', async () => {

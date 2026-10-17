@@ -40,12 +40,36 @@ const ORDINARY_JSON_BYTES = 131072, ORDINARY_RESULT_CHARS = 100000;
 // capture commands receive this allowance; all other provider reads stay small.
 const CAPTURE_RESULT_CHARS = Math.ceil(4 * 1024 * 1024 / 3) * 4 + 16384;
 const CAPTURE_JSON_BYTES = CAPTURE_RESULT_CHARS + 16384;
+const DESTINATION_GUARD_FAILURE_CODES = new Set([
+  'destination_forbidden_requested_navigation_invalid_url',
+  'destination_forbidden_requested_navigation_scheme_or_credentials',
+  'destination_forbidden_requested_navigation_port',
+  'destination_forbidden_requested_navigation_dns_unavailable',
+  'destination_forbidden_requested_navigation_nonpublic_address',
+  'destination_forbidden_target_metadata_invalid_url',
+  'destination_forbidden_target_metadata_scheme_or_credentials',
+  'destination_forbidden_target_metadata_port',
+  'destination_forbidden_target_metadata_dns_unavailable',
+  'destination_forbidden_target_metadata_nonpublic_address',
+  'destination_forbidden_observed_main_invalid_url',
+  'destination_forbidden_observed_main_scheme_or_credentials',
+  'destination_forbidden_observed_main_port',
+  'destination_forbidden_observed_main_dns_unavailable',
+  'destination_forbidden_observed_main_nonpublic_address',
+  'destination_forbidden_observed_child_invalid_url',
+  'destination_forbidden_observed_child_scheme_or_credentials',
+  'destination_forbidden_observed_child_port',
+  'destination_forbidden_observed_child_dns_unavailable',
+  'destination_forbidden_observed_child_nonpublic_address',
+  'destination_forbidden_populated_blank_blank_has_content',
+]);
 const SAFE_DISPATCHER_FAILURE_CODES = new Set([
   'effect_unknown', 'target_operation_failed',
   'navigation_changed', 'navigation_failed', 'navigation_unavailable',
   'provider_action_failed', 'provider_connection_lost', 'provider_context_destroyed',
   'provider_document_pending', 'provider_protocol_error', 'provider_response_too_large', 'provider_timeout', 'destination_forbidden',
   'receipt_unavailable', 'runtime_not_ready', 'selector_not_found', 'selector_not_interactable',
+  ...DESTINATION_GUARD_FAILURE_CODES,
 ]);
 const fail = (code: string): never => { throw new DaytonaBrowserError(code); };
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : fail('daytona_provider_invalid');

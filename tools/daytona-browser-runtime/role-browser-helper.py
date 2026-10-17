@@ -31,12 +31,12 @@ ROLES={'cto','cfo','coo','cro','clo','developer','wefunder-campaign-director'}
 UUID=re.compile(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\Z')
 KEY=re.compile(r'[a-z0-9][a-z0-9_-]{0,95}\Z')
 PINS={
- 'browser-dispatcher.py':'f2f0b1dda4cb80a7178a5192e0aea1c8d1f72ac6715e225d153c56d43f918ee5',
+ 'browser-dispatcher.py':'e2c152c9a0d2d9432f496da09221ddcf5648390aa91492520436dd8084a50234',
  'browser_transfers.py':'94656ffae38bebfc3b6c14c406108bf99b02f821e46919e1f8df832746ab9e4a',
  'checkpoint-control.py':'d643d3799b810181ca7d9398d365de26f20365b67343a87fbc474a4953980046',
  'clamd.conf':'a1e8ecbb432ad2246c694cca4bf7ee8e55d6891382241e1a0ab9b7c7f548840f',
  'freshclam.conf':'b2447f0fde447f830c6636718a618e97684bd8c84fab489a5e301f55640506aa',
- 'mission-registry.py':'ad7639a1ebf5ea8d41476e93eb07e47af07f2693a93b9523ff2262fdb52ceba1',
+ 'mission-registry.py':'67ce78280b268b6ad7d46405c2d55cb8572d11acdbab9d461b1bea981fde622e',
  'mission_clipboard.py':'cac755d2f0ef0f459113981905bb75a8c9343c637f60076861985a1f1d00cde9',
  'probe.py':'3f6d9cca15b847c43e6394e99d1e13a6d406d67f32f8346fd8ca43af34459090',
  'runtime.py':'c46a839da60e9adeca30a78c2cf63414ee4e28f575d70622ba2328b091e60c95',

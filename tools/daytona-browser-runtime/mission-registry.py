@@ -12,6 +12,9 @@ import time
 UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z')
 HASH = re.compile(r'[0-9a-f]{64}\Z')
 TARGET = re.compile(r'[A-Za-z0-9_-]{1,256}\Z')
+OBSERVED_HANDLE = re.compile(r'otc-observed:[0-9a-f]{32}\Z')
+LOCATOR_ROLES = {'button', 'link', 'textbox', 'text field', 'textfield', 'searchbox', 'combobox'}
+LOCATOR_TAGS = {'button', 'a', 'input', 'textarea', 'select', 'div', 'span'}
 MAX_MISSIONS, MAX_TABS, MAX_TOTAL_TABS = 7, 4, 28
 # Seven64KiB UTF8 buffers can expand sixfold when JSON escapes controls.
 # Reserve that bounded representation plus target/ownership metadata, while
@@ -40,12 +43,31 @@ def validate_registry(value):
     sessions, principals, targets = set(), set(), set()
     for mission in value['missions']:
         required = {'sessionId', 'principalHash', 'selected', 'owned', 'uncertain'}
-        if not isinstance(mission, dict) or not required <= mission.keys() or not mission.keys() <= required | {'clipboardText'}: fail()
+        if not isinstance(mission, dict) or not required <= mission.keys() or not mission.keys() <= required | {'clipboardText', 'observedLocators'}: fail()
         if 'clipboardText' in mission:
             if not isinstance(mission['clipboardText'], str): fail()
             try: size = len(mission['clipboardText'].encode('utf8'))
             except UnicodeError: fail()
             if size > 65536: fail()
+        if 'observedLocators' in mission:
+            locators = mission['observedLocators']
+            if not isinstance(locators, list) or len(locators) > 20: fail()
+            seen_handles, seen_nodes = set(), set()
+            for locator in locators:
+                exact(locator, ('handle', 'target', 'frameId', 'loaderId', 'documentBackendNodeId', 'browserEpoch',
+                                'backendDOMNodeId', 'role', 'tag', 'nameHash'))
+                if (not isinstance(locator['handle'], str) or not OBSERVED_HANDLE.fullmatch(locator['handle'])
+                    or locator['handle'] in seen_handles
+                    or locator['target'] not in mission['owned']
+                    or not isinstance(locator['frameId'], str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,256}', locator['frameId'])
+                    or not isinstance(locator['loaderId'], str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,256}', locator['loaderId'])
+                    or not type(locator['documentBackendNodeId']) is int or not 1 <= locator['documentBackendNodeId'] <= 2 ** 31
+                    or not type(locator['browserEpoch']) is int or not 1 <= locator['browserEpoch'] <= 2 ** 31
+                    or not type(locator['backendDOMNodeId']) is int or not 1 <= locator['backendDOMNodeId'] <= 2 ** 31
+                    or locator['backendDOMNodeId'] in seen_nodes
+                    or locator['role'] not in LOCATOR_ROLES or locator['tag'] not in LOCATOR_TAGS
+                    or not isinstance(locator['nameHash'], str) or not HASH.fullmatch(locator['nameHash'])): fail()
+                seen_handles.add(locator['handle']); seen_nodes.add(locator['backendDOMNodeId'])
         owner({key: mission[key] for key in ('sessionId', 'principalHash')})
         if mission['sessionId'] in sessions or mission['principalHash'] in principals: fail()
         sessions.add(mission['sessionId']); principals.add(mission['principalHash'])

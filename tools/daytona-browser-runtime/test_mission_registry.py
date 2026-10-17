@@ -42,6 +42,26 @@ class RegistryTests(unittest.TestCase):
         for value in cases:
             with self.subTest(value=value), self.assertRaises(registry.RegistryError): registry.validate_registry(value)
 
+    def test_observed_locator_map_is_bounded_private_and_strict(self):
+        locator = {'handle': 'otc-observed:' + 'a' * 32, 'target': 'PAGE_A', 'frameId': 'FRAME',
+                   'loaderId': 'LOADER', 'documentBackendNodeId': 4, 'browserEpoch': 123, 'backendDOMNodeId': 77,
+                   'role': 'button', 'tag': 'button', 'nameHash': 'b' * 64}
+        value = state(); value['missions'][0]['observedLocators'] = [locator]
+        self.assertEqual(registry.validate_registry(value)['missions'][0]['observedLocators'], [locator])
+        invalid = []
+        changed = dict(value); changed['missions'] = [dict(value['missions'][0])]
+        changed['missions'][0]['observedLocators'] = [dict(locator, plaintextLabel='Preview')]; invalid.append(changed)
+        changed = dict(value); changed['missions'] = [dict(value['missions'][0])]
+        changed['missions'][0]['observedLocators'] = [dict(locator, target='PAGE_B')]; invalid.append(changed)
+        changed = dict(value); changed['missions'] = [dict(value['missions'][0])]
+        changed['missions'][0]['observedLocators'] = [dict(locator, nameHash='Preview')]; invalid.append(changed)
+        changed = dict(value); changed['missions'] = [dict(value['missions'][0])]
+        changed['missions'][0]['observedLocators'] = [dict(locator, backendDOMNodeId=0)]; invalid.append(changed)
+        changed = dict(value); changed['missions'] = [dict(value['missions'][0])]
+        changed['missions'][0]['observedLocators'] = [dict(locator) for _ in range(11)]; invalid.append(changed)
+        for candidate in invalid:
+            with self.subTest(candidate=candidate), self.assertRaises(registry.RegistryError): registry.validate_registry(candidate)
+
     def test_human_pause_blocks_every_mission_and_unknown_never_expires(self):
         value = state(); value['human'] = {'sessionId': A, 'principalHash': 'a' * 64}
         for session, principal in [(A, 'a' * 64), (B, 'b' * 64)]:

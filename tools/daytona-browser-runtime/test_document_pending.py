@@ -48,11 +48,13 @@ class DocumentPendingTests(unittest.TestCase):
         for url in ('', None, 'http://127.0.0.1/private', 'http://169.254.169.254/', 'file:///etc/passwd'):
             with self.subTest(url=url), self.assertRaises(dispatcher.DispatchError) as failure:
                 dispatcher.allow_url(url)
-            self.assertEqual(failure.exception.code, 'destination_forbidden')
+            reason = 'scheme_or_credentials' if isinstance(url, str) and url.startswith('file:') else ('nonpublic_address' if isinstance(url, str) and url.startswith('http') else 'invalid_url')
+            self.assertEqual(failure.exception.code, f'destination_forbidden_requested_navigation_{reason}')
         for url in (None, 'http://127.0.0.1/private'):
             with self.subTest(observed=url), self.assertRaises(dispatcher.DispatchError) as failure:
                 dispatcher.allow_observed_url(url)
-            self.assertEqual(failure.exception.code, 'destination_forbidden')
+            reason = 'nonpublic_address' if isinstance(url, str) and url.startswith('http') else 'invalid_url'
+            self.assertEqual(failure.exception.code, f'destination_forbidden_observed_main_{reason}')
         with self.assertRaises(dispatcher.DispatchError) as failure: dispatcher.allow_observed_url('')
         self.assertEqual(failure.exception.code, 'provider_document_pending')
 
