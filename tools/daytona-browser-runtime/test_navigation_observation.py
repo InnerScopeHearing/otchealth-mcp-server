@@ -28,6 +28,7 @@ class NavigationObservationTests(unittest.TestCase):
                 self.methods = (self.methods or []) + [method]
                 if method == 'Page.navigate' or method == 'Input.dispatchMouseEvent' and params.get('type') == 'mouseReleased': self.effect_count += 1; return {}
                 if method == 'DOM.getDocument': return {'root': {'nodeId': 1}}
+                if method == 'DOM.querySelectorAll': return {'nodeIds': [2]}
                 if method == 'DOM.querySelector': return {'nodeId': 2}
                 if method == 'DOM.getBoxModel': return {'model': {'content': [0, 0, 10, 0, 10, 10, 0, 10]}}
                 if method == 'Page.getFrameTree':

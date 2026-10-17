@@ -4,7 +4,7 @@ import type { BrowserFileBroker } from '../browser-cloud/file-broker.js';
 import type { BrowserFileTransferReceipt } from '../browser-cloud/provider-files.js';
 import type { TrustedBrowserBinaryValidator } from '../browser-cloud/binary-validation.js';
 import { validateCloudBrowserAction } from '../browser-cloud/actions.js';
-import { DaytonaBrowserError, DaytonaViewerNotMintedError, daytonaPhysicalProfileKey, type DaytonaBinding, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness } from './contract.js';
+import { DaytonaBeforeEffectError, DaytonaBrowserError, DaytonaViewerNotMintedError, daytonaPhysicalProfileKey, type DaytonaBinding, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness } from './contract.js';
 export type { DaytonaRuntimeReadiness } from './contract.js';
 import { assertDaytonaBinding, assertDaytonaMission } from './store.js';
 import { DaytonaTransferBridge, type DaytonaUploadDescriptor, type DaytonaDirectoryReceipt } from './transfer-bridge.js';
@@ -249,6 +249,14 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     const receipt = privateAction
       ? await this.privateInputWith(context, base, binding, sessionId!, principalHash!, payload, action as Extract<CloudBrowserAction, { type: 'type' | 'select' | 'dialog' }>)
       : await this.processWith(context, base, binding, command, timeoutMs, binaryCapture);
+    const selectorCodes = ['selector_not_found', 'selector_not_interactable'];
+    const selectorAckKeys = ['version', 'ok', 'code', 'beforeEffect', 'profileKey', 'sessionId', 'principalHash'];
+    if (op === 'execute' && runtimeProtocol === 2 && upload === undefined && sessionId !== undefined && principalHash !== undefined
+      && receipt.version === 1 && receipt.ok === false && selectorCodes.includes(String(receipt.code)) && receipt.beforeEffect === true
+      && receipt.profileKey === physicalKey && receipt.sessionId === sessionId && receipt.principalHash === principalHash
+      && Object.keys(receipt).length === selectorAckKeys.length && Object.keys(receipt).every(key => selectorAckKeys.includes(key))) {
+      throw new DaytonaBeforeEffectError(receipt.code as 'selector_not_found' | 'selector_not_interactable');
+    }
     // Only the V2 dispatcher promises these exact negative ACKs were emitted
     // before any effect. Nonzero exits and all other receipts stay unknown.
     if (runtimeProtocol === 2 && upload?.phase !== 'attach' && receipt.version === 1 && receipt.ok === false && receipt.beforeEffect === true && typeof receipt.code === 'string'

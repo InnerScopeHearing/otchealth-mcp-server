@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { DaytonaRoleLifecycleManager, RestDaytonaLifecyclePlatform, createConfiguredDaytonaRoleLifecycle, type LifecycleRecord, type LifecycleStore, type LifecyclePlatform } from './lifecycle.js';
 import type { DaytonaBinding } from './contract.js';
 
@@ -48,9 +49,12 @@ test('factory absent map has no effects; malformed map fails closed',()=>{
  assert.equal(createConfiguredDaytonaRoleLifecycle({env:{},resolveApiToken:async()=>{throw Error();}}),undefined);
  assert.throws(()=>createConfiguredDaytonaRoleLifecycle({env:{DAYTONA_AGENT_DESKTOP_TEMPLATES:'{}'},resolveApiToken:async()=>''}));
 });
-test('role command accepts only the reviewed old/new helper hashes by runtime family',()=>{
+test('role command accepts only the reviewed old/new helper hashes by runtime family',async()=>{
  const commonHashes=['b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51','46537a2e997d55e270e737f455d6b9c46eb48333a07e342a74f5c7ea38705075'];
  const wefunderHashes=['62ee69b6c51685248ee45c3c51a8abbc3386918a76fb57ede8a1da4dd77782d6','d6c00bcb0047b761c0364fd3c3936be8f6687ce45a4f0b627a3429cfcff6dc1c'];
+ const lifecycleSource=await readFile(new URL('./lifecycle.ts',import.meta.url),'utf8');
+ const locatorHash=lifecycleSource.match(/const WEFUNDER_LOCATOR_HELPER_SHA256='([a-f0-9]{64})';/)?.[1];
+ assert.ok(locatorHash,'explicit WeFunder locator helper hash is configured');
  const arbitrary='a'.repeat(64);
  const platform=new RestDaytonaLifecyclePlatform({tableName:'lifecycle',grantTable:'grants',region:'us-east-1',fetchImpl:fetch,resolveCredentials:async()=>null,
   apiBaseUrl:'https://api.daytona.com',organizationId:'501db94e-10ee-4bc8-9cca-23c793c67524',origins:['https://api.daytona.com'],helperSha256:arbitrary,resolveApiToken:async()=>''});
@@ -59,10 +63,12 @@ test('role command accepts only the reviewed old/new helper hashes by runtime fa
   const value=command({...binding,owner:role},'d'.repeat(8)+'-1111-4111-8111-111111111111','status');
   for(const hash of commonHashes)assert.ok(value.includes(hash),`${role} accepts reviewed hash ${hash}`);
   for(const hash of wefunderHashes)assert.equal(value.includes(hash),false,`${role} excludes WeFunder hash ${hash}`);
+  assert.equal(value.includes(locatorHash),false,`${role} excludes the WeFunder locator helper pin`);
   assert.equal(value.includes(arbitrary),false,'caller-supplied arbitrary hash is never embedded');
  }
  const value=command({...binding,owner:'wefunder-campaign-director'},'d'.repeat(8)+'-1111-4111-8111-111111111111','status');
  for(const hash of wefunderHashes)assert.ok(value.includes(hash),`WeFunder accepts reviewed hash ${hash}`);
+ assert.ok(value.includes(locatorHash),'WeFunder accepts the explicit locator helper pin');
  for(const hash of commonHashes)assert.equal(value.includes(hash),false,`WeFunder excludes common hash ${hash}`);
  assert.equal(value.includes(arbitrary),false,'caller-supplied arbitrary hash is never embedded');
 });

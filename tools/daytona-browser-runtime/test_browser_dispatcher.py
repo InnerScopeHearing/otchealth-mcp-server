@@ -100,6 +100,113 @@ class DispatcherTests(unittest.TestCase):
         with self.assertRaises(dispatcher.DispatchError): dispatcher.snapshot(cdp, 'SESSION', 'PAGE1')
         self.assertNotIn('Accessibility.getFullAXTree', cdp.methods)
 
+    def test_snapshot_reports_only_unique_visible_safe_editable_locators(self):
+        class Cdp:
+            def command(self, method, params=None, session=None):
+                if method == 'Page.getFrameTree': return {'frameTree': {'frame': {'url': 'https://example.com/editor'}}}
+                if method == 'Target.getTargetInfo': return {'targetInfo': {'title': 'Editor'}}
+                if method == 'DOM.getDocument': return {'root': {'nodeId': 1}}
+                if method == 'Accessibility.getFullAXTree': return {'nodes': [
+                    {'role': {'value': 'textbox'}, 'name': {'value': 'Subject'}, 'value': {'value': 'Spring review'}, 'backendDOMNodeId': 10},
+                    {'role': {'value': 'textbox'}, 'name': {'value': 'Hidden'}, 'value': {'value': 'hidden secret'}, 'backendDOMNodeId': 11},
+                    {'role': {'value': 'textbox'}, 'name': {'value': 'Readonly'}, 'value': {'value': 'readonly'}, 'backendDOMNodeId': 12},
+                ]}
+                if method == 'DOM.describeNode':
+                    attrs = {10: ['id', 'subject', 'type', 'text'], 11: ['id', 'hidden', 'type', 'text', 'hidden', ''], 12: ['id', 'readonly', 'type', 'text', 'readonly', '']}[params['backendNodeId']]
+                    return {'node': {'nodeName': 'INPUT', 'backendNodeId': params['backendNodeId'], 'attributes': attrs}}
+                if method == 'DOM.pushNodesByBackendIdsToFrontend': return {'nodeIds': [params['backendNodeIds'][0] + 100]}
+                if method == 'DOM.getBoxModel':
+                    return {} if params['nodeId'] == 111 else {'model': {'content': [0, 0, 10, 0, 10, 10, 0, 10]}}
+                if method == 'DOM.querySelectorAll':
+                    if params['selector'] == '[id="subject"]': return {'nodeIds': [110]}
+                    return {'nodeIds': []}
+                return {}
+        with patch.object(dispatcher, 'allow_url'):
+            result = dispatcher.snapshot(Cdp(), 'SESSION', 'PAGE1')
+        self.assertIn('selector=\'[id="subject"]\'', result['visibleText'])
+        self.assertIn('Spring review', result['visibleText'])
+        for forbidden in ('hidden secret', 'readonly', 'dont-show', 'value="Spring review"'):
+            self.assertNotIn(forbidden, result['visibleText'])
+
+    def test_type_preflight_rejects_duplicate_or_hidden_before_focus(self):
+        for matches, model in (([7, 8], {'model': {'content': [0, 0, 10, 0, 10, 10, 0, 10]}}),
+                               ([7], {})):
+            class Cdp:
+                def __init__(self): self.focused = False
+                def command(self, method, params=None, session=None):
+                    if method == 'DOM.getDocument': return {'root': {'nodeId': 1}}
+                    if method == 'DOM.querySelectorAll': return {'nodeIds': matches}
+                    if method == 'DOM.describeNode': return {'node': {'nodeName': 'INPUT', 'attributes': ['id', 'subject', 'type', 'text']}}
+                    if method == 'DOM.getContentQuads': return {'quads': [] if not model else [[0, 0, 10, 0, 10, 10, 0, 10]]}
+                    if method == 'DOM.focus': self.focused = True
+                    return {}
+            cdp = Cdp()
+            with self.assertRaises(dispatcher.DispatchError) as error:
+                dispatcher.preflight_editable(cdp, 'SESSION', '#subject')
+            self.assertIn(error.exception.code, ('selector_not_found', 'selector_not_interactable'))
+            self.assertFalse(cdp.focused)
+
+    def test_snapshot_discards_observation_when_main_frame_changes(self):
+        class Cdp:
+            def __init__(self): self.frames = 0
+            def command(self, method, params=None, session=None):
+                if method == 'Page.getFrameTree':
+                    self.frames += 1
+                    url = 'https://example.com/editor' if self.frames == 1 else 'https://example.com/other'
+                    return {'frameTree': {'frame': {'url': url}}}
+                if method == 'Accessibility.getFullAXTree': return {'nodes': [{'role': {'value': 'StaticText'}, 'name': {'value': 'stale'}}]}
+                if method == 'Target.getTargetInfo': return {'targetInfo': {'title': 'Editor'}}
+                return {}
+        with patch.object(dispatcher, 'allow_url'), self.assertRaises(dispatcher.DispatchError) as error:
+            dispatcher.snapshot(Cdp(), 'SESSION', 'PAGE1')
+        self.assertEqual(error.exception.code, 'navigation_changed')
+
+    def test_snapshot_omits_semantically_secret_controls_and_rejects_populated_blank(self):
+        class Cdp:
+            def __init__(self, url, label): self.url, self.label = url, label
+            def command(self, method, params=None, session=None):
+                if method == 'Page.getFrameTree': return {'frameTree': {'frame': {'url': self.url}}}
+                if method == 'Target.getTargetInfo': return {'targetInfo': {'title': 'Editor'}}
+                if method == 'Accessibility.getFullAXTree': return {'nodes': [
+                    {'role': {'value': 'textbox'}, 'name': {'value': self.label}, 'value': {'value': 'sk_live_super_secret'}, 'backendDOMNodeId': 20},
+                    {'role': {'value': 'textbox'}, 'ignored': True, 'name': {'value': 'Ignored'}, 'value': {'value': 'private'}, 'backendDOMNodeId': 21},
+                ]}
+                if method == 'DOM.getDocument': return {'root': {'nodeId': 1}}
+                if method == 'DOM.describeNode': return {'node': {'nodeName': 'INPUT', 'attributes': ['id', 'api-key' if self.label == 'API key' else 'body', 'type', 'text']}}
+                if method == 'DOM.pushNodesByBackendIdsToFrontend': return {'nodeIds': [120]}
+                if method == 'DOM.getBoxModel': return {'model': {'content': [0, 0, 10, 0, 10, 10, 0, 10]}}
+                if method == 'DOM.querySelectorAll': return {'nodeIds': []}
+                return {}
+        with patch.object(dispatcher, 'allow_url'):
+            result = dispatcher.snapshot(Cdp('https://example.com/editor', 'API key'), 'SESSION', 'PAGE1')
+            with self.assertRaises(dispatcher.DispatchError) as error:
+                dispatcher.snapshot(Cdp('about:blank', 'Body field'), 'SESSION', 'PAGE1')
+        self.assertNotIn('sk_live_super_secret', result['visibleText'])
+        self.assertNotIn('Ignored', result['visibleText'])
+        self.assertEqual(error.exception.code, 'destination_forbidden')
+
+    def test_private_login_password_type_remains_allowed_and_busy_ack_shape_is_unchanged(self):
+        class Cdp:
+            def command(self, method, params=None, session=None):
+                if method == 'DOM.getDocument': return {'root': {'nodeId': 1}}
+                if method == 'DOM.querySelectorAll': return {'nodeIds': [2]}
+                if method == 'DOM.describeNode': return {'node': {'nodeName': 'INPUT', 'attributes': ['type', 'password']}}
+                if method == 'DOM.getContentQuads': return {'quads': [[0, 0, 10, 0, 10, 10, 0, 10]]}
+                return {}
+        self.assertEqual(dispatcher.preflight_editable(Cdp(), 'SESSION', 'input[type=password]'), 2)
+        busy = dispatcher.private_input_response
+        nonce = 'c' * 32
+        payload = {**self.payload, 'runtimeProtocol': 2, 'action': {'type': 'type', 'selector': '#subject', 'text': 'x'}}
+        metadata = {key: value for key, value in payload.items() if key != 'action'}
+        metadata['actionType'] = 'type'
+        encoded = base64.urlsafe_b64encode(json.dumps(metadata).encode()).decode().rstrip('=')
+        line = json.dumps({'nonce': nonce, 'payload': payload}).encode() + b'\n'
+        ready = io.StringIO()
+        with patch.object(dispatcher, 'private_owner_preflight', return_value=True), \
+             patch.object(dispatcher, 'dispatch', side_effect=dispatcher.DispatchError('mission_busy', True)):
+            result = private_input_call(encoded, nonce, line, ready)
+        self.assertEqual(result, {'version': 1, 'ok': False, 'code': 'mission_busy', 'beforeEffect': True})
+
     def test_no_running_owned_chromium_is_not_runtime_ready(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(dispatcher.DispatchError) as error:
@@ -189,6 +296,27 @@ class DispatcherTests(unittest.TestCase):
         self.assertLessEqual(dispatched['timeoutMs'], payload['timeoutMs'])
         self.assertTrue(result['ok'])
         self.assertNotIn('do-not-log', json.dumps(result))
+
+    def test_private_input_only_emits_identity_bound_before_effect_for_locator_preflight(self):
+        nonce = 'b' * 32
+        payload = {**self.payload, 'runtimeProtocol': 2,
+                   'action': {'type': 'type', 'selector': '#subject', 'text': 'private'}}
+        metadata = {key: value for key, value in payload.items() if key != 'action'}
+        metadata['actionType'] = 'type'
+        encoded = base64.urlsafe_b64encode(json.dumps(metadata).encode()).decode().rstrip('=')
+        private = json.dumps({'nonce': nonce, 'payload': payload}).encode() + b'\n'
+        ready = io.StringIO()
+        with patch.object(dispatcher, 'private_owner_preflight', return_value=True), \
+             patch.object(dispatcher, 'dispatch', side_effect=dispatcher.DispatchError('selector_not_found', True)):
+            result = private_input_call(encoded, nonce, private, ready)
+        self.assertEqual(result, {'version': 1, 'ok': False, 'code': 'selector_not_found', 'beforeEffect': True,
+                                  'profileKey': payload['profileKey'], 'sessionId': payload['sessionId'],
+                                  'principalHash': payload['principalHash']})
+        ready = io.StringIO()
+        with patch.object(dispatcher, 'private_owner_preflight', return_value=True), \
+             patch.object(dispatcher, 'dispatch', side_effect=dispatcher.DispatchError('provider_action_failed')):
+            result = private_input_call(encoded, nonce, private, ready)
+        self.assertEqual(result, {'version': 1, 'ok': False, 'code': 'provider_action_failed'})
 
     def test_private_input_protocol_never_dispatches_bad_or_unowned_payload(self):
         nonce = 'b' * 32
@@ -549,7 +677,7 @@ class DispatcherTests(unittest.TestCase):
                 if method == 'Target.attachToTarget': return {'sessionId': 'ATTACHED'}
                 if method == 'Page.getFrameTree': return {'frameTree': {'frame': {'url': 'about:blank'}}}
                 if method == 'DOM.getDocument': return {'root': {'nodeId': 1}}
-                if method == 'DOM.querySelector': return {'nodeId': 2}
+                if method == 'DOM.querySelectorAll': return {'nodeIds': [2]}
                 if method == 'DOM.describeNode': return {'node': {'nodeName': 'SELECT', 'backendNodeId': 22, 'children': [
                     {'nodeName': 'OPTION', 'attributes': ['value', 'a'], 'children': [{'nodeValue': 'Alpha'}]},
                     {'nodeName': 'OPTION', 'attributes': ['value', 'b'], 'children': [{'nodeValue': 'Beta'}]}]}}

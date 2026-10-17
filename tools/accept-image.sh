@@ -50,7 +50,8 @@ timeout 90s docker run --rm --platform "$PLATFORM" --network none \
       const pprof = require("@datadog/pprof");
       if (typeof pprof.time?.start !== "function") throw Error("Datadog native profiler module did not load");
       // Dedicated browser image bytes: begin
-      const expectedRoleHelper = "62ee69b6c51685248ee45c3c51a8abbc3386918a76fb57ede8a1da4dd77782d6";
+      const expectedRoleHelper = "9c60da6657081918c707a8e0352d18e649cc9fb3614a37cbc30f40ff2a4ffe47";
+      const expectedLocatorHelperPin = "9c60da6657081918c707a8e0352d18e649cc9fb3614a37cbc30f40ff2a4ffe47";
       const expectedLegacyHelperPin = "b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51";
       const expectedCommonNextHelper = "46537a2e997d55e270e737f455d6b9c46eb48333a07e342a74f5c7ea38705075";
       const expectedWeFunderNextHelper = "d6c00bcb0047b761c0364fd3c3936be8f6687ce45a4f0b627a3429cfcff6dc1c";
@@ -60,23 +61,26 @@ timeout 90s docker run --rm --platform "$PLATFORM" --network none \
       const compiledLifecycleBytes = fs.readFileSync("/app/dist/tools/browser-daytona/lifecycle.js");
       const compiledLifecycleText = compiledLifecycleBytes.toString("utf8");
       // lifecycle acceptance contract begin
-      function assertLifecycleHelperContract(text, expectedLegacy, expectedWeFunder, expectedCommonNext, expectedWeFunderNext) {
+      function assertLifecycleHelperContract(text, expectedLegacy, expectedWeFunder, expectedCommonNext, expectedWeFunderNext, expectedLocator) {
         const normalized = text.replace(/\s+/g, " ");
         const pin = name => [...text.matchAll(new RegExp(`^const ${name} = ([\"\\x27])([a-f0-9]{64})\\1;$`, "gm"))];
         const legacyPins = pin("HELPER_SHA256"), wefunderPins = pin("WEFUNDER_HELPER_SHA256");
         if (legacyPins.length !== 1 || legacyPins[0][2] !== expectedLegacy) throw Error("compiled lifecycle legacy helper pin mismatch");
         if (wefunderPins.length !== 1 || wefunderPins[0][2] !== expectedWeFunder) throw Error("compiled lifecycle WeFunder helper pin mismatch");
+        const locatorPins = pin("WEFUNDER_LOCATOR_HELPER_SHA256");
+        if (locatorPins.length !== 1 || locatorPins[0][2] !== expectedLocator) throw Error("compiled lifecycle WeFunder locator helper pin mismatch");
         const exactDeclaration = (name, expected) => {
           const rows = [...text.matchAll(new RegExp(`^const ${name} = \\[([^\\]]*)\\];$`, "gm"))];
           return rows.length === 1 && rows[0][0].replace(/\s+/g, " ") === expected;
         };
         if (!exactDeclaration("HELPER_SHA256_ALLOWLIST", `const HELPER_SHA256_ALLOWLIST = [HELPER_SHA256, \x27${expectedCommonNext}\x27];`)) throw Error("compiled lifecycle common helper allowlist mismatch");
-        if (!exactDeclaration("WEFUNDER_HELPER_SHA256_ALLOWLIST", `const WEFUNDER_HELPER_SHA256_ALLOWLIST = [WEFUNDER_HELPER_SHA256, \x27${expectedWeFunderNext}\x27];`)) throw Error("compiled lifecycle WeFunder helper allowlist mismatch");
+        if (!exactDeclaration("WEFUNDER_HELPER_SHA256_ALLOWLIST", `const WEFUNDER_HELPER_SHA256_ALLOWLIST = [WEFUNDER_HELPER_SHA256, \x27${expectedWeFunderNext}\x27, WEFUNDER_LOCATOR_HELPER_SHA256];`)) throw Error("compiled lifecycle WeFunder helper allowlist mismatch");
         if (!normalized.includes("const helperHashes = binding.owner === \x27wefunder-campaign-director\x27 ? WEFUNDER_HELPER_SHA256_ALLOWLIST : HELPER_SHA256_ALLOWLIST;")) throw Error("compiled lifecycle helper role selection mismatch");
         if (!/const guard = `[^`]*hexdigest\(\) in \$\{JSON\.stringify\(helperHashes\)\};[^`]*`/.test(text)) throw Error("compiled lifecycle helper guard does not enforce the selected allowlist");
       }
       // lifecycle acceptance contract end
-      assertLifecycleHelperContract(compiledLifecycleText, expectedLegacyHelperPin, expectedRoleHelper, expectedCommonNextHelper, expectedWeFunderNextHelper);
+      if (expectedRoleHelper !== expectedLocatorHelperPin) throw Error("packaged role helper pin differs from WeFunder locator lifecycle pin");
+      assertLifecycleHelperContract(compiledLifecycleText, expectedLegacyHelperPin, "62ee69b6c51685248ee45c3c51a8abbc3386918a76fb57ede8a1da4dd77782d6", expectedCommonNextHelper, expectedWeFunderNextHelper, expectedLocatorHelperPin);
       const legacyHelperPins = [...compiledLifecycleText.matchAll(/^const HELPER_SHA256 = (["\x27])([a-f0-9]{64})\1;$/gm)];
       const wefunderHelperPins = [...compiledLifecycleText.matchAll(/^const WEFUNDER_HELPER_SHA256 = (["\x27])([a-f0-9]{64})\1;$/gm)];
       console.log(JSON.stringify({role_helper_sha256:roleHelperDigest, compiled_lifecycle_sha256:createHash("sha256").update(compiledLifecycleBytes).digest("hex"), compiled_helper_pin:legacyHelperPins[0][2], compiled_wefunder_helper_pin:wefunderHelperPins[0][2], provider_calls:0, network:"disabled"}));

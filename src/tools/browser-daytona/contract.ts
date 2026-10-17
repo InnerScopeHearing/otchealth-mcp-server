@@ -109,6 +109,13 @@ export class DaytonaBrowserError extends Error {
   }
 }
 
+/** Trusted exact V2 negative ACK proving a selector failure preceded all effects. */
+export class DaytonaBeforeEffectError extends DaytonaBrowserError {
+  constructor(readonly selectorCode: 'selector_not_found' | 'selector_not_interactable') {
+    super(selectorCode); this.name = 'DaytonaBeforeEffectError';
+  }
+}
+
 /** Trusted negative receipt: deadline elapsed BEFORE invoking any viewer port. */
 export class DaytonaViewerNotMintedError extends DaytonaBrowserError {
   constructor() { super('viewer_deadline_expired_before_mint'); }
