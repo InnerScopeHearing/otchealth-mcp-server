@@ -71,23 +71,66 @@ test('mission status rejects ownership and lookup failures without another backe
   assert.equal(unknown.structuredContent?.result?.error, 'daytona_store_unavailable');
 });
 
-test('WeFunder desktop preset creates and explicitly selects the editor before issuing human control', async () => {
+test('WeFunder desktop preset navigates the owned mission to the editor and validates the observation before human control', async () => {
   const f = fixture();
   Object.assign(f.runtime.browser, { execute: async (...args: unknown[]) => {
     f.calls.push(['execute', ...args]);
-    return (args[2] as { type: string }).type === 'tab_create' ? { completed: true, createdTargetId: 'A'.repeat(32) } : { completed: true, selectedTargetId: 'A'.repeat(32) };
+    assert.deepEqual(args[2], { type: 'navigate', url: 'https://wefunder.com/otchealth/editor/header' });
+    return { url: 'https://wefunder.com/otchealth/editor/header', title: 'Just a moment...', visibleText: 'Verify you are human' };
   } });
   const result = await f.call('browser_cloud_session_start', { profile_id: 'daytona-desktop:wefunder', max_seconds: 900, action_budget: 40, dry_run: false }, 'wefunder-campaign-director');
   assert.equal(result.structuredContent?.result?.sessionId, SESSION);
   assert.equal(result.structuredContent?.result?.profile_id, 'daytona-desktop:wefunder');
-  assert.deepEqual(f.calls.map(c => c[0]), ['get', 'discover', 'readiness', 'start', 'execute', 'execute', 'issue']);
+  assert.deepEqual(f.calls.map(c => c[0]), ['get', 'discover', 'readiness', 'start', 'execute', 'issue']);
   const actions = f.calls.filter(c => c[0] === 'execute');
-  assert.deepEqual(actions.map(c => c[3]), [{ type: 'tab_create', url: 'https://wefunder.com/otchealth/editor/header' }, { type: 'tab_select', targetId: 'A'.repeat(32) }]);
+  assert.deepEqual(actions.map(c => c[3]), [{ type: 'navigate', url: 'https://wefunder.com/otchealth/editor/header' }]);
+  assert.equal(actions[0]![1], 'wefunder-campaign-director'); assert.equal(actions[0]![2], SESSION); assert.equal(actions[0]![5], websitePrincipalHash('wefunder-campaign-director', 'connection:own-connection'));
   assert.equal(f.calls.some(c => c[0] === 'aws-start'), false);
-  assert.equal(f.calls.find(c => c[0] === 'issue')?.[5], 'wefunder');
+  const issue = f.calls.find(c => c[0] === 'issue')!;
+  assert.deepEqual(issue.slice(1, 4), ['wefunder-campaign-director', SESSION, websitePrincipalHash('wefunder-campaign-director', 'connection:own-connection')]);
+  assert.equal(issue[5], 'wefunder');
   const other = fixture();
   assert.equal((await other.call('browser_cloud_session_start', { profile_id: 'daytona-desktop:wefunder', max_seconds: 900, dry_run: false }, 'cro')).structuredContent?.result?.error, 'owner_forbidden');
   assert.deepEqual(other.calls, []);
+});
+
+test('WeFunder human control is not issued for missing, foreign, malformed, or unbounded observations', async () => {
+  for (const observation of [
+    null,
+    { url: 'http://wefunder.com/otchealth/editor/header', title: 'Campaign editor', visibleText: 'Editor' },
+    { url: 'https://evil.example/otchealth/editor/header', title: 'Campaign editor', visibleText: 'Editor' },
+    { url: 'https://wefunder.com.attacker.example/otchealth/editor/header', title: 'Campaign editor', visibleText: 'Editor' },
+    { url: 'https://user@wefunder.com/otchealth/editor/header', title: 'Campaign editor', visibleText: 'Editor' },
+    { url: 'https://wefunder.com:444/otchealth/editor/header', title: 'Campaign editor', visibleText: 'Editor' },
+    { url: 'not a URL', title: 'Campaign editor', visibleText: 'Editor' },
+    { url: 'https://wefunder.com/otchealth/editor/header', title: 'x'.repeat(1025), visibleText: 'Editor' },
+    { url: 'https://wefunder.com/otchealth/editor/header', title: 42, visibleText: 'Editor' },
+    { url: 'https://wefunder.com/otchealth/editor/header', title: 'Campaign editor', visibleText: 'x'.repeat(20001) },
+    { url: 'https://wefunder.com/otchealth/editor/header', visibleText: 'Editor' },
+    { url: 'https://wefunder.com/otchealth/editor/header', title: 'Campaign editor' },
+  ]) {
+    const f = fixture();
+    Object.assign(f.runtime.browser, { execute: async (...args: unknown[]) => { f.calls.push(['execute', ...args]); return observation; } });
+    const result = await f.call('browser_cloud_session_start', { profile_id: 'daytona-desktop:wefunder', max_seconds: 900, dry_run: false }, 'wefunder-campaign-director');
+    assert.equal(result.structuredContent?.result?.error, 'daytona_handoff_unavailable');
+    assert.equal(result.structuredContent?.result?.recovery_required, true);
+    assert.equal(result.structuredContent?.result?.sessionId, SESSION);
+    assert.equal(f.calls.filter(c => c[0] === 'execute').length, 1);
+    assert.equal(f.calls.some(c => c[0] === 'issue' || c[0] === 'aws-start'), false);
+  }
+});
+
+test('WeFunder handoff accepts bounded same-origin redirects and origin-only URL suppression', async () => {
+  for (const url of ['https://wefunder.com/otchealth/editor/login', 'https://wefunder.com']) {
+    const f = fixture();
+    Object.assign(f.runtime.browser, { execute: async (...args: unknown[]) => {
+      f.calls.push(['execute', ...args]); return { url, title: null, visibleText: '' };
+    } });
+    const result = await f.call('browser_cloud_session_start', { profile_id: 'daytona-desktop:wefunder', max_seconds: 900, dry_run: false }, 'wefunder-campaign-director');
+    assert.equal(result.structuredContent?.result?.sessionId, SESSION);
+    assert.equal(f.calls.filter(c => c[0] === 'execute').length, 1);
+    assert.equal(f.calls.filter(c => c[0] === 'issue').length, 1);
+  }
 });
 
 test('desktop preparation failure returns its exact mission for reconciliation without a duplicate or viewer', async () => {
@@ -98,6 +141,7 @@ test('desktop preparation failure returns its exact mission for reconciliation w
   assert.equal(result.structuredContent?.result?.recovery_required, true);
   assert.equal(f.calls.some(c => c[0] === 'issue' || c[0] === 'aws-start'), false);
   assert.equal(f.calls.filter(c => c[0] === 'start').length, 1);
+  assert.equal(f.calls.filter(c => c[0] === 'execute').length, 1);
 });
 
 test('consolidated company start refuses a missing final V2 receipt or unknown wake without fallback', async () => {

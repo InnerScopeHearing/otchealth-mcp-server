@@ -616,11 +616,21 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
             const started = await desktop.browser.start(ctx.callerAgent, profile.profileId, input.max_seconds, input.action_budget, principal);
             try {
               if (wefunderDesktop) {
-                const tab = await desktop.browser.execute(ctx.callerAgent, started.sessionId, { type: 'tab_create', url: 'https://wefunder.com/otchealth/editor/header' }, 20, principal);
-                const targetId = tab && typeof tab === 'object' && 'createdTargetId' in tab ? tab.createdTargetId : undefined;
-                if (typeof targetId !== 'string' || !/^[A-Fa-f0-9]{32}$/.test(targetId)) throw new DaytonaBrowserError('daytona_target_unconfirmed');
-                const selected = await desktop.browser.execute(ctx.callerAgent, started.sessionId, { type: 'tab_select', targetId }, 20, principal);
-                if (!selected || typeof selected !== 'object' || !('selectedTargetId' in selected) || selected.selectedTargetId !== targetId) throw new DaytonaBrowserError('daytona_target_unconfirmed');
+                const editorUrl = 'https://wefunder.com/otchealth/editor/header';
+                const prepared = await desktop.browser.execute(ctx.callerAgent, started.sessionId, { type: 'navigate', url: editorUrl }, 20, principal);
+                const observation = prepared && typeof prepared === 'object' && !Array.isArray(prepared)
+                  ? prepared as { url?: unknown; title?: unknown; visibleText?: unknown }
+                  : undefined;
+                let observedUrl: URL | undefined;
+                if (observation && typeof observation.url === 'string' && observation.url.length <= 2048) {
+                  try { observedUrl = new URL(observation.url); } catch { /* rejected below */ }
+                }
+                if (!observation || !observedUrl || observedUrl.protocol !== 'https:' || observedUrl.origin !== 'https://wefunder.com'
+                  || observedUrl.username || observedUrl.password || observedUrl.port
+                  || !(observation.title === null || typeof observation.title === 'string' && observation.title.length <= 1024)
+                  || typeof observation.visibleText !== 'string' || observation.visibleText.length > 20000) {
+                  throw new DaytonaBrowserError('daytona_handoff_unavailable');
+                }
               }
               const handoff = wefunderDesktop
                 ? await desktop.viewers.issue(ctx.callerAgent, started.sessionId, principal, Math.min(300, input.max_seconds), 'wefunder')

@@ -44,7 +44,7 @@ const SAFE_DISPATCHER_FAILURE_CODES = new Set([
   'effect_unknown', 'target_operation_failed',
   'navigation_changed', 'navigation_failed', 'navigation_unavailable',
   'provider_action_failed', 'provider_connection_lost', 'provider_context_destroyed',
-  'provider_document_pending', 'provider_protocol_error', 'provider_response_too_large', 'provider_timeout',
+  'provider_document_pending', 'provider_protocol_error', 'provider_response_too_large', 'provider_timeout', 'destination_forbidden',
   'receipt_unavailable', 'runtime_not_ready', 'selector_not_found', 'selector_not_interactable',
 ]);
 const fail = (code: string): never => { throw new DaytonaBrowserError(code); };
