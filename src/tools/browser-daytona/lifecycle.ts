@@ -11,6 +11,8 @@ const MASTER='/otchealth/integrations/daytona/company-keyring-unlock-secret';
 const HELPER='/opt/otchealth-browser/role-browser-helper.py';
 const HELPER_SHA256='b99a41492cdfe17f410c55ffd442cbb26a839299e200d669663749b6b57a8e51';
 const WEFUNDER_HELPER_SHA256='62ee69b6c51685248ee45c3c51a8abbc3386918a76fb57ede8a1da4dd77782d6';
+const HELPER_SHA256_ALLOWLIST=[HELPER_SHA256,'46537a2e997d55e270e737f455d6b9c46eb48333a07e342a74f5c7ea38705075'] as const;
+const WEFUNDER_HELPER_SHA256_ALLOWLIST=[WEFUNDER_HELPER_SHA256,'d6c00bcb0047b761c0364fd3c3936be8f6687ce45a4f0b627a3429cfcff6dc1c'] as const;
 const IDLE=600000, GRACE=180000, MONTHLY_WEIGHTED_MS=3100*3600000;
 type Roles=Readonly<Record<string,{sandboxId:string;readinessReceiptSha256:string}>>;
 type Launch={sessionId:string;commandId:string};
@@ -184,9 +186,9 @@ export class RestDaytonaLifecyclePlatform implements LifecyclePlatform {
  private async toolbox(binding:DaytonaBinding):Promise<string>{const proxy=await this.request(this.api(binding,'/toolbox-proxy-url'));if(typeof proxy.url!=='string')return fail();const url=trustedUrl(proxy.url);if(!this.origins.has(url.origin))return fail('daytona_toolbox_origin_forbidden');return `${url.href.replace(/\/+$/,'')}/${binding.sandboxId}`;}
  private command(binding:DaytonaBinding,operationId:string,op:string):string{
   const payload=Buffer.from(JSON.stringify({version:1,op,role:binding.owner,sandboxId:binding.sandboxId,profileKey:daytonaPhysicalProfileKey(binding),operationId})).toString('base64url');
-  const helperSha256=binding.owner==='wefunder-campaign-director'?WEFUNDER_HELPER_SHA256:this.options.helperSha256;
+  const helperHashes=binding.owner==='wefunder-campaign-director'?WEFUNDER_HELPER_SHA256_ALLOWLIST:HELPER_SHA256_ALLOWLIST;
   // Hash the installed helper BEFORE executing it, using fixed system Python -I.
-  const guard=`import hashlib,os,stat; p='${HELPER}'; f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW); s=os.fstat(f); assert stat.S_ISREG(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==493; assert hashlib.sha256(os.read(f,131072)).hexdigest()=='${helperSha256}'; os.close(f); os.execv('/usr/bin/python3',['python3','-I','-B',p,'--payload','${payload}'])`;
+  const guard=`import hashlib,os,stat; p='${HELPER}'; f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW); s=os.fstat(f); assert stat.S_ISREG(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==493; assert hashlib.sha256(os.read(f,131072)).hexdigest() in ${JSON.stringify(helperHashes)}; os.close(f); os.execv('/usr/bin/python3',['python3','-I','-B',p,'--payload','${payload}'])`;
   return `sudo -n /usr/bin/python3 -I -B -c ${shell(guard)}`;
  }
  private async execute(base:string,command:string,timeout=15):Promise<Record<string,unknown>>{
@@ -264,7 +266,7 @@ export function createConfiguredDaytonaRoleLifecycle(options:{env?:NodeJS.Proces
   for(const role of ROLES){const item=object(agents[role]);if(Object.keys(item).sort().join(',')!=='readinessReceiptSha256,sandboxId'||typeof item.sandboxId!=='string'||!UUID.test(item.sandboxId)||typeof item.readinessReceiptSha256!=='string'||!HASH.test(item.readinessReceiptSha256))return fail('daytona_role_configuration_invalid');roles[role]={sandboxId:item.sandboxId,readinessReceiptSha256:item.readinessReceiptSha256};}
   if(new Set(Object.values(roles).map(role=>role.sandboxId)).size!==7)return fail('daytona_role_configuration_invalid');
   const tableName=env.DAYTONA_BROWSER_DDB_TABLE??env.CLOUD_BROWSER_DDB_TABLE??'',grantTable=env.DAYTONA_VIEWER_GRANT_DDB_TABLE??tableName,region=env.AWS_REGION??'us-east-1';
-  const helperSha256=HELPER_SHA256;if(env.DAYTONA_ROLE_LIFECYCLE_HELPER_SHA256!==undefined&&env.DAYTONA_ROLE_LIFECYCLE_HELPER_SHA256!==helperSha256||!/^[-A-Za-z0-9_.]{3,255}$/.test(tableName)||!/^[-A-Za-z0-9_.]{3,255}$/.test(grantTable)||region!=='us-east-1'||env.DAYTONA_BROWSER_ORGANIZATION_ID!=='501db94e-10ee-4bc8-9cca-23c793c67524')return fail('daytona_role_configuration_invalid');
+  const helperSha256=HELPER_SHA256;if(env.DAYTONA_ROLE_LIFECYCLE_HELPER_SHA256!==undefined&&!HELPER_SHA256_ALLOWLIST.includes(env.DAYTONA_ROLE_LIFECYCLE_HELPER_SHA256 as typeof HELPER_SHA256_ALLOWLIST[number])||!/^[-A-Za-z0-9_.]{3,255}$/.test(tableName)||!/^[-A-Za-z0-9_.]{3,255}$/.test(grantTable)||region!=='us-east-1'||env.DAYTONA_BROWSER_ORGANIZATION_ID!=='501db94e-10ee-4bc8-9cca-23c793c67524')return fail('daytona_role_configuration_invalid');
   const originsValue:unknown=JSON.parse(env.DAYTONA_BROWSER_TOOLBOX_ALLOWED_ORIGINS??'null');if(!Array.isArray(originsValue)||!originsValue.length||originsValue.length>4||!originsValue.every(value=>typeof value==='string'&&trustedUrl(value).origin===value))return fail('daytona_role_configuration_invalid');
   const shared={tableName,grantTable,region,fetchImpl:options.fetchImpl??fetch,resolveCredentials:options.resolveCredentials??resolveAwsCredentials};
   return new DaytonaRoleLifecycleManager({roles,store:new DynamoDaytonaLifecycleStore(shared),platform:new RestDaytonaLifecyclePlatform({...shared,apiBaseUrl:env.DAYTONA_BROWSER_API_BASE_URL??'',organizationId:env.DAYTONA_BROWSER_ORGANIZATION_ID,origins:originsValue as string[],helperSha256,resolveApiToken:options.resolveApiToken})});
