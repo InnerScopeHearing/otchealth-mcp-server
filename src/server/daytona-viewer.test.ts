@@ -245,6 +245,79 @@ test('Daytona blocked cookies prevent prepare and exchange while keeping an acce
   } finally { await app.close(); }
 });
 
+test('a pending token prepare switches to owner-bound selector status instead of offering bearer replay', async () => {
+  const cases = [
+    { result: { status: 'saved', opening_expires_at: OPENING, mission_expires_at: MISSION, cleanup_required: true }, expected: 'saved' },
+    { result: { status: 'saved', opening_expires_at: OPENING, mission_expires_at: MISSION }, expected: 'saved-clean' },
+    { result: { status: 'pending', opening_expires_at: OPENING, mission_expires_at: MISSION, reason: 'operation_pending' }, expected: 'pending' },
+    { result: { status: 'pending', opening_expires_at: OPENING, mission_expires_at: MISSION, reason: 'operation_pending' }, expected: 'pending', viaBootstrapRetry: true },
+    { result: { status: 'expired', opening_expires_at: OPENING, mission_expires_at: MISSION }, expected: 'expired' },
+    { response: { ok: false, status: 409, body: { reason: 'recovery_state_missing' } }, expected: 'foreign-proof' },
+    { response: { ok: false, status: 503, body: {} }, expected: 'status-unavailable' },
+  ];
+  for (const statusCase of cases) {
+    const app = appWith();
+    try {
+      const html = await app.inject('/browser/daytona'), script = html.body.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1];
+      assert.ok(script);
+      const requests: { url: string; body: Record<string, unknown> }[] = [], nodes = new Map<string, Record<string, unknown>>(), handlers = new Map<string, () => Promise<void>>();
+      const PageDate = class extends Date { static now() { return NOW; } };
+      for (const id of ['status', 'deadlines', 'targetHeading', 'targetInstructions', 'viewer', 'done', 'cancel', 'recover', 'renew', 'open', 'bootstrap', 'reconcile']) nodes.set(id, { textContent: '', src: '', hidden: true, disabled: true, focus: () => {}, addEventListener: (event: string, fn: () => Promise<void>) => handlers.set(`${id}:${event}`, fn) });
+      runInNewContext(script, {
+        window: { location: { hash: `#token=${TOKEN}`, search: '', pathname: '/browser/daytona' } }, history: { replaceState: () => {} },
+        URLSearchParams, URL, Date: PageDate, TextEncoder, AbortSignal: { timeout: () => ({}) },
+        crypto: { subtle: { digest: async (_: string, data: Uint8Array) => Uint8Array.from(createHash('sha256').update(data).digest()) } },
+        setTimeout: () => 0, clearTimeout: () => {}, document: { getElementById: (id: string) => nodes.get(id) },
+        sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+        fetch: async (url: string, init: { body: string }) => {
+          const body = JSON.parse(init.body); requests.push({ url, body });
+          if (url.endsWith('/bootstrap')) return { ok: true, status: 200, json: async () => ({ ready: requests.filter(value => value.url.endsWith('/bootstrap')).length > (statusCase.viaBootstrapRetry ? 2 : 1) }) };
+          if (url.endsWith('/prepare')) return { ok: false, status: 409, json: async () => ({ reason: 'operation_pending', correlation_id: 'f0000000-0000-4000-8000-000000000001' }) };
+          if (url.endsWith('/status')) return statusCase.response
+            ? { ok: statusCase.response.ok, status: statusCase.response.status, json: async () => statusCase.response.body }
+            : { ok: true, status: 200, json: async () => statusCase.result };
+          throw new Error(`unexpected request: ${url}`);
+        },
+      });
+      for (let i = 0; i < 30 && (statusCase.viaBootstrapRetry ? nodes.get('bootstrap')!.hidden : requests.length < 4); i++) await new Promise<void>(resolve => setImmediate(resolve));
+      if (statusCase.viaBootstrapRetry) {
+        assert.equal(requests.length, 2, 'initial cookie failure does not attempt prepare');
+        await handlers.get('bootstrap:click')!();
+      }
+      for (let i = 0; i < 30 && requests.length < (statusCase.viaBootstrapRetry ? 5 : 4); i++) await new Promise<void>(resolve => setImmediate(resolve));
+      const expectedRequests = statusCase.viaBootstrapRetry ? ['/browser/daytona/bootstrap', '/browser/daytona/bootstrap', '/browser/daytona/bootstrap', '/browser/daytona/prepare', '/browser/daytona/status'] : ['/browser/daytona/bootstrap', '/browser/daytona/bootstrap', '/browser/daytona/prepare', '/browser/daytona/status'];
+      assert.deepEqual(requests.map(value => value.url), expectedRequests);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.deepEqual(requests.at(-1)!.body, { handoff_id: ID }, 'status uses selector only, not bearer token');
+      assert.equal(nodes.get('bootstrap')!.hidden, true);
+      assert.ok(nodes.get('viewer')!.src === '' || nodes.get('viewer')!.src === 'about:blank');
+      assert.equal(nodes.get('done')!.disabled, true);
+      if (statusCase.expected === 'saved') {
+        assert.equal(nodes.get('reconcile')!.hidden, false);
+        assert.equal(nodes.get('recover')!.hidden, true);
+        assert.equal(nodes.get('status')!.textContent, 'The saved handoff is confirmed. Select Confirm saved handoff release to finish releasing control.');
+      } else if (statusCase.expected === 'saved-clean') {
+        assert.equal(nodes.get('reconcile')!.hidden, true);
+        assert.equal(nodes.get('recover')!.hidden, true);
+        assert.equal(nodes.get('bootstrap')!.hidden, true);
+        assert.equal(nodes.get('status')!.textContent, 'The signed-in browser was saved and control was released.');
+      } else if (statusCase.expected === 'expired') {
+        assert.equal(nodes.get('recover')!.hidden, true);
+        assert.equal(nodes.get('bootstrap')!.hidden, true);
+        assert.equal(nodes.get('status')!.textContent, 'This handoff has ended. Ask your agent for a new secure link.');
+      } else if (statusCase.expected === 'foreign-proof') {
+        assert.equal(nodes.get('recover')!.hidden, true, 'foreign proof follows existing terminal path');
+        assert.equal(nodes.get('bootstrap')!.hidden, true);
+      } else {
+        assert.equal(nodes.get('recover')!.hidden, false);
+        assert.equal(nodes.get('bootstrap')!.hidden, true);
+        if (statusCase.expected === 'pending') assert.match(String(nodes.get('status')!.textContent), /reconciled|status/i);
+        else assert.match(String(nodes.get('status')!.textContent), /could not be confirmed/i);
+      }
+    } finally { await app.close(); }
+  }
+});
+
 test('Daytona reload of a prepared selector offers an explicit open action and never mints from status', async () => {
   const app = appWith({
     status: async () => ({ status: 'ready_for_open', opening_expires_at: OPENING, mission_expires_at: MISSION }),
