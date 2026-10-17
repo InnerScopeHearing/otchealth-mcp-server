@@ -8,7 +8,7 @@ import { registerDaytonaViewerRoutes, type DaytonaViewerService } from './dayton
 const ORIGIN = 'https://mcp.otchealth.app';
 const TOKEN = 'A'.repeat(43);
 const ID = createHash('sha256').update(TOKEN).digest('hex').slice(0, 32);
-const URL = 'https://6080-signed-port-capability.proxy.daytona.works/vnc.html?autoconnect=true&resize=scale';
+const URL = 'https://6080-signed-port-capability.proxy.daytona.works/vnc.html';
 const NOW = 1_900_000_000_000;
 const VIEW = { signed_url: URL, expires_at: NOW + 90_000 };
 const OPENING = NOW + 300_000;
@@ -76,10 +76,26 @@ test('Daytona prepare binds a one-time token to the pre-provisioned browser proo
     assert.equal(prepared.body.includes(TOKEN), false);
     const exchanged = await app.inject({ method: 'POST', url: '/browser/daytona/exchange', headers: { ...HEADERS, cookie }, payload: { token: TOKEN } });
     assert.equal(exchanged.statusCode, 200);
-    assert.deepEqual(exchanged.json(), { ...VIEW, handoff_id: ID });
+    assert.deepEqual(exchanged.json(), { ...VIEW, signed_url: `${URL}?resize=scale`, handoff_id: ID });
     assert.equal(exchanged.headers['set-cookie'], undefined, 'recovery authority was installed by GET, before exchange');
     assert.deepEqual(seen, [`prepare:${TOKEN}:${proof.split('=')[1]}`, `exchange:${TOKEN}:${proof.split('=')[1]}`]);
   } finally { await app.close(); }
+});
+
+test('Daytona viewer presentation forces local scaling for bare and non-scale signed URLs', async () => {
+  const proof = 'B'.repeat(43);
+  for (const resize of [undefined, 'off', 'remote']) {
+    const signed_url = resize ? `${URL}?resize=${resize}` : URL;
+    const app = appWith({ exchange: async () => ({ ...VIEW, signed_url }) });
+    try {
+      const response = await app.inject({ method: 'POST', url: '/browser/daytona/exchange', headers: { ...HEADERS, cookie: `__Host-otc-daytona-recovery=${proof}` }, payload: { token: TOKEN } });
+      assert.equal(response.statusCode, 200);
+      const result = response.json();
+      const presented = new globalThis.URL(result.signed_url);
+      assert.deepEqual(presented.searchParams.getAll('resize'), ['scale']);
+      assert.equal(result.handoff_id, ID);
+    } finally { await app.close(); }
+  }
 });
 
 test('Daytona selector routes require the exact HttpOnly proof and expose status without viewer data', async () => {
@@ -110,7 +126,7 @@ test('Daytona selector routes require the exact HttpOnly proof and expose status
     for (const action of ['recover', 'renew']) {
       const response = await app.inject({ method: 'POST', url: `/browser/daytona/${action}`, headers: { ...HEADERS, cookie: proofCookie }, payload: { handoff_id: ID } });
       assert.equal(response.statusCode, 200);
-      assert.deepEqual(response.json(), { ...VIEW, handoff_id: ID });
+      assert.deepEqual(response.json(), { ...VIEW, signed_url: `${URL}?resize=scale`, handoff_id: ID });
     }
     const reconciled = await app.inject({ method: 'POST', url: '/browser/daytona/reconcile', headers: { ...HEADERS, cookie: proofCookie }, payload: { handoff_id: ID } });
     assert.equal(reconciled.statusCode, 200);
@@ -181,7 +197,7 @@ test('Daytona page commits only the selector before network work and never store
 
 test('Daytona viewer URLs still reject untrusted authorities and signed query credentials', async () => {
   const proof = 'B'.repeat(43);
-  for (const signed_url of ['https://6080-token.evil.example/vnc.html', 'https://6080-token.proxy.daytona.works.evil.example/vnc.html', 'http://6080-token.proxy.daytona.works/vnc.html', 'https://6080-token.proxy.daytona.works:444/vnc.html', 'https://2280-token.proxy.daytona.works/vnc.html', 'https://6080-token.proxy.daytona.works/toolbox', `${URL}&token=MASTER_SECRET`, 'https://user:MASTER_SECRET@6080-token.proxy.daytona.works/vnc.html', `${URL}#MASTER_SECRET`]) {
+  for (const signed_url of ['https://6080-token.evil.example/vnc.html', 'https://6080-token.proxy.daytona.works.evil.example/vnc.html', 'http://6080-token.proxy.daytona.works/vnc.html', 'https://6080-token.proxy.daytona.works:444/vnc.html', 'https://2280-token.proxy.daytona.works/vnc.html', 'https://6080-token.proxy.daytona.works/toolbox', `${URL}?resize=scale&resize=off`, `${URL}?unknown=value`, `${URL}?token=MASTER_SECRET`, 'https://user:MASTER_SECRET@6080-token.proxy.daytona.works/vnc.html', `${URL}#MASTER_SECRET`]) {
     const app = appWith({ exchange: async () => ({ ...VIEW, signed_url }) });
     try {
       const response = await app.inject({ method: 'POST', url: '/browser/daytona/exchange', headers: { ...HEADERS, cookie: `__Host-otc-daytona-recovery=${proof}` }, payload: { token: TOKEN } });
