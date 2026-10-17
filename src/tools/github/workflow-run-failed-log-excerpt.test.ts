@@ -100,6 +100,66 @@ test('run mode fetches logs for FAILED jobs only and returns the redacted tail o
   assert.ok(result.notice.includes('Untrusted CI output'));
 });
 
+test('failed-step excerpt keeps early failure markers when later passing output pushes them past the tail', async () => {
+  const early = [
+    '2026-10-06T21:00:05.100Z not ok 1644 - dispatcher rejects ambiguous selector',
+    '2026-10-06T21:00:05.200Z   AssertionError [ERR_ASSERTION]: expected selector_not_interactable',
+    `2026-10-06T21:00:05.300Z   GH_TOKEN: ${GH_TOKEN}`,
+    '2026-10-06T21:00:05.400Z   at TestContext.<anonymous> (src/server/daytona-runtime.test.ts:27:11)',
+  ];
+  const later = Array.from({ length: 240 }, (_, i) =>
+    `2026-10-06T21:00:06.${String(i % 100).padStart(2, '0')}Z passing check ${i}`);
+  const { deps } = makeDeps([job(77, 'failure')], () => ({ status: 'ok', text: [...early, ...later].join('\n'), headTruncated: false }));
+  const result = await getFailedCiLogExcerpt({ owner: 'o', repo: 'r', run_id: 1 }, cto, deps);
+  const excerpt = result.jobs[0]?.steps[0]?.excerpt ?? '';
+  assert.match(excerpt, /not ok 1644/);
+  assert.match(excerpt, /AssertionError \[ERR_ASSERTION\]/);
+  assert.match(excerpt, /daytona-runtime\.test\.ts:27/);
+  assert.ok(!excerpt.includes(GH_TOKEN));
+  assert.ok(excerpt.includes(CI_LOG_REDACTED));
+  assert.equal(result.jobs[0]?.steps[0]?.marker_scan_truncated, false);
+});
+
+test('private-key state spans marker context and tail without exposing short block bodies', async () => {
+  const block = [
+    '2026-10-06T21:00:05.100Z not ok 1644 - synthetic failure',
+    '2026-10-06T21:00:05.200Z -----BEGIN PRIVATE KEY-----',
+    '2026-10-06T21:00:05.300Z SHORT_PRIVATE_KEY_BODY',
+    ...Array.from({ length: 240 }, (_, i) => `2026-10-06T21:00:06.${String(i % 100).padStart(2, '0')}Z harmless block line ${i}`),
+    '2026-10-06T21:00:07.000Z -----END PRIVATE KEY-----',
+  ].join('\n');
+  const { deps } = makeDeps([job(81, 'failure')], () => ({ status: 'ok', text: block, headTruncated: false }));
+  const result = await getFailedCiLogExcerpt({ owner: 'o', repo: 'r', run_id: 1 }, cto, deps);
+  const excerpt = result.jobs[0]?.steps[0]?.excerpt ?? '';
+  assert.match(excerpt, /not ok 1644/);
+  assert.ok(excerpt.includes('[REDACTED PRIVATE KEY BLOCK]'));
+  assert.ok(!excerpt.includes('SHORT_PRIVATE_KEY_BODY'));
+  assert.ok(!excerpt.includes('harmless block line'));
+});
+
+test('marker search truncation is explicit and marker-free excerpts remain the ordinary tail', async () => {
+  const plain = ['ordinary output one', 'ordinary output two', 'ordinary output three'].join('\n');
+  const plainDeps = makeDeps([job(78, 'failure')], () => ({ status: 'ok', text: plain, headTruncated: false }));
+  const plainResult = await getFailedCiLogExcerpt({ owner: 'o', repo: 'r', run_id: 1 }, cto, plainDeps.deps);
+  assert.equal(plainResult.jobs[0]?.steps[0]?.excerpt, plain);
+  assert.equal(plainResult.jobs[0]?.steps[0]?.marker_scan_truncated, false);
+
+  const manyLines = Array.from({ length: 20_250 }, (_, i) => `2026-10-06T21:00:06.000Z ordinary output ${i}`).join('\n');
+  const boundedDeps = makeDeps([job(79, 'failure')], () => ({ status: 'ok', text: manyLines, headTruncated: false }));
+  const bounded = await getFailedCiLogExcerpt({ owner: 'o', repo: 'r', run_id: 1 }, cto, boundedDeps.deps);
+  assert.equal(bounded.jobs[0]?.steps[0]?.marker_scan_truncated, true);
+  assert.equal(bounded.jobs[0]?.steps[0]?.truncated, true);
+  assert.equal(bounded.jobs[0]?.steps[0]?.line_count, 200);
+  assert.match(bounded.jobs[0]?.steps[0]?.excerpt ?? '', /ordinary output 20249$/);
+
+  const noAttribution = ['not ok 1 - may belong to another step', ...Array.from({ length: 220 }, (_, i) => `plain tail ${i}`)].join('\n');
+  const unattributedDeps = makeDeps([job(80, 'failure')], () => ({ status: 'ok', text: noAttribution, headTruncated: false }));
+  const unattributed = await getFailedCiLogExcerpt({ owner: 'o', repo: 'r', run_id: 1 }, cto, unattributedDeps.deps);
+  assert.equal(unattributed.jobs[0]?.steps[0]?.attribution, 'job_tail');
+  assert.ok(!unattributed.jobs[0]?.steps[0]?.excerpt.includes('not ok 1'));
+  assert.ok(unattributed.jobs[0]?.steps[0]?.excerpt.endsWith('plain tail 219'));
+});
+
 test('job mode: a passing job returns nothing and is never downloaded; a failed job is excerpted', async () => {
   const passing = makeDeps([job(5, 'success')]);
   const none = await getFailedCiLogExcerpt({ owner: 'o', repo: 'r', job_id: 5 }, cto, passing.deps);

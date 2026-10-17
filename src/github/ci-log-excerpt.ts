@@ -78,10 +78,17 @@ export function redactLine(line: string): string {
  * Redact a sequence of log lines. Private-key blocks are dropped whole, blank lines are removed, and
  * each line is capped at CI_LOG_MAX_LINE_CHARS after redaction.
  */
-export function redactLines(texts: readonly string[]): string[] {
-  const out: string[] = [];
+export interface IndexedRedactedLine {
+  index: number;
+  text: string;
+}
+
+/** Redact one ordered line sequence while preserving each retained line's original index. */
+export function redactIndexedLines(lines: readonly IndexedRedactedLine[]): IndexedRedactedLine[] {
+  const out: IndexedRedactedLine[] = [];
   let inPem = false;
-  for (const raw of texts) {
+  for (const line of lines) {
+    const raw = line.text;
     const text = raw.length > CI_LOG_MAX_REDACT_INPUT_CHARS ? raw.slice(0, CI_LOG_MAX_REDACT_INPUT_CHARS) : raw;
     if (inPem) {
       if (PEM_END.test(text)) inPem = false;
@@ -89,14 +96,22 @@ export function redactLines(texts: readonly string[]): string[] {
     }
     if (PEM_BEGIN.test(text)) {
       inPem = !PEM_END.test(text);
-      out.push('[REDACTED PRIVATE KEY BLOCK]');
+      out.push({ index: line.index, text: '[REDACTED PRIVATE KEY BLOCK]' });
       continue;
     }
     const cleaned = redactLine(text);
     if (cleaned.trim() === '') continue;
-    out.push(cleaned.length > CI_LOG_MAX_LINE_CHARS ? `${cleaned.slice(0, CI_LOG_MAX_LINE_CHARS)}...[truncated]` : cleaned);
+    out.push({
+      index: line.index,
+      text: cleaned.length > CI_LOG_MAX_LINE_CHARS ? `${cleaned.slice(0, CI_LOG_MAX_LINE_CHARS)}...[truncated]` : cleaned,
+    });
   }
   return out;
+}
+
+/** Redact lines with the same stateful private-key handling, returning only their text. */
+export function redactLines(texts: readonly string[]): string[] {
+  return redactIndexedLines(texts.map((text, index) => ({ index, text }))).map((line) => line.text);
 }
 
 // ── Log parsing and step attribution ───────────────────────────────────────────
