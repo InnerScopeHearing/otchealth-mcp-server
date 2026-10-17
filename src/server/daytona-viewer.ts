@@ -52,6 +52,7 @@ function validatedView(result: DaytonaViewerConnection, options: DaytonaViewerOp
   if (url.protocol !== 'https:' || url.port || url.username || url.password || url.hash || !new RegExp(`^${options.previewPort}-[a-z0-9-]+$`).test(label) || url.pathname !== options.viewerPath) throw new Error('invalid_viewer');
   const values: Record<string, readonly string[]> = { autoconnect: ['true', '1'], resize: ['scale', 'remote', 'off'], path: ['websockify'] };
   for (const [key, value] of url.searchParams) if (!values[key]?.includes(value) || url.searchParams.getAll(key).length !== 1) throw new Error('invalid_viewer');
+  url.searchParams.set('autoconnect', 'true');
   url.searchParams.set('resize', 'scale');
   return { signed_url: url.href, expires_at: result.expires_at };
 }
@@ -139,7 +140,7 @@ export function registerDaytonaViewerRoutes(app: FastifyInstance, runtime: () =>
 
 function page(nonce: string): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect your browser</title>
-<style nonce="${nonce}">body{margin:0;background:#111827;color:#f9fafb;font:16px system-ui}header{padding:16px}p{margin:8px 0}iframe{display:block;width:100%;height:calc(100vh - 210px);min-height:320px;border:0;background:#000}button{padding:10px 16px;margin:8px 8px 0 0}button:disabled{opacity:.5}[hidden]{display:none!important}</style></head><body>
+<style nonce="${nonce}">html,body{height:100%;min-height:0}body{margin:0;height:100vh;height:100dvh;display:flex;flex-direction:column;overflow:hidden;background:#111827;color:#f9fafb;font:16px system-ui}header{flex:0 1 auto;max-height:45%;overflow:auto;box-sizing:border-box;padding:clamp(6px,2vh,16px)}h1{font-size:clamp(1rem,4vw,1.4rem);margin:0 0 4px}p{margin:4px 0}iframe{display:block;flex:1 1 auto;min-height:0;width:100%;height:auto;border:0;background:#000}button{padding:8px 12px;margin:4px 6px 0 0;max-width:100%}button:disabled{opacity:.5}[hidden]{display:none!important}</style></head><body>
 <header><h1 id="targetHeading">Connect your browser</h1><p id="targetInstructions">Sign in inside the remote Chrome window. Open the signed-in workspace and confirm the correct account, then select Done.</p><p id="status" role="status" aria-live="polite" tabindex="-1">Preparing secure desktop…</p><p id="deadlines"></p><button id="done" disabled>Done — save and release control</button><button id="cancel" disabled>Cancel handoff</button><button id="bootstrap" hidden>Check secure browser setup</button><button id="open" hidden>Open prepared desktop</button><button id="recover" hidden>Check or resume this handoff</button><button id="renew" hidden>Renew secure viewing</button><button id="reconcile" hidden>Confirm saved handoff release</button></header>
 <iframe id="viewer" title="Private remote browser desktop" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-downloads" hidden></iframe>
 <script nonce="${nonce}">(() => {
