@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DaytonaBrowserService } from './service.js';
-import { DaytonaBrowserError, DaytonaViewerNotMintedError, type DaytonaBinding, type DaytonaMission, type DaytonaBrowserStore, type DaytonaProvider } from './contract.js';
+import { DaytonaBeforeEffectError, DaytonaBrowserError, DaytonaViewerNotMintedError, type DaytonaBinding, type DaytonaMission, type DaytonaBrowserStore, type DaytonaProvider } from './contract.js';
 
 const hash = 'a'.repeat(64);
 const binding: DaytonaBinding = { provider: 'daytona', owner: 'cto', ownerSubjectHash: hash, sandboxId: 'sandbox-one', profileKey: 'profile-one', profilePath: '/home/otcbrowser/.local/share/otchealth-browser/profile-one/chromium', readinessReceiptSha256: 'b'.repeat(64) };
@@ -339,6 +339,32 @@ test('known V2 action mutex busy permits explicit retry without spending action 
   await assert.rejects(h.service.snapshot('cto', a.sessionId, hash), code('daytona_operation_busy'));
   assert.equal(h.sessions.get(a.sessionId)!.effectUnknown, false); assert.equal(h.sessions.get(a.sessionId)!.actionsUsed, 0);
   h.state.executeBusy = false; await h.service.snapshot('cto', a.sessionId, hash); assert.equal(h.sessions.get(a.sessionId)!.actionsUsed, 1);
+});
+test('trusted V2 selector no-effect clears only the new fence and retains action budget; lookalike errors stay fenced', async () => {
+  const h = fixture(); h.state.runtimeProtocol = 2;
+  const a = await h.service.start('cto', binding.profileKey, 180, 5, hash);
+  h.state.executeError = new DaytonaBeforeEffectError('selector_not_found');
+  await assert.rejects(h.service.execute('cto', a.sessionId, { type: 'click', selector: '#missing' }, 10, hash), code('selector_not_found'));
+  assert.equal(h.sessions.get(a.sessionId)!.effectUnknown, false);
+  assert.equal(h.sessions.get(a.sessionId)!.actionsUsed, 1, 'a known invalid attempt consumes action budget');
+  assert.equal(h.state.executed, 1, 'the classified no-effect failure is not automatically retried');
+  h.state.executeError = undefined;
+  await h.service.snapshot('cto', a.sessionId, hash);
+  assert.equal(h.sessions.get(a.sessionId)!.actionsUsed, 2);
+  assert.equal(h.state.executed, 2);
+
+  const unknown = fixture(); unknown.state.runtimeProtocol = 2;
+  const b = await unknown.service.start('cto', binding.profileKey, 180, 5, hash);
+  unknown.state.executeError = new DaytonaBrowserError('selector_not_found');
+  await assert.rejects(unknown.service.execute('cto', b.sessionId, { type: 'click', selector: '#missing' }, 10, hash));
+  assert.equal(unknown.sessions.get(b.sessionId)!.effectUnknown, true);
+  assert.equal(unknown.sessions.get(b.sessionId)!.actionsUsed, 1);
+
+  const legacy = fixture();
+  const c = await legacy.service.start('cto', binding.profileKey, 180, 5, hash);
+  legacy.state.executeError = new DaytonaBeforeEffectError('selector_not_found');
+  await assert.rejects(legacy.service.execute('cto', c.sessionId, { type: 'click', selector: '#missing' }, 10, hash));
+  assert.equal(legacy.sessions.get(c.sessionId)!.effectUnknown, true, 'the typed no-effect error is V2-only');
 });
 test('V2 global pause precedes human mint and exact revocation checkpoint precede global resume', async () => {
   const h = fixture(); h.state.runtimeProtocol = 2;

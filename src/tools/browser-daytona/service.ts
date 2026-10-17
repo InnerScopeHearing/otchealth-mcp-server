@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { CloudBrowserAction } from '../browser-cloud/contract.js';
 import { validateCloudBrowserAction } from '../browser-cloud/actions.js';
-import { DaytonaBrowserError, DaytonaViewerNotMintedError, type DaytonaBinding, type DaytonaBrowserStore, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness, type DaytonaMissionStatus, type DaytonaHumanInputReceipt } from './contract.js';
+import { DaytonaBeforeEffectError, DaytonaBrowserError, DaytonaViewerNotMintedError, type DaytonaBinding, type DaytonaBrowserStore, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness, type DaytonaMissionStatus, type DaytonaHumanInputReceipt } from './contract.js';
 import { assertDaytonaBinding, assertDaytonaMission } from './store.js';
 const HASH = /^[a-f0-9]{64}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -12,6 +12,8 @@ export function daytonaProfileKey(owner: string, principalHash: string): string 
 }
 const displayLease = (binding: Pick<DaytonaBinding, 'sandboxId'>) => `display-${createHash('sha256').update(binding.sandboxId).digest('hex').slice(0, 40)}`;
 const beforeEffectBusy = (session: DaytonaMission, error: unknown) => session.runtimeProtocol === 2 && error instanceof DaytonaBrowserError && error.code === 'daytona_operation_busy';
+const beforeEffectSelectorFailure = (session: DaytonaMission, error: unknown) => session.runtimeProtocol === 2 && error instanceof DaytonaBeforeEffectError
+  && ['selector_not_found', 'selector_not_interactable'].includes(error.code);
 /** Only logical missions on exact approved enrollment. No create/start/delete sandbox capability. */
 export class DaytonaBrowserService {
   constructor(private readonly store: DaytonaBrowserStore, private readonly provider: DaytonaProvider, private readonly now: () => number = Date.now) {}
@@ -80,7 +82,11 @@ export class DaytonaBrowserService {
       session.actionsUsed++; session.effectUnknown = true; await this.store.saveSessionUnderLock(session, lock);
       let result: unknown;
       try { result = await this.provider.execute(binding, session, checked, timeoutSeconds, principal!); }
-      catch (error) { if (beforeEffectBusy(session, error)) { session.actionsUsed--; session.effectUnknown = false; await this.store.saveSessionUnderLock(session, lock); } throw error; }
+      catch (error) {
+        if (beforeEffectBusy(session, error)) { session.actionsUsed--; session.effectUnknown = false; await this.store.saveSessionUnderLock(session, lock); }
+        else if (beforeEffectSelectorFailure(session, error)) { session.effectUnknown = false; await this.store.saveSessionUnderLock(session, lock); }
+        throw error;
+      }
       session.effectUnknown = false; await this.store.saveSessionUnderLock(session, lock);
       if (result && typeof result === 'object' && 'observation' in result) {
         const execution = result as { observation: unknown; pageReceipt?: unknown };

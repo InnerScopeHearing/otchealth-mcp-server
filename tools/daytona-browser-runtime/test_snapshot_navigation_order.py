@@ -36,7 +36,8 @@ class SnapshotNavigationOrderTests(unittest.TestCase):
             result = dispatcher.post_action_snapshot(cdp, self.state, True)
         self.assertEqual(result['url'], self.public)
         self.assertEqual(result['visibleText'], 'Public fixture')
-        self.assertEqual(cdp.reads, 6)
+        # The successful retry checks the URL both before and after locator metadata.
+        self.assertEqual(cdp.reads, 7)
         self.assertEqual(cdp.methods.count('Accessibility.getFullAXTree'), 2)
         self.assertTrue(set(cdp.methods) <= {'Target.getTargetInfo', 'Target.attachToTarget', 'Page.getFrameTree', 'Accessibility.getFullAXTree'})
 

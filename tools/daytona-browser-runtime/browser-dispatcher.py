@@ -485,10 +485,124 @@ def authentication_fields(cdp, session):
     return auth_detected, found
 
 
+def dom_attributes(node):
+    attrs = node.get('attributes', []) if isinstance(node, dict) else []
+    if not isinstance(attrs, list) or len(attrs) % 2 or len(attrs) > 256: fail('provider_protocol_error')
+    return dict(zip(attrs[::2], attrs[1::2]))
+
+
+def has_visible_box(result):
+    quad = result.get('model', {}).get('content') if isinstance(result, dict) else None
+    if not isinstance(quad, list) or len(quad) != 8 or any(type(value) not in (int, float) or not math.isfinite(value) for value in quad): return False
+    return max(quad[::2]) > min(quad[::2]) and max(quad[1::2]) > min(quad[1::2])
+
+
+def has_content_quads(result):
+    quads = result.get('quads') if isinstance(result, dict) else None
+    if not isinstance(quads, list): fail('provider_protocol_error')
+    return any(isinstance(q, list) and len(q) == 8 and all(type(v) in (int, float) and math.isfinite(v) for v in q)
+               and max(q[::2]) > min(q[::2]) and max(q[1::2]) > min(q[1::2]) for q in quads)
+
+
+def editable_observations(cdp, session, nodes):
+    """Describe only visible, writable, non-secret controls in the main frame."""
+    candidates = [ax for ax in nodes if isinstance(ax, dict) and not ax.get('ignored') and (editable_node(ax) or
+                  (isinstance(ax.get('role'), dict) and ax['role'].get('value') in ('button', 'link')))]
+    candidates.sort(key=lambda ax: not editable_node(ax))
+    if not candidates: return []
+    document = cdp.command('DOM.getDocument', {'depth': 0}, session)
+    root = document.get('root', {}).get('nodeId')
+    if not integer(root, 1, 2 ** 31): fail('provider_protocol_error')
+    observed, count = [], 0
+    for ax in candidates:
+        if not isinstance(ax, dict) or ax.get('ignored') or authentication_node(ax): continue
+        role = ax.get('role', {}).get('value', '') if isinstance(ax.get('role'), dict) else ''
+        is_editable = editable_node(ax)
+        is_action = role in ('button', 'link')
+        if not (is_editable or is_action): continue
+        backend = ax.get('backendDOMNodeId')
+        if not integer(backend, 1, 2 ** 31): continue
+        count += 1
+        if count > 80: break
+        described = cdp.command('DOM.describeNode', {'backendNodeId': backend, 'depth': 0}, session).get('node', {})
+        tag = described.get('nodeName', '').lower()
+        attrs = dom_attributes(described)
+        if is_editable and tag not in ('input', 'textarea') and not (attrs.get('contenteditable', '').lower() == 'true' or attrs.get('role') in ('textbox', 'combobox', 'searchbox')): continue
+        if is_action and tag not in ('button', 'a', 'input'): continue
+        if any(name in attrs for name in ('disabled', 'readonly', 'hidden')): continue
+        input_type = attrs.get('type', 'text').lower()
+        auto = attrs.get('autocomplete', '').lower()
+        if is_editable and (input_type == 'hidden' or auto in ('current-password', 'new-password', 'one-time-code') or auto.endswith(' password')): continue
+        pushed = cdp.command('DOM.pushNodesByBackendIdsToFrontend', {'backendNodeIds': [backend]}, session).get('nodeIds', [])
+        if not isinstance(pushed, list) or len(pushed) != 1 or not integer(pushed[0], 1, 2 ** 31): continue
+        node_id = pushed[0]
+        try: model = cdp.command('DOM.getBoxModel', {'nodeId': node_id}, session)
+        except DispatchError: continue
+        if not has_visible_box(model): continue
+        label = ax.get('name', {}).get('value', '') if isinstance(ax.get('name'), dict) else ''
+        if not isinstance(label, str): label = ''
+        semantic = ' '.join([label, *(attrs.get(k, '') for k in ('id', 'name', 'placeholder', 'aria-label', 'data-testid', 'autocomplete', 'type'))])
+        if is_editable and re.search(r'(?i)(password|passcode|one.?time|otp|token|secret|api[_ -]?key|credential|bearer)', semantic): continue
+        def css_string(value):
+            return '"' + re.sub(r'[\\"\n\r\f]', lambda m: '\\' + format(ord(m.group(0)), 'x') + ' ', value) + '"'
+        selectors = []
+        for key in ('id', 'name', 'aria-label', 'placeholder', 'data-testid'):
+            value = attrs.get(key)
+            if isinstance(value, str) and value and len(value) <= 120:
+                candidate = f'[{key}={css_string(value)}]'
+                if len(candidate) <= 256: selectors.append(candidate)
+        selectors.append(tag)
+        selector = None
+        for candidate in selectors:
+            matches = cdp.command('DOM.querySelectorAll', {'nodeId': root, 'selector': candidate}, session).get('nodeIds', [])
+            if isinstance(matches, list) and len(matches) == 1 and matches[0] == node_id:
+                selector = candidate
+                break
+        if not selector:
+            observed.append(f"Locator unavailable for {role} label={label[:120]!r}")
+            continue
+        value = ax.get('value', {}).get('value', '') if is_editable and isinstance(ax.get('value'), dict) else ''
+        if not isinstance(value, str): value = ''
+        if is_editable and re.search(r'(?i)(sk_(?:live|test)_|xox[baprs]-|gh[pousr]_|bearer\s|eyJ[A-Za-z0-9_-]{10,}\.)', value): continue
+        value_digest = hashlib.sha256(value.encode('utf-8')).hexdigest() if is_editable else ''
+        safe_attrs = {key: attrs[key][:60] for key in ('type', 'name', 'placeholder', 'aria-label', 'data-testid') if isinstance(attrs.get(key), str)}
+        observed.append(f"{'Editable' if is_editable else 'Action'} {tag} label={label[:100]!r} selector={selector!r} attrs={safe_attrs!r}" + (f" value={value[:200]!r} valueLength={len(value)} valueSha256={value_digest}" if is_editable else ''))
+        if len(observed) >= 10: break
+    return observed
+
+
+def preflight_target(cdp, session, selector):
+    """Read-only uniqueness and visibility check before browser interaction."""
+    cdp.command('DOM.enable', {}, session)
+    document = cdp.command('DOM.getDocument', {'depth': 0}, session)
+    root = document.get('root', {}).get('nodeId')
+    if not integer(root, 1, 2 ** 31): fail('provider_protocol_error')
+    matches = cdp.command('DOM.querySelectorAll', {'nodeId': root, 'selector': selector}, session).get('nodeIds', [])
+    if not isinstance(matches, list) or len(matches) != 1 or not integer(matches[0], 1, 2 ** 31): fail('selector_not_found')
+    node_id = matches[0]
+    described = cdp.command('DOM.describeNode', {'nodeId': node_id, 'depth': 0}, session).get('node', {})
+    attrs = dom_attributes(described)
+    quads = cdp.command('DOM.getContentQuads', {'nodeId': node_id}, session)
+    if not has_content_quads(quads): fail('selector_not_interactable')
+    return node_id, described, attrs
+
+
+def preflight_editable(cdp, session, selector):
+    """Require a unique, visible, writable text control."""
+    node_id, described, attrs = preflight_target(cdp, session, selector)
+    tag = described.get('nodeName', '').lower()
+    if tag not in ('input', 'textarea') and attrs.get('contenteditable', '').lower() != 'true': fail('selector_not_interactable')
+    if any(name in attrs for name in ('disabled', 'readonly', 'hidden')): fail('selector_not_interactable')
+    if attrs.get('type', '').lower() == 'hidden': fail('selector_not_interactable')
+    return node_id
+
+
 def snapshot(cdp, session, target, reject_auth=False):
     url = current_url(cdp, session)
     nodes = cdp.command('Accessibility.getFullAXTree', {}, session).get('nodes', [])
     if not isinstance(nodes, list): fail('provider_protocol_error')
+    # Catch navigation that races the accessibility read before any blank-page guard.
+    if current_url(cdp, session) != url: fail('navigation_changed')
     ax_auth = any(isinstance(node, dict) and authentication_node(node) for node in nodes)
     has_editable = any(isinstance(node, dict) and editable_node(node) for node in nodes)
     dom_auth, input_fields = authentication_fields(cdp, session) if (ax_auth or has_editable) else (False, [])
@@ -514,11 +628,12 @@ def snapshot(cdp, session, target, reject_auth=False):
         if node.get('ignored') or role not in ('StaticText', 'heading', 'link', 'button'): continue
         name = node.get('name', {}).get('value')
         if isinstance(name, str): names.append(name[:2000])
-    # Guard again before releasing observations; this is not network interception/pinning.
+    editable = editable_observations(cdp, session, nodes)
+    # Guard again after control metadata reads, before releasing observations.
     if current_url(cdp, session) != url: fail('navigation_changed')
-    if url == 'about:blank' and any(name.strip() for name in names):
-        fail('destination_forbidden')
-    return {'url': url, 'title': title[:512] if isinstance(title, str) else '', 'visibleText': '\n'.join(names)[:12000]}
+    visible = '\n'.join(editable + names)[:12000]
+    if url == 'about:blank' and visible.strip(): fail('destination_forbidden')
+    return {'url': url, 'title': title[:512] if isinstance(title, str) else '', 'visibleText': visible}
 
 
 def selected(cdp, state):
@@ -560,7 +675,10 @@ def key(cdp, session, name, modifiers=0):
 def find_node(cdp, session, selector):
     cdp.command('DOM.enable', {}, session)
     document = cdp.command('DOM.getDocument', {'depth': 0}, session)
-    node = cdp.command('DOM.querySelector', {'nodeId': document['root']['nodeId'], 'selector': selector}, session).get('nodeId')
+    nodes = cdp.command('DOM.querySelectorAll', {'nodeId': document['root']['nodeId'], 'selector': selector}, session).get('nodeIds')
+    if not isinstance(nodes, list) or any(not integer(node, 1, 2 ** 31) for node in nodes): fail('selector_not_found')
+    if len(nodes) > 1: fail('selector_not_interactable')
+    node = nodes[0] if nodes else None
     if not integer(node, 1, 2 ** 31): fail('selector_not_found')
     return node
 
@@ -634,6 +752,7 @@ def execute(cdp, state, action):
                 time.sleep(min(0.1, cdp.remaining()))
         if kind == 'wait_for': pass
         elif kind in ('focus', 'type'):
+            node = preflight_editable(cdp, session, action['selector']) if kind == 'type' else preflight_target(cdp, session, action['selector'])[0]
             cdp.command('DOM.focus', {'nodeId': node}, session)
             if kind == 'type': cdp.command('Input.insertText', {'text': action['text']}, session)
         elif kind == 'select':
@@ -814,11 +933,23 @@ def dispatch_v2(payload, deadline, profile, browser_pid):
                 if action['type'] == 'press_key' and action.get('modifiers', 0) & 6 and action['key'] in ('KeyC', 'KeyV') and action.get('modifiers') not in (2, 4, 6): fail('daytona_clipboard_modifier_unsupported')
             adapter = V2Receipt(receipt, value, mission, 'action' if op == 'execute' else op)
             if op == 'checkpoint': return checkpoint(adapter, mission, payload, deadline, browser_pid)
-            mission['uncertain'] = True
             if op == 'human_pause': value['human'] = {'sessionId': session_id, 'principalHash': principal}
-            adapter.write(mission)
             cdp = Cdp(deadline)
             try:
+                # A safe locator rejection must precede even tab activation and
+                # the uncertain receipt write so V2 can acknowledge zero input effects.
+                if op == 'execute' and payload['action']['type'] in ('focus', 'type'):
+                    try:
+                        target, attached = selected(cdp, mission)
+                        action = payload['action']
+                        if action['type'] == 'type': preflight_editable(cdp, attached, action['selector'])
+                        else: preflight_target(cdp, attached, action['selector'])
+                    except DispatchError as error:
+                        if error.code in ('selector_not_found', 'selector_not_interactable'):
+                            error.before_effect = True
+                        raise
+                mission['uncertain'] = True
+                adapter.write(mission)
                 if op == 'open':
                     cdp.command('Browser.setDownloadBehavior', {'behavior': 'deny'})
                     target = cdp.command('Target.createTarget', {'url': 'about:blank'}).get('targetId')
@@ -1101,6 +1232,9 @@ def private_input_response(encoded, nonce, input_fd, ready_stream):
         response = {'version': 1, 'ok': False, 'code': error.code}
         if error.before_effect and error.code in ('mission_busy', 'human_active', 'other_missions_active'):
             response['beforeEffect'] = True
+        elif error.before_effect and error.code in ('selector_not_found', 'selector_not_interactable'):
+            response['beforeEffect'] = True
+            response.update(profileKey=payload['profileKey'], sessionId=payload['sessionId'], principalHash=payload['principalHash'])
         return response
     except Exception:
         return {'version': 1, 'ok': False, 'code': 'provider_operation_failed'}
@@ -1129,7 +1263,11 @@ def run_payload(encoded):
         return response
     except DispatchError as error:
         result = {'version': 1, 'ok': False, 'code': error.code}
-        if error.before_effect and error.code in ('mission_busy', 'human_active', 'other_missions_active'): result['beforeEffect'] = True
+        if error.before_effect and error.code in ('mission_busy', 'human_active', 'other_missions_active'):
+            result['beforeEffect'] = True
+        elif error.before_effect and error.code in ('selector_not_found', 'selector_not_interactable') and payload.get('runtimeProtocol') == 2:
+            result['beforeEffect'] = True
+            result.update(profileKey=payload['profileKey'], sessionId=payload['sessionId'], principalHash=payload['principalHash'])
         return result
     except (socket.timeout, TimeoutError): return {'version': 1, 'ok': False, 'code': 'provider_timeout'}
     except Exception:

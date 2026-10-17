@@ -31,7 +31,7 @@ ROLES={'cto','cfo','coo','cro','clo','developer','wefunder-campaign-director'}
 UUID=re.compile(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\Z')
 KEY=re.compile(r'[a-z0-9][a-z0-9_-]{0,95}\Z')
 PINS={
- 'browser-dispatcher.py':'e47ea2731e2d9d49ce2bee11e0c8a3f482eb87a6d8d515b62ee735d2779ea2db',
+ 'browser-dispatcher.py':'f2f0b1dda4cb80a7178a5192e0aea1c8d1f72ac6715e225d153c56d43f918ee5',
  'browser_transfers.py':'94656ffae38bebfc3b6c14c406108bf99b02f821e46919e1f8df832746ab9e4a',
  'checkpoint-control.py':'d643d3799b810181ca7d9398d365de26f20365b67343a87fbc474a4953980046',
  'clamd.conf':'a1e8ecbb432ad2246c694cca4bf7ee8e55d6891382241e1a0ab9b7c7f548840f',

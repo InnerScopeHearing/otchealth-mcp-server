@@ -205,6 +205,26 @@ test('only exact V2 known-before-effect ACKs classify busy; all other runtime ou
     assert.equal(sends, 1);
   }
 });
+test('selector before-effect ACK requires exact V2 profile, mission, principal, and seven-key receipt', async () => {
+  const current = { ...sharedMission, runtimeProtocol: 2 as const };
+  const cases: Array<[Record<string, unknown>, boolean]> = [];
+  for (const code of ['selector_not_found', 'selector_not_interactable']) {
+    const receipt = { version: 1, ok: false, code, beforeEffect: true, profileKey: 'company-browser', sessionId: current.sessionId, principalHash: current.ownerSubjectHash };
+    cases.push([receipt, true], [{ ...receipt, version: 2 }, false], [{ ...receipt, ok: true }, false], [{ ...receipt, profileKey: 'foreign-profile' }, false], [{ ...receipt, sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }, false], [{ ...receipt, principalHash: 'c'.repeat(64) }, false], [{ ...receipt, extra: true }, false], [{ ...receipt, beforeEffect: false }, false]);
+  }
+  cases.push([{ version: 1, ok: false, code: 'unknown', beforeEffect: true, profileKey: 'company-browser', sessionId: current.sessionId, principalHash: current.ownerSubjectHash }, false]);
+  for (const [receipt, trusted] of cases) {
+    const n = network(sharedRuntime); n.state.processResponse = { exitCode: 0, result: JSON.stringify(receipt) };
+    const c = await client({ fetchImpl: n.fetchImpl });
+    await assert.rejects(c.execute(sharedBinding, current, { type: 'click', selector: '#submit' }, 10, sharedBinding.ownerSubjectHash), (error: any) => trusted ? error.name === 'DaytonaBeforeEffectError' && error.code === receipt.code : error.name !== 'DaytonaBeforeEffectError');
+    assert.equal(n.state.payloads.filter((p: any) => p.op === 'execute').length, 1);
+  }
+  const nonzero = network(sharedRuntime); nonzero.state.processResponse = { exitCode: 1, result: JSON.stringify({ version: 1, ok: false, code: 'selector_not_found' }) };
+  const provider = await client({ fetchImpl: nonzero.fetchImpl });
+  await assert.rejects(provider.execute(sharedBinding, current, { type: 'click', selector: '#submit' }, 10, sharedBinding.ownerSubjectHash), (error: any) => error.name !== 'DaytonaBeforeEffectError');
+  const legacy = network(sharedRuntime); legacy.state.processResponse = { exitCode: 0, result: JSON.stringify(cases[0]![0]) };
+  await assert.rejects((await client({ fetchImpl: legacy.fetchImpl })).execute(sharedBinding, sharedMission, { type: 'click', selector: '#submit' }, 10, sharedBinding.ownerSubjectHash), (error: any) => error.name !== 'DaytonaBeforeEffectError');
+});
 test('V2 upload attach busy is not a whole-action no-effect proof after staging writes', async () => {
   for (const phase of ['prepare', 'attach']) {
     const n = network(sharedRuntime), f = stagedFile(); let denied = 0;
@@ -591,8 +611,11 @@ class Cdp:
   if method=='Target.createTarget': return {'targetId':'PAGE2'}
   if method=='Target.closeTarget': return {'success':True}
   if method=='DOM.getDocument': return {'root':{'nodeId':1}}
+  if method=='DOM.querySelectorAll': return {'nodeIds':[2] if params.get('selector')=='#name' else []}
   if method=='DOM.querySelector': return {'nodeId':2}
-  if method=='DOM.querySelectorAll': return {'nodeIds':[]}
+  if method=='DOM.describeNode': return {'node':{'nodeId':2,'nodeName':'INPUT','attributes':['id','name','type','text']}}
+  if method=='DOM.getBoxModel': return {'model':{'content':[0,0,10,0,10,10,0,10]}}
+  if method=='DOM.getContentQuads': return {'quads':[[0,0,10,0,10,10,0,10]]}
   return {}
 def directory(path):
  return profile if str(path).endswith('/chromium') else root
