@@ -34,7 +34,7 @@ delete process.env.GITHUB_APP_INSTALLATION_ID;
 // short-circuits before reaching createIssueComment -- exactly the branch under test here.
 process.env.SNS_ALERT_TOPIC_ARN ||= 'arn:aws:sns:us-east-1:900915535335:otchealth-aws-alerts';
 
-const { postAlert } = await import('./webhooks.js');
+const { postAlert, isCanonicalCiCompletion, shouldEmitCiFailureAlert } = await import('./webhooks.js');
 
 // AWS credentials, unlike everything above, are read FRESH on every call by
 // search/sigv4.ts's resolveAwsCredentials() (plain process.env reads, no loadEnv() involved) -- so
@@ -57,6 +57,48 @@ function resetEnvAndFetch(): void {
     else process.env[k] = originalAws[k];
   }
 }
+
+test('CI failure alerts: GitHub Actions check_suite is represented by workflow_run, without commit-wide dedupe', () => {
+  const workflowRun = {
+    name: 'nightly-canary',
+    conclusion: 'failure',
+    head_sha: 'same-commit',
+    html_url: 'https://github.com/InnerScopeHearing/otchealth-claude-tools/actions/runs/1',
+  };
+  // Observed GitHub REST check-suite payload shape: app.id=15368, app.slug=github-actions,
+  // status=completed, conclusion=failure. The duplicate suite has no useful workflow URL.
+  const actionsCheckSuite = {
+    name: 'nightly-canary',
+    conclusion: 'failure',
+    head_sha: 'same-commit',
+    app: { id: 15368, slug: 'github-actions', name: 'GitHub Actions' },
+  };
+  assert.equal(isCanonicalCiCompletion('workflow_run', 'completed', workflowRun), true);
+  assert.equal(shouldEmitCiFailureAlert('workflow_run', 'completed', workflowRun), true);
+  assert.equal(isCanonicalCiCompletion('check_suite', 'completed', actionsCheckSuite), false);
+  assert.equal(shouldEmitCiFailureAlert('check_suite', 'completed', actionsCheckSuite), false);
+
+  // Different workflow runs on the same commit are separate failures, not a duplicate pair.
+  assert.equal(shouldEmitCiFailureAlert('workflow_run', 'completed', { ...workflowRun, name: 'weekly-restore' }), true);
+  // Check suites owned by other GitHub Apps retain their alert path.
+  assert.equal(isCanonicalCiCompletion('check_suite', 'completed', {
+    ...actionsCheckSuite,
+    app: { id: 42, slug: 'third-party-ci', name: 'Third Party CI' },
+  }), true);
+  assert.equal(shouldEmitCiFailureAlert('check_suite', 'completed', {
+    ...actionsCheckSuite,
+    app: { id: 42, slug: 'third-party-ci', name: 'Third Party CI' },
+  }), true);
+  assert.equal(shouldEmitCiFailureAlert('check_suite', 'completed', { ...actionsCheckSuite, conclusion: 'success' }), false);
+});
+
+test('CI failure alerts are emitted only for completed webhook actions', () => {
+  const failed = { conclusion: 'failure', app: { slug: 'third-party-ci' } };
+  for (const action of ['requested', 'in_progress', 'rerequested', 'queued']) {
+    assert.equal(shouldEmitCiFailureAlert('workflow_run', action, failed), false);
+    assert.equal(shouldEmitCiFailureAlert('check_suite', action, failed), false);
+  }
+});
 
 test('postAlert: createIssueComment failing + SNS configured + AWS credentials present -> attempts a SigV4-signed SNS Publish, and still resolves without throwing', async () => {
   for (const k of AWS_KEYS) delete process.env[k];

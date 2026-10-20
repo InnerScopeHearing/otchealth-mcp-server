@@ -156,6 +156,30 @@ function verifySignature(raw: string, sigHeader: string | undefined, secret: str
 const FAIL_CONCLUSIONS = new Set(['failure', 'timed_out', 'startup_failure', 'cancelled', 'action_required']);
 
 /**
+ * GitHub Actions emits both workflow_run and check_suite for the same run. Keep workflow_run
+ * as the canonical alert because it carries the workflow URL/name; continue reporting check
+ * suites from other GitHub Apps. Do not deduplicate by commit: separate workflows on one commit
+ * are distinct failures and each must remain visible.
+ */
+export function isCanonicalCiCompletion(
+  event: 'workflow_run' | 'check_suite',
+  action: string,
+  node: Record<string, any> | undefined,
+): boolean {
+  if (action !== 'completed') return false;
+  return !(event === 'check_suite' && node?.app?.slug === 'github-actions');
+}
+
+export function shouldEmitCiFailureAlert(
+  event: 'workflow_run' | 'check_suite',
+  action: string,
+  node: Record<string, any> | undefined,
+): boolean {
+  return isCanonicalCiCompletion(event, action, node) &&
+    Boolean(node?.conclusion && FAIL_CONCLUSIONS.has(node.conclusion));
+}
+
+/**
  * GitHub webhook ingestion + first fleet-medic rules.
  * - HMAC-verified (GITHUB_WEBHOOK_SECRET). Inert (503) when the secret is unset.
  * - Records every event (structured log -> Log Analytics).
@@ -196,7 +220,7 @@ export function registerWebhookRoutes(app: FastifyInstance): void {
         const prNums = (node?.pull_requests ?? []).map((x: any) => x?.number).filter(isGitHubPullRequestNumber);
         if (companyRepository && prNums.length) void tryAutoMerge(companyRepository, prNums);
       }
-      if (conclusion && FAIL_CONCLUSIONS.has(conclusion)) {
+      if (shouldEmitCiFailureAlert(event, action, node)) {
         logger.warn(
           {
             type: 'fleet_medic_alert',
