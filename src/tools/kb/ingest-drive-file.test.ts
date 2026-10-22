@@ -129,6 +129,36 @@ test('S3 backend: a missing Azure SharedKey does not block a CFO dataroom copy',
   assert.equal(calls.puts.length, 1);
 });
 
+test('configuration failures identify the component without touching either store', async () => {
+  for (const dryRun of [true, false]) {
+    for (const component of ['graph_drive', 'finance_storage'] as const) {
+      const { d, calls } = deps({ backend: 's3' });
+      if (component === 'graph_drive') d.driveConfigured = () => false;
+      else d.env = () => ({ BLOB_BACKEND: 's3', AZURE_CFO_STORAGE_ACCOUNT: '', AZURE_CFO_STORAGE_KEY: '' });
+      const res = await handleKbIngestDriveFile(GOOD, { callerAgent: 'cfo', dryRun }, d);
+      assert.deepEqual(res.data, {
+        written: false, index: 'finance-cfo-source-docs', path: GOOD.dest_path,
+        container: 'cfo-source-docs', bytes: null, sha256: null, content_type: null,
+        dry_run: dryRun, error: 'unconfigured', configuration_component: component,
+      });
+      assert.equal(calls.heads, 0);
+      assert.equal(calls.downloads, 0);
+      assert.equal(calls.puts.length, 0);
+    }
+  }
+});
+
+test('S3 configuration permits read-only missing-source checks without an Azure key', async () => {
+  const { d, calls } = deps({ backend: 's3', found: false });
+  const res = await handleKbIngestDriveFile(GOOD, { callerAgent: 'cfo', dryRun: true }, d);
+  assert.equal((res.data as { error?: string }).error, undefined);
+  assert.equal((res.data as { written: boolean }).written, false);
+  assert.equal(calls.heads, 1);
+  assert.equal(calls.downloads, 1);
+  assert.equal(calls.puts.length, 0);
+  assert.match(res.summary, /No file/);
+});
+
 test('Azure backend: a missing SharedKey refuses before any source read or write', async () => {
   const { d, calls } = deps({ backend: 'azure', storageKey: '' });
   const res = await handleKbIngestDriveFile(GOOD, { callerAgent: 'cfo', dryRun: false }, d);
