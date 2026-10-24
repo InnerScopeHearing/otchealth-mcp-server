@@ -276,9 +276,13 @@ test('generic pull-request artifact reads remain owner-agnostic while mutations 
 
 test('GitHub pull-request routes use canonical numeric path segments', async () => {
   const seen: string[] = [];
-  await withStubbedFetch((async (input: RequestInfo | URL) => {
+  const mergeBodies: unknown[] = [];
+  await withStubbedFetch((async (input: RequestInfo | URL, init?: RequestInit) => {
     seen.push(String(input));
-    if (String(input).endsWith('/merge')) return new Response(JSON.stringify({ merged: false, sha: '', message: 'not merged' }), { status: 200 });
+    if (String(input).endsWith('/merge')) {
+      mergeBodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ merged: false, sha: '', message: 'not merged' }), { status: 200 });
+    }
     return new Response(JSON.stringify({ number: 42 }), { status: 200 });
   }) as typeof fetch, async () => {
     await getPullRequest('InnerScopeHearing', 'otchealth-mcp-server', 42);
