@@ -229,7 +229,7 @@ test('the Make pilot identity gets exactly the broker and catalog probe even und
 
 test('(b) developer lane gets the full ship-lane set', () => {
   const set = connectorToolset(testEnv(), 'developer');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...DEVELOPER_SETUP_TOOLSET, ...CLOUD_BROWSER_TOOLS, ...AWS_MCP_TOOLS, 'claims_check', 'framer_project_inspect'].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...DEVELOPER_SETUP_TOOLSET, ...CLOUD_BROWSER_TOOLS, ...AWS_MCP_TOOLS, 'claims_check', 'framer_project_inspect', 'github_workflow_run_failed_log_excerpt'].sort());
   assert.equal(set.has(CTO_CLOUD_BROWSER_PROVISIONING_TOOL), false);
   assert.ok(set.has('brain_graph_search'));
   assert.ok(set.has('brain_public_kb_search'));
