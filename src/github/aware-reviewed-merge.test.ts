@@ -122,9 +122,12 @@ test('non-approved repository keeps the existing generic merge attempt', async (
 test('registered tool passes CTO identity only, and dry-run remains network-free', async () => {
   type Handler = (args: any) => Promise<any>;
   let handler: Handler | undefined;
-  const server = { registerTool(_name: string, _config: unknown, candidate: Handler) { handler = candidate; return { remove() {} }; } } as any;
+  let config: any;
+  const server = { registerTool(_name: string, candidateConfig: unknown, candidate: Handler) { config = candidateConfig; handler = candidate; return { remove() {} }; } } as any;
   registerGitHubMergePullRequest(server, () => 'synthetic-caller');
   assert.ok(handler);
+  assert.equal(config.inputSchema.expected_head_sha.safeParse(head).success, true);
+  assert.equal(config.inputSchema.expected_head_sha.safeParse('not-a-sha').success, false);
   const dry = fixture();
   await withFetch(dry.fetchStub, async () => {
     await requestContext.run({ callerHash: 'synthetic-caller', correlationId: 'synthetic-dry-run', callerAgent: 'cto' } as any, () => handler!({ owner, repo, number: 165, method: 'squash', dry_run: true }));
