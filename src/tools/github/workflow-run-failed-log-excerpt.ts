@@ -179,10 +179,11 @@ export async function getFailedCiLogExcerpt(
   }
   assertRepoAllowed(ctx.callerAgent, owner, repo);
 
+  const conclusions = parsed.data.include_cancelled ? new Set([...FAILED_CONCLUSIONS, 'cancelled']) : FAILED_CONCLUSIONS;
   const jobs: any[] = runId !== undefined ? await deps.listJobs(owner, repo, runId) : [await deps.getJob(owner, repo, jobId as number)];
-  const failedJobs = jobs.filter((job) => job && FAILED_CONCLUSIONS.has(job.conclusion));
+  const failedJobs = jobs.filter((job) => job && conclusions.has(job.conclusion));
   const plans = failedJobs.slice(0, CI_LOG_MAX_FAILED_JOBS).map((job) => {
-    const failedSteps = (Array.isArray(job.steps) ? job.steps : []).filter((s: any) => s && FAILED_CONCLUSIONS.has(s.conclusion));
+    const failedSteps = (Array.isArray(job.steps) ? job.steps : []).filter((s: any) => s && conclusions.has(s.conclusion));
     return {
       job,
       steps: failedSteps.slice(0, CI_LOG_MAX_FAILED_STEPS_PER_JOB),
