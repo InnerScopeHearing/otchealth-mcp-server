@@ -341,7 +341,8 @@ for (const [lane, upperBound, mustInclude] of [
   // The Developer-only task rollup adds exactly one explicit read; preserve the existing buffer.
   // Public browser capture reuses the existing artifact reader, so only the separately-added
   // public-web discovery and exact Framer inspector each add one curated registration.
-  ['developer', 217, ['developer_task_rollup', 'brain_search', 'developer_wake_lite', 'catalog_probe', 'aws_mcp_tool_list', 'aws_mcp_tool_call',
+  // Add exactly one bounded redacted CI diagnostic, without widening other role families.
+  ['developer', 218, ['developer_task_rollup', 'brain_search', 'developer_wake_lite', 'catalog_probe', 'aws_mcp_tool_list', 'aws_mcp_tool_call', 'github_workflow_run_failed_log_excerpt',
     'revenuecat_list_projects', 'revenuecat_project_get', 'revenuecat_app_list', 'revenuecat_app_get',
     'revenuecat_offering_list', 'revenuecat_offering_get', 'revenuecat_product_list', 'revenuecat_product_get',
     'revenuecat_package_list', 'revenuecat_package_get', 'revenuecat_entitlement_list', 'revenuecat_entitlement_get']],
