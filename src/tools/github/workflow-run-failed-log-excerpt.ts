@@ -155,7 +155,7 @@ export interface FailedLogExcerptResult {
 }
 
 /**
- * CTO-only, read-only. Returns bounded redacted excerpts for each FAILED step of failed jobs of one
+ * CTO/Developer, read-only. Returns bounded redacted excerpts for each FAILED step of failed jobs of one
  * run (or one job): early failure-marker windows within a known failed-step window plus its tail.
  * Without usable step timestamps, only the existing job tail is returned. Passing jobs and steps
  * are never fetched or returned.
