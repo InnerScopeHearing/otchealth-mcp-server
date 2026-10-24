@@ -376,8 +376,11 @@ export async function createPullRequest(
 
 export async function mergePullRequest(
   owner: string, repo: string, number: unknown, method: 'merge' | 'squash' | 'rebase' = 'squash', title?: string,
-  allowReviewedDraftPromotion = false,
+  allowReviewedDraftPromotion = false, expectedHeadSha?: string,
 ): Promise<{ merged: boolean; sha: string; message: string }> {
+  if (expectedHeadSha !== undefined && !/^[0-9a-fA-F]{40}$/.test(expectedHeadSha)) {
+    throw new GitHubApiError({ code: 'github_invalid_expected_head_sha', status: 0, message: 'Expected head SHA must be exactly 40 hexadecimal characters.', nextStep: 'Pass the exact current pull-request head SHA or omit the optional guard.' });
+  }
   assertCompanyOwner(owner);
   assertNotPhi(repo);
   assertProtectedContent('github_merge_pull_request', { owner, repo, number, method, title });
