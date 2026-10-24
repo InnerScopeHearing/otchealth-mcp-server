@@ -76,6 +76,35 @@ test('unrelated lanes and bad input are refused before any upstream call', async
   assert.deepEqual(calls, { listJobs: 0, getJob: 0, fetchLog: [] });
 });
 
+test('Developer can diagnose company CI while external owners and PHI repos fail before upstream reads', async () => {
+  const developer = { callerAgent: 'developer' };
+  const { deps, calls } = makeDeps([job(12, 'failure')]);
+  const result = await getFailedCiLogExcerpt({ owner: 'InnerScopeHearing', repo: 'aware-aural-rehab', job_id: 12 }, developer, deps);
+  assert.equal(result.jobs[0]?.job_id, 12);
+  assert.deepEqual(calls.fetchLog, [12]);
+  assert.ok(!JSON.stringify(result).includes(GH_TOKEN));
+  const refused = makeDeps([job(12, 'failure')]);
+  await assert.rejects(getFailedCiLogExcerpt({ owner: 'external-owner', repo: 'aware-aural-rehab', job_id: 12 }, developer, refused.deps));
+  await assert.rejects(getFailedCiLogExcerpt({ owner: 'InnerScopeHearing', repo: 'medreview-app', job_id: 12 }, developer, refused.deps), { message: 'github_failed_log_excerpt_phi_repo_blocked' });
+  assert.deepEqual(refused.calls, { listJobs: 0, getJob: 0, fetchLog: [] });
+});
+
+test('cancelled setup is opt-in and returns only the cancelled step with redaction', async () => {
+  const steps = [
+    step(1, 'Checkout', 'success', '21:00:00', '21:00:04'),
+    step(2, 'Install browser dependencies', 'cancelled', '21:00:05', '21:00:07'),
+    step(3, 'Tests', 'skipped', '21:00:08', '21:00:08'),
+  ];
+  const { deps, calls } = makeDeps([job(13, 'cancelled', steps), job(14, 'success')]);
+  const result = await getFailedCiLogExcerpt({ owner: 'InnerScopeHearing', repo: 'aware-aural-rehab', run_id: 99, include_cancelled: true }, { callerAgent: 'developer' }, deps);
+  assert.deepEqual(calls.fetchLog, [13]);
+  assert.equal(result.jobs_failed, 1);
+  assert.equal(result.jobs[0]?.conclusion, 'cancelled');
+  assert.equal(result.jobs[0]?.steps[0]?.step_name, 'Install browser dependencies');
+  assert.ok(!JSON.stringify(result).includes(GH_TOKEN));
+  assert.ok(!result.jobs[0]?.steps[0]?.excerpt.includes('checkout done'));
+});
+
 test('run mode fetches logs for FAILED jobs only and returns the redacted tail of the failed step', async () => {
   const { deps, calls } = makeDeps([job(11, 'success'), job(12, 'failure'), job(13, 'cancelled'), job(14, 'skipped')]);
   const result = await getFailedCiLogExcerpt({ owner: 'o', repo: 'r', run_id: 99 }, cto, deps);
