@@ -24,13 +24,14 @@ export function registerGitHubMergePullRequest(server: McpServer, callerHash: Ca
         number: z.number().int().describe('PR number.'),
         method: z.enum(['merge', 'squash', 'rebase']).optional().describe('Merge method (default squash).'),
         title: z.string().optional().describe('Optional merge commit title.'),
+        expected_head_sha: z.string().regex(/^[0-9a-fA-F]{40}$/).optional().describe('Expected pull-request head commit SHA. GitHub rejects the merge if the head changed.'),
       },
       outputShape: { merged: z.boolean().optional(), sha: z.string().optional(), message: z.string().optional(), planned: z.boolean().optional() },
       handler: async (input, ctx) => {
         if (ctx.dryRun) {
           return { data: { planned: true }, summary: `DRY RUN: would ${input.method ?? 'squash'}-merge PR #${input.number} in ${input.owner}/${input.repo}. Pass dry_run=false to execute.` };
         }
-        const r = await mergePullRequest(input.owner, input.repo, input.number, input.method ?? 'squash', input.title, ctx.callerAgent === 'cto');
+        const r = await mergePullRequest(input.owner, input.repo, input.number, input.method ?? 'squash', input.title, ctx.callerAgent === 'cto', input.expected_head_sha);
         return { data: r, summary: `PR #${input.number} merge: merged=${r.merged} ${r.sha ? '(' + r.sha.slice(0, 12) + ')' : ''} ${r.message}`, audit: { after: r } };
       },
     },
