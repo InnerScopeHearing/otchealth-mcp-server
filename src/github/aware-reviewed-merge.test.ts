@@ -86,6 +86,17 @@ test('reviewed AWARE draft promotion is CTO-opt-in, fully gated, reread, then SH
   assert.ok(checkUrl!.includes(head));
 });
 
+test('caller SHA cannot override the hardcoded reviewed AWARE head and fails before network', async () => {
+  const f = fixture();
+  await withFetch(f.fetchStub, async () => {
+    await assert.rejects(
+      () => mergePullRequest(owner, repo, 165, 'squash', undefined, true, 'a'.repeat(40)),
+      (error: any) => error?.code === 'github_reviewed_merge_guard',
+    );
+  });
+  assert.deepEqual(f.events, []);
+});
+
 test('second reviewed AWARE PR is pinned to its own reviewed head', async () => {
   const f = fixture({ number: 166, reviewedHead: head166 });
   await withFetch(f.fetchStub, async () => { const result = await mergePullRequest(owner, repo, 166, 'squash', undefined, true); assert.equal(result.merged, true); });
