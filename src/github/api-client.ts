@@ -391,14 +391,18 @@ export async function mergePullRequest(
   };
   const expectedHead = owner.toLowerCase() === 'innerscopehearing' && repo.toLowerCase() === 'aware-aural-rehab'
     ? reviewedHeads[Number(pullRequestNumber)] : undefined;
+  if (expectedHeadSha !== undefined && expectedHead !== undefined && expectedHeadSha.toLowerCase() !== expectedHead) {
+    throw new GitHubApiError({ code: 'github_reviewed_merge_guard', status: 0, message: 'The supplied expected head SHA conflicts with the hardcoded reviewed AWARE pull-request head.', nextStep: 'Recheck the reviewed PR and pass its exact authorized head SHA.' });
+  }
+  const mergeHeadSha = expectedHeadSha?.toLowerCase() ?? expectedHead;
   if (!expectedHead) {
-    const r = await githubSend<any>('PUT', `/repos/${S(owner)}/${S(repo)}/pulls/${pullRequestNumber}/merge`, { merge_method: method, ...(title ? { commit_title: title } : {}) });
+    const r = await githubSend<any>('PUT', `/repos/${S(owner)}/${S(repo)}/pulls/${pullRequestNumber}/merge`, { merge_method: method, ...(mergeHeadSha ? { sha: mergeHeadSha } : {}), ...(title ? { commit_title: title } : {}) });
     return { merged: r.merged === true, sha: r.sha ?? '', message: r.message ?? '' };
   }
   if (!allowReviewedDraftPromotion) {
     // Preserve the pre-existing caller behavior: non-CTO callers make the ordinary
     // merge attempt, but can never trigger the reviewed draft-to-ready transition.
-    const r = await githubSend<any>('PUT', `/repos/${S(owner)}/${S(repo)}/pulls/${pullRequestNumber}/merge`, { merge_method: method, ...(title ? { commit_title: title } : {}) });
+    const r = await githubSend<any>('PUT', `/repos/${S(owner)}/${S(repo)}/pulls/${pullRequestNumber}/merge`, { merge_method: method, sha: expectedHead, ...(title ? { commit_title: title } : {}) });
     return { merged: r.merged === true, sha: r.sha ?? '', message: r.message ?? '' };
   }
   const base = `/repos/${S(owner)}/${S(repo)}`;
