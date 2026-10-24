@@ -1,11 +1,13 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { connectorToolset, CTO_SHIP_LANE_TOOLSET } from './registry.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import { connectorToolset, CTO_SHIP_LANE_TOOLSET, registerTool } from './registry.js';
 import { loadEnv, type Env } from '../config/env.js';
+import { requestContext } from '../server/request-context.js';
 
-// github_workflow_run_failed_log_excerpt returns CI job log text, so it is CTO-only on every surface:
-// advertised on the CTO connector lane alone, refused by governance and by its own handler for
-// everyone else. (The CTO's exact-set assertion lives in registry.connector-lanes.test.ts.)
+// CI diagnostics belong to the CTO and Developer delivery lanes. All other roles stay excluded;
+// the handler separately enforces the company-owner/PHI boundaries and redacts retained output.
 const TOOL = 'github_workflow_run_failed_log_excerpt';
 
 before(() => {
