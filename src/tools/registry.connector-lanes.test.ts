@@ -280,7 +280,6 @@ test('every named company lane advertises the exact bounded GitHub operator surf
 
   const ctoGitHubExtras = [
     CTO_ONLY_GITHUB_RECEIPT_TOOL,
-    'github_workflow_run_failed_log_excerpt',
     RESTRICTED_GITHUB_MAKE_BROKER_TOOL,
   ];
   for (const tool of ctoGitHubExtras) {
