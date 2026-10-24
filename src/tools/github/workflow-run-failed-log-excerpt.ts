@@ -24,6 +24,7 @@ export const FAILED_LOG_EXCERPT_INPUT_SHAPE = {
   repo: z.string().min(1).max(100).regex(IDENT).describe('Repository name.'),
   run_id: z.number().int().positive().optional().describe('Workflow run numeric ID. Provide exactly one of run_id or job_id.'),
   job_id: z.number().int().positive().optional().describe('Workflow job numeric ID. Provide exactly one of run_id or job_id.'),
+  include_cancelled: z.boolean().optional().describe('Include cancelled jobs and steps, such as dependency setup stopped by a job timeout. Defaults to false.'),
 };
 const inputSchema = z.object(FAILED_LOG_EXCERPT_INPUT_SHAPE).strict();
 
