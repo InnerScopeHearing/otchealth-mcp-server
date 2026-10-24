@@ -165,7 +165,7 @@ export async function getFailedCiLogExcerpt(
   ctx: Pick<ToolContext, 'callerAgent'>,
   deps: FailedLogExcerptDeps = defaultDeps,
 ): Promise<FailedLogExcerptResult> {
-  if (ctx.callerAgent !== 'cto') throw new Error('github_failed_log_excerpt_forbidden');
+  if (ctx.callerAgent !== 'cto' && ctx.callerAgent !== 'developer') throw new Error('github_failed_log_excerpt_forbidden');
   const parsed = inputSchema.safeParse(rawInput);
   if (!parsed.success || (parsed.data.run_id === undefined) === (parsed.data.job_id === undefined)) {
     throw new Error('github_failed_log_excerpt_invalid_input');
