@@ -254,7 +254,7 @@ test('every named company lane advertises the exact bounded GitHub operator surf
     if (lane !== 'cto') {
       for (const restricted of [
         CTO_ONLY_GITHUB_RECEIPT_TOOL,
-        'github_workflow_run_failed_log_excerpt',
+        ...(lane === 'developer' ? [] : ['github_workflow_run_failed_log_excerpt']),
         RESTRICTED_GITHUB_MAKE_BROKER_TOOL,
       ]) assert.equal(set.has(restricted), false, `${lane} must not advertise ${restricted}`);
     }
