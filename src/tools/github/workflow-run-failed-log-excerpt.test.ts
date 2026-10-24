@@ -54,9 +54,9 @@ function makeDeps(jobs: any[], logFor: (jobId: number) => any = () => ({ status:
   return { deps, calls };
 }
 
-test('only the CTO lane may call it, and bad input is refused before any upstream call', async () => {
+test('unrelated lanes and bad input are refused before any upstream call', async () => {
   const { deps, calls } = makeDeps([job(1, 'failure')]);
-  for (const caller of ['developer', 'cfo', 'clo', 'coo', 'cro', 'exec', '']) {
+  for (const caller of ['cfo', 'clo', 'coo', 'cro', 'exec', '']) {
     await assert.rejects(getFailedCiLogExcerpt({ owner: 'o', repo: 'r', run_id: 1 }, { callerAgent: caller }, deps), { message: 'github_failed_log_excerpt_forbidden' }, caller);
   }
   for (const bad of [
