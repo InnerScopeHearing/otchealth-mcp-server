@@ -155,7 +155,7 @@ export const GOVERNANCE: GovRule[] = [
   ...GITHUB_OPERATOR_GOVERNANCE,
   ...GITHUB_ADJACENT_WRITE_GOVERNANCE,
   { pattern: 'github_graphrag_observation_receipt_get', requiredRole: 'cto', reason: 'The fixed GraphRAG observation receipt is a CTO-only provenance check and never exposes source content.' },
-  { pattern: 'github_workflow_run_failed_log_excerpt', requiredRole: 'cto', reason: 'CI job logs can echo environment content; the bounded, redacted failed-step excerpt is a CTO-only diagnostic read.' },
+  { pattern: 'github_workflow_run_failed_log_excerpt', requiredRole: ['cto', 'developer'], reason: 'CTO and Developer delivery owners may read bounded redacted CI diagnostics; handlers enforce company-owner and PHI repository boundaries.' },
   // AWS MCP bridge: durable read-only access for the named company AWS operator lanes. The whole
   // family is matched by prefix so future wrappers inherit the same gate; handlers repeat it.
   { pattern: 'aws_mcp_*', requiredRole: AWS_OPERATOR_LANES, reason: 'AWS account inspection uses the gateway-assumed read-only role and is limited to named company AWS operator lanes.' },
