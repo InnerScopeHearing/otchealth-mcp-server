@@ -289,6 +289,11 @@ test('every named company lane advertises the exact bounded GitHub operator surf
       assert.equal(connectorToolset(env, lane).has(tool), false, `${lane} must not inherit ${tool}`);
     }
   }
+  assert.equal(connectorToolset(env, 'cto').has('github_workflow_run_failed_log_excerpt'), true);
+  assert.equal(connectorToolset(env, 'developer').has('github_workflow_run_failed_log_excerpt'), true);
+  for (const lane of ORDINARY_SHARED_GITHUB_LANES) {
+    assert.equal(connectorToolset(env, lane).has('github_workflow_run_failed_log_excerpt'), false, lane);
+  }
 });
 
 test('a nonempty connector override cannot narrow the mandatory 29 or widen ordinary GitHub lanes', () => {
