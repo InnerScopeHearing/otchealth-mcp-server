@@ -229,7 +229,7 @@ test('the Make pilot identity gets exactly the broker and catalog probe even und
 
 test('(b) developer lane gets the full ship-lane set', () => {
   const set = connectorToolset(testEnv(), 'developer');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...DEVELOPER_SETUP_TOOLSET, ...CLOUD_BROWSER_TOOLS, ...AWS_MCP_TOOLS, 'claims_check', 'framer_project_inspect'].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...DEVELOPER_SETUP_TOOLSET, ...CLOUD_BROWSER_TOOLS, ...AWS_MCP_TOOLS, 'claims_check', 'framer_project_inspect', 'github_workflow_run_failed_log_excerpt'].sort());
   assert.equal(set.has(CTO_CLOUD_BROWSER_PROVISIONING_TOOL), false);
   assert.ok(set.has('brain_graph_search'));
   assert.ok(set.has('brain_public_kb_search'));
@@ -254,7 +254,7 @@ test('every named company lane advertises the exact bounded GitHub operator surf
     if (lane !== 'cto') {
       for (const restricted of [
         CTO_ONLY_GITHUB_RECEIPT_TOOL,
-        'github_workflow_run_failed_log_excerpt',
+        ...(lane === 'developer' ? [] : ['github_workflow_run_failed_log_excerpt']),
         RESTRICTED_GITHUB_MAKE_BROKER_TOOL,
       ]) assert.equal(set.has(restricted), false, `${lane} must not advertise ${restricted}`);
     }
@@ -280,7 +280,6 @@ test('every named company lane advertises the exact bounded GitHub operator surf
 
   const ctoGitHubExtras = [
     CTO_ONLY_GITHUB_RECEIPT_TOOL,
-    'github_workflow_run_failed_log_excerpt',
     RESTRICTED_GITHUB_MAKE_BROKER_TOOL,
   ];
   for (const tool of ctoGitHubExtras) {
@@ -289,6 +288,11 @@ test('every named company lane advertises the exact bounded GitHub operator surf
     for (const lane of ORDINARY_SHARED_GITHUB_LANES) {
       assert.equal(connectorToolset(env, lane).has(tool), false, `${lane} must not inherit ${tool}`);
     }
+  }
+  assert.equal(connectorToolset(env, 'cto').has('github_workflow_run_failed_log_excerpt'), true);
+  assert.equal(connectorToolset(env, 'developer').has('github_workflow_run_failed_log_excerpt'), true);
+  for (const lane of ORDINARY_SHARED_GITHUB_LANES) {
+    assert.equal(connectorToolset(env, lane).has('github_workflow_run_failed_log_excerpt'), false, lane);
   }
 });
 

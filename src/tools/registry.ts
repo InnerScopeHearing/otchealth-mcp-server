@@ -553,6 +553,9 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
     tools.delete('github_workflow_run_failed_log_excerpt');
     tools.delete(RESTRICTED_GITHUB_MAKE_BROKER_TOOL);
   }
+  // Developer owns app CI diagnosis. Reuse the bounded redacted reader on its default connector;
+  // its handler independently enforces the company repository and PHI exclusions.
+  if (lane === 'developer' && !env.CONNECTOR_TOOLSET) tools.add('github_workflow_run_failed_log_excerpt');
   // This only reads fixed upstream MCP tool metadata. Keep it discoverable to the company CTO who
   // owns the migration bridge, while not advertising it to other ship lanes.
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('hyperagent_discover_capabilities');

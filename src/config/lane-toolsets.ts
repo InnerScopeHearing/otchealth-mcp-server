@@ -238,7 +238,7 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
     ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...PUBLIC_WEB_BROWSER_DISCOVERY,
     'developer_task_rollup',
     ...GITHUB_OPERATOR_TOOLSET,
-    'github_*', '!github_graphrag_observation_receipt_get', '!github_make_broker', '!github_workflow_run_failed_log_excerpt', 'depot_*', 'posthog_query_hogql', 'posthog_insight_list', 'sentry_list_issues',
+    'github_*', '!github_graphrag_observation_receipt_get', '!github_make_broker', 'depot_*', 'posthog_query_hogql', 'posthog_insight_list', 'sentry_list_issues',
     ...HEYGEN,
     // 2026-08-02: developer_wake_lite (diagnostics/developer-wake-lite.ts) was never covered by
     // any pattern above -- not catalog_* (CATALOG's wildcard), not github_*/depot_*, no exact

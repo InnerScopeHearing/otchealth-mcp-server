@@ -341,7 +341,8 @@ for (const [lane, upperBound, mustInclude] of [
   // The Developer-only task rollup adds exactly one explicit read; preserve the existing buffer.
   // Public browser capture reuses the existing artifact reader, so only the separately-added
   // public-web discovery and exact Framer inspector each add one curated registration.
-  ['developer', 217, ['developer_task_rollup', 'brain_search', 'developer_wake_lite', 'catalog_probe', 'aws_mcp_tool_list', 'aws_mcp_tool_call',
+  // Add exactly one bounded redacted CI diagnostic, without widening other role families.
+  ['developer', 218, ['developer_task_rollup', 'brain_search', 'developer_wake_lite', 'catalog_probe', 'aws_mcp_tool_list', 'aws_mcp_tool_call', 'github_workflow_run_failed_log_excerpt',
     'revenuecat_list_projects', 'revenuecat_project_get', 'revenuecat_app_list', 'revenuecat_app_get',
     'revenuecat_offering_list', 'revenuecat_offering_get', 'revenuecat_product_list', 'revenuecat_product_get',
     'revenuecat_package_list', 'revenuecat_package_get', 'revenuecat_entitlement_list', 'revenuecat_entitlement_get']],
@@ -385,7 +386,7 @@ test('curate-m365-only exposes the fixed receipt to CTO but excludes it from Dev
   assert.ok(ctoNames.includes(receiptTool) || ctoNames.includes(receiptAlias), 'CTO M365 must retain visibility of the fixed receipt reader');
   assert.equal(developerNames.includes(receiptTool), false, 'Developer M365 must exclude the canonical reader despite github_*');
   assert.equal(developerNames.includes(receiptAlias), false, 'the generated M365 alias must not bypass the exact exclusion');
-  assert.ok(developerNames.length <= 217, `Developer M365 catalog must stay at or under 217 tools after the two AWS bindings, twelve exact RevenueCat configuration reads, one Developer task rollup, public-web discovery and the exact read-only Framer inspector, got ${developerNames.length}`);
+  assert.ok(developerNames.length <= 218, `Developer M365 catalog must stay at or under 218 tools after adding exactly one bounded redacted CI diagnostic to its prior 217-tool bound, got ${developerNames.length}`);
   for (const name of ['revenuecat_customer_get', 'revenuecat_subscriber_get_v1', 'revenuecat_entitlement_create']) {
     const alias = /^[^_]+_(.+)$/.exec(name)![1]!;
     assert.equal(developerNames.includes(name), false, name);

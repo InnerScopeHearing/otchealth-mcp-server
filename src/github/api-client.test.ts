@@ -276,9 +276,13 @@ test('generic pull-request artifact reads remain owner-agnostic while mutations 
 
 test('GitHub pull-request routes use canonical numeric path segments', async () => {
   const seen: string[] = [];
-  await withStubbedFetch((async (input: RequestInfo | URL) => {
+  const mergeBodies: unknown[] = [];
+  await withStubbedFetch((async (input: RequestInfo | URL, init?: RequestInit) => {
     seen.push(String(input));
-    if (String(input).endsWith('/merge')) return new Response(JSON.stringify({ merged: false, sha: '', message: 'not merged' }), { status: 200 });
+    if (String(input).endsWith('/merge')) {
+      mergeBodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ merged: false, sha: '', message: 'not merged' }), { status: 200 });
+    }
     return new Response(JSON.stringify({ number: 42 }), { status: 200 });
   }) as typeof fetch, async () => {
     await getPullRequest('InnerScopeHearing', 'otchealth-mcp-server', 42);
@@ -288,4 +292,53 @@ test('GitHub pull-request routes use canonical numeric path segments', async () 
     '/repos/InnerScopeHearing/otchealth-mcp-server/pulls/42',
     '/repos/InnerScopeHearing/otchealth-mcp-server/pulls/42/merge',
   ]);
+  assert.deepEqual(mergeBodies, [{ merge_method: 'squash' }]);
+});
+
+test('GitHub merge forwards an optional expected head SHA', async () => {
+  const bodies: unknown[] = [];
+  const stub = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes('/app/installations/') && url.endsWith('/access_tokens')) return new Response(JSON.stringify({ token: 'ghs_fake', expires_at: new Date(Date.now() + 3600_000).toISOString() }), { status: 201 });
+    if (url.endsWith('/pulls/42/merge')) {
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ merged: true, sha: 'merge-sha', message: 'merged' }), { status: 200 });
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  }) as typeof fetch;
+  await withStubbedFetch(stub, async () => {
+    await mergePullRequest('InnerScopeHearing', 'otchealth-mcp-server', 42, 'squash', undefined, false, 'a'.repeat(40));
+  });
+  assert.deepEqual(bodies, [{ merge_method: 'squash', sha: 'a'.repeat(40) }]);
+});
+
+test('GitHub merge propagates stale-head 409 without retrying', async () => {
+  let mergeCalls = 0;
+  const stub = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/app/installations/') && url.endsWith('/access_tokens')) return new Response(JSON.stringify({ token: 'ghs_fake', expires_at: new Date(Date.now() + 3600_000).toISOString() }), { status: 201 });
+    if (url.endsWith('/pulls/42/merge')) {
+      mergeCalls++;
+      return new Response(JSON.stringify({ message: 'Head SHA does not match' }), { status: 409 });
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  }) as typeof fetch;
+  await withStubbedFetch(stub, async () => {
+    await assert.rejects(
+      () => mergePullRequest('InnerScopeHearing', 'otchealth-mcp-server', 42, 'squash', undefined, false, 'a'.repeat(40)),
+      (error: any) => error?.status === 409 && error?.code === 'github_409',
+    );
+  });
+  assert.equal(mergeCalls, 1);
+});
+
+test('invalid expected head SHA is rejected before any HTTP request', async () => {
+  let calls = 0;
+  await withStubbedFetch((async () => { calls++; return new Response('{}', { status: 200 }); }) as typeof fetch, async () => {
+    await assert.rejects(
+      () => mergePullRequest('InnerScopeHearing', 'otchealth-mcp-server', 42, 'squash', undefined, false, 'not-a-sha'),
+      (error: any) => error?.code === 'github_invalid_expected_head_sha',
+    );
+  });
+  assert.equal(calls, 0);
 });

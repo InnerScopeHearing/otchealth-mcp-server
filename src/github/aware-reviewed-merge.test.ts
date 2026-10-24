@@ -86,6 +86,17 @@ test('reviewed AWARE draft promotion is CTO-opt-in, fully gated, reread, then SH
   assert.ok(checkUrl!.includes(head));
 });
 
+test('caller SHA cannot override the hardcoded reviewed AWARE head and fails before network', async () => {
+  const f = fixture();
+  await withFetch(f.fetchStub, async () => {
+    await assert.rejects(
+      () => mergePullRequest(owner, repo, 165, 'squash', undefined, true, 'a'.repeat(40)),
+      (error: any) => error?.code === 'github_reviewed_merge_guard',
+    );
+  });
+  assert.deepEqual(f.events, []);
+});
+
 test('second reviewed AWARE PR is pinned to its own reviewed head', async () => {
   const f = fixture({ number: 166, reviewedHead: head166 });
   await withFetch(f.fetchStub, async () => { const result = await mergePullRequest(owner, repo, 166, 'squash', undefined, true); assert.equal(result.merged, true); });
@@ -111,9 +122,12 @@ test('non-approved repository keeps the existing generic merge attempt', async (
 test('registered tool passes CTO identity only, and dry-run remains network-free', async () => {
   type Handler = (args: any) => Promise<any>;
   let handler: Handler | undefined;
-  const server = { registerTool(_name: string, _config: unknown, candidate: Handler) { handler = candidate; return { remove() {} }; } } as any;
+  let config: any;
+  const server = { registerTool(_name: string, candidateConfig: unknown, candidate: Handler) { config = candidateConfig; handler = candidate; return { remove() {} }; } } as any;
   registerGitHubMergePullRequest(server, () => 'synthetic-caller');
   assert.ok(handler);
+  assert.equal(config.inputSchema.expected_head_sha.safeParse(head).success, true);
+  assert.equal(config.inputSchema.expected_head_sha.safeParse('not-a-sha').success, false);
   const dry = fixture();
   await withFetch(dry.fetchStub, async () => {
     await requestContext.run({ callerHash: 'synthetic-caller', correlationId: 'synthetic-dry-run', callerAgent: 'cto' } as any, () => handler!({ owner, repo, number: 165, method: 'squash', dry_run: true }));
