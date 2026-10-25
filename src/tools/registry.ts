@@ -68,6 +68,7 @@ import { EXEC_RING } from './kb/search-privileged.js';
 import { projectPinnedObservationDiagnostic } from '../audit/internal-diagnostics.js';
 import { parseUpstreamToolError } from '../audit/upstream-tool-error.js';
 import { projectXeroFailure } from './xero/diagnostic-error.js';
+import { REVENUECAT_CATALOG_READ_TOOLS, DEVELOPER_REVENUECAT_CATALOG_WRITE_TOOLS, developerRevenueCatRejection } from '../config/revenuecat-operations.js';
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 // Per-lane curated connector toolsets, advertised to Claude Chat (DCR) / occ_ connector requests so
