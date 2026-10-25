@@ -123,12 +123,8 @@ export const DEVELOPER_SETUP_TOOLSET: readonly string[] = [
   'developer_task_rollup',
   'depot_list_projects', 'depot_project_get', 'depot_workflow_list',
   'depot_run_list', 'depot_run_get', 'depot_run_status_get', 'depot_run_metrics_get',
-  'revenuecat_list_projects', 'revenuecat_project_get',
-  'revenuecat_app_list', 'revenuecat_app_get',
-  'revenuecat_offering_list', 'revenuecat_offering_get',
-  'revenuecat_product_list', 'revenuecat_product_get',
-  'revenuecat_package_list', 'revenuecat_package_get',
-  'revenuecat_entitlement_list', 'revenuecat_entitlement_get',
+  ...REVENUECAT_CATALOG_READ_TOOLS,
+  ...DEVELOPER_REVENUECAT_CATALOG_WRITE_TOOLS,
 ] as const;
 
 export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
