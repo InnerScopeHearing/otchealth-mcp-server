@@ -1250,6 +1250,21 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       // Governance: every agent SEES every tool, but some actions are role-gated for EXECUTION.
       const callerAgent = currentCallerAgent();
 
+      // Curation is not authorization. Cached/internal/alias calls must respect the same bounded
+      // Developer grant before previews, handlers or upstream requests. Never fall back to a
+      // fleet-global credential for a Developer catalog write.
+      const revenueCatRejection = developerRevenueCatRejection(callerAgent, canonicalName, args);
+      if (revenueCatRejection) {
+        logToolEnd({ correlation_id: correlationId, tool: def.name, caller_hash: callerHash,
+          outcome: 'rejected', latency_ms: Date.now() - started, error_code: revenueCatRejection.code });
+        return {
+          isError: true,
+          content: [{ type: 'text', text: revenueCatRejection.message }],
+          structuredContent: { result: null, compliance_warning: null, correlation_id: correlationId,
+            dry_run: dryRun, error: revenueCatRejection },
+        };
+      }
+
       // PER-LANE TOOL-CATALOG CURATION (Wave 6 item 6.2), REPORT-MODE telemetry: fire-and-forget,
       // never blocks, never affects the outcome below. Re-reads TOOL_CATALOG_CURATION_MODE fresh from
       // process.env here (rather than reusing the registration-time value above) so this stays
