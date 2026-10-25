@@ -528,6 +528,11 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
   if (lane === 'developer' && !env.CONNECTOR_TOOLSET) {
     for (const name of DEVELOPER_SETUP_TOOLSET) tools.add(name);
   }
+  // CTO can verify project-scoped configuration through its own reader bindings. This does not
+  // grant catalog mutations or change any other seat's existing RevenueCat surface.
+  if (lane === 'cto' && !env.CONNECTOR_TOOLSET) {
+    for (const name of REVENUECAT_CATALOG_READ_TOOLS) tools.add(name);
+  }
   // AWARE release review needs the registered claims gate on its shipping
   // connectors. Preserve explicit overrides and all other default lane sets;
   // execution keeps the existing handler, provider and governance checks.
