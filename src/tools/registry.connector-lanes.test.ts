@@ -20,6 +20,7 @@ import { AWS_OPERATOR_LANES } from '../config/aws-operators.js';
 import { INTERCOM_OPERATIONS_TOOLSET } from '../config/intercom-operations.js';
 import { LANE_TOOLSETS } from '../config/lane-toolsets.js';
 import { requestContext } from '../server/request-context.js';
+import { REVENUECAT_CATALOG_READ_TOOLS } from '../config/revenuecat-operations.js';
 
 // Pins the Phase 5/6 connector-ring closure (2026-07-15), layer 1: the connector toolset a caller
 // sees MUST depend on its OAuth-derived lane, not be one global set. Before this split, EVERY
