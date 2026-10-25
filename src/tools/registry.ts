@@ -118,7 +118,7 @@ const AWS_MCP_TOOLS = ['aws_mcp_tool_list', 'aws_mcp_tool_call'] as const;
 const RESTRICTED_GITHUB_MAKE_BROKER_TOOL = 'github_make_broker';
 const PUBLIC_KB_COMPANY_SEATS = new Set(['cto', 'cfo', 'clo', 'coo', 'cro', 'developer']);
 
-/** Exact read-only project/build and subscription-configuration metadata needed by Developer. */
+/** Exact project/build readers and app-scoped catalog configuration needed by Developer. */
 export const DEVELOPER_SETUP_TOOLSET: readonly string[] = [
   'developer_task_rollup',
   'depot_list_projects', 'depot_project_get', 'depot_workflow_list',
