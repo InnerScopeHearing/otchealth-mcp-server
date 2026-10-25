@@ -37,6 +37,7 @@ const GITHUB_ADJACENT_WRITE_GOVERNANCE: readonly GovRule[] = GITHUB_CTO_DEVELOPE
 }));
 
 export const GOVERNANCE: GovRule[] = [
+  { pattern: 'revenuecat_entitlement_create', requiredRole: ['cto', 'developer'], reason: 'Assigned app entitlement definitions are approved catalog configuration. Developer execution additionally requires an explicit project credential; the existing high-risk switch and dry-run defaults remain enforced.' },
   { pattern: 'framer_project_inspect', requiredRole: ['cto', 'developer'], reason: 'The owner-bound Framer project metadata inspection is read-only and limited to the CTO and Developer lanes.' },
   { pattern: 'browser_cloud_profile_provision_public_trial', requiredRole: 'cto', reason: 'Provisioning an owner-bound cloud-browser profile is CTO-only infrastructure administration.' },
   // Customer.io administrative control plane. CRO can read and dry-run every bounded wrapper; live
