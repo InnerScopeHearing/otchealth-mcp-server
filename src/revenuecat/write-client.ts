@@ -1,7 +1,5 @@
-import { loadEnv } from '../config/env.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
-
-const env = loadEnv();
+import { resolveRevenueCatApiKey } from './credential-resolver.js';
 
 export class RevenueCatWriteError extends Error {
   readonly code: string; readonly status: number; readonly nextStep: string;
@@ -10,9 +8,11 @@ export class RevenueCatWriteError extends Error {
   }
 }
 
-function requireKey(): string {
-  if (!env.REVENUECAT_API_KEY) throw new RevenueCatWriteError({ code: 'revenuecat_not_configured', status: 0, message: 'REVENUECAT_API_KEY not set.', nextStep: 'Add REVENUECAT_API_KEY (sk_) from the vault.' });
-  return env.REVENUECAT_API_KEY;
+function requireKey(projectId?: string): string {
+  try { return resolveRevenueCatApiKey(projectId); }
+  catch {
+    throw new RevenueCatWriteError({ code: 'revenuecat_not_configured', status: 0, message: 'RevenueCat credentials are not configured for this request.', nextStep: 'Check the RevenueCat project key configuration.' });
+  }
 }
 
 // RevenueCat subscriber-attribute writes use the v1 REST API (POST /v1/subscribers/{app_user_id}/attributes).
@@ -36,8 +36,8 @@ async function rcPostV1<T = any>(path: string, body: unknown): Promise<T> {
   return data as T;
 }
 
-async function rcPostV2<T = any>(path: string, body: unknown): Promise<T> {
-  const key = requireKey();
+async function rcPostV2<T = any>(path: string, body: unknown, projectId: string): Promise<T> {
+  const key = requireKey(projectId);
   // Non-idempotent write (grant/revoke a promotional entitlement): retries:0 so a
   // timeout never grants (or revokes) a duplicate promotional period.
   const res = await fetchWithBudget(`https://api.revenuecat.com/v2${path}`, {
@@ -92,6 +92,7 @@ export async function grantEntitlement(params: GrantEntitlementParams): Promise<
   return rcPostV2(
     `/projects/${encodeURIComponent(params.project_id)}/subscribers/${encodeURIComponent(params.subscriber_id)}/entitlements/${encodeURIComponent(params.entitlement_id)}/actions/grant_promotional`,
     body,
+    params.project_id,
   );
 }
 
@@ -105,5 +106,6 @@ export async function revokeEntitlement(params: RevokeEntitlementParams): Promis
   return rcPostV2(
     `/projects/${encodeURIComponent(params.project_id)}/subscribers/${encodeURIComponent(params.subscriber_id)}/entitlements/${encodeURIComponent(params.entitlement_id)}/actions/revoke_promotional`,
     {},
+    params.project_id,
   );
 }

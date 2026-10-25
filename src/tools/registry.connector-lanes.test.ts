@@ -20,6 +20,7 @@ import { AWS_OPERATOR_LANES } from '../config/aws-operators.js';
 import { INTERCOM_OPERATIONS_TOOLSET } from '../config/intercom-operations.js';
 import { LANE_TOOLSETS } from '../config/lane-toolsets.js';
 import { requestContext } from '../server/request-context.js';
+import { REVENUECAT_CATALOG_READ_TOOLS } from '../config/revenuecat-operations.js';
 
 // Pins the Phase 5/6 connector-ring closure (2026-07-15), layer 1: the connector toolset a caller
 // sees MUST depend on its OAuth-derived lane, not be one global set. Before this split, EVERY
@@ -82,7 +83,7 @@ test('CTO_SHIP_LANE_TOOLSET and EXTERNAL_READONLY_TOOLSET are disjoint from each
 
 test('(a) cto lane gets the full ship-lane set, including the privileged tools', () => {
   const set = connectorToolset(testEnv(), 'cto');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...INTERCOM_OPERATIONS_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, 'github_workflow_run_failed_log_excerpt', CTO_ONLY_N8N_EXECUTION_LIST_TOOL, ...AWS_MCP_TOOLS, RESTRICTED_GITHUB_MAKE_BROKER_TOOL, 'graph_company_shared_relationship_query', 'claims_check', 'framer_project_inspect'].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...INTERCOM_OPERATIONS_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, 'github_workflow_run_failed_log_excerpt', CTO_ONLY_N8N_EXECUTION_LIST_TOOL, ...AWS_MCP_TOOLS, RESTRICTED_GITHUB_MAKE_BROKER_TOOL, 'graph_company_shared_relationship_query', 'claims_check', 'framer_project_inspect', ...REVENUECAT_CATALOG_READ_TOOLS].sort());
   assert.ok(set.has(CTO_CLOUD_BROWSER_PROVISIONING_TOOL), 'CTO connector must expose the protected public-profile provisioner');
   assert.ok(set.has('kb_search_privileged'));
   assert.ok(set.has('memory_write'));

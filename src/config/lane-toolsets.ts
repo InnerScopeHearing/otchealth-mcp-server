@@ -38,6 +38,7 @@
 import { GITHUB_OPERATOR_TOOLSET } from './github-operator.js';
 import { INTERCOM_OPERATIONS_TOOLSET } from './intercom-operations.js';
 import { AWS_OPERATOR_LANES } from './aws-operators.js';
+import { REVENUECAT_CATALOG_READ_TOOLS, DEVELOPER_REVENUECAT_CATALOG_WRITE_TOOLS } from './revenuecat-operations.js';
 
 const AWS_MCP_TOOLS = ['aws_mcp_tool_list', 'aws_mcp_tool_call'] as const;
 
@@ -151,6 +152,7 @@ const GRAPH_MAIL = ['graph_send_email', 'graph_list_messages', 'graph_message_ge
 // build-agents.mjs export, so it is no longer byte-identical to that generated file until the next
 // refresh removes the same names there too.
 const CTO_M365_CURATED = [
+  ...REVENUECAT_CATALOG_READ_TOOLS,
   ...INTERCOM_OPERATIONS_TOOLSET,
   'agent_dispatch',
   'framer_project_inspect',
@@ -253,15 +255,10 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
     'developer_wake_lite',
     // Read-only, project-bound metadata inspection; keep this exact rather than admitting all Framer APIs.
     'framer_project_inspect',
-    // Developer setup needs only exact RevenueCat project and catalog metadata. Keep the M365
-    // seed explicit so curate-m365-only does not require broadening to revenuecat_* (which would
-    // also admit customer, subscriber, token, admin, and mutation surfaces).
-    'revenuecat_list_projects', 'revenuecat_project_get',
-    'revenuecat_app_list', 'revenuecat_app_get',
-    'revenuecat_offering_list', 'revenuecat_offering_get',
-    'revenuecat_product_list', 'revenuecat_product_get',
-    'revenuecat_package_list', 'revenuecat_package_get',
-    'revenuecat_entitlement_list', 'revenuecat_entitlement_get',
+    // Explicit project metadata and bounded catalog configuration. Execution independently
+    // requires an explicit project credential and rejects every other Developer RC operation.
+    ...REVENUECAT_CATALOG_READ_TOOLS,
+    ...DEVELOPER_REVENUECAT_CATALOG_WRITE_TOOLS,
   ],
   // Finance / MNPI: Xero (accounting of record), the finance kb rooms, invoice document intelligence,
   // the CFO OneDrive/Graph exchange, plus the shared read/memory/task surface.

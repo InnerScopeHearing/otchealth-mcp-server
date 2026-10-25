@@ -68,6 +68,7 @@ import { EXEC_RING } from './kb/search-privileged.js';
 import { projectPinnedObservationDiagnostic } from '../audit/internal-diagnostics.js';
 import { parseUpstreamToolError } from '../audit/upstream-tool-error.js';
 import { projectXeroFailure } from './xero/diagnostic-error.js';
+import { REVENUECAT_CATALOG_READ_TOOLS, DEVELOPER_REVENUECAT_CATALOG_WRITE_TOOLS, developerRevenueCatRejection } from '../config/revenuecat-operations.js';
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 // Per-lane curated connector toolsets, advertised to Claude Chat (DCR) / occ_ connector requests so
@@ -117,17 +118,13 @@ const AWS_MCP_TOOLS = ['aws_mcp_tool_list', 'aws_mcp_tool_call'] as const;
 const RESTRICTED_GITHUB_MAKE_BROKER_TOOL = 'github_make_broker';
 const PUBLIC_KB_COMPANY_SEATS = new Set(['cto', 'cfo', 'clo', 'coo', 'cro', 'developer']);
 
-/** Exact read-only project/build and subscription-configuration metadata needed by Developer. */
+/** Exact project/build readers and app-scoped catalog configuration needed by Developer. */
 export const DEVELOPER_SETUP_TOOLSET: readonly string[] = [
   'developer_task_rollup',
   'depot_list_projects', 'depot_project_get', 'depot_workflow_list',
   'depot_run_list', 'depot_run_get', 'depot_run_status_get', 'depot_run_metrics_get',
-  'revenuecat_list_projects', 'revenuecat_project_get',
-  'revenuecat_app_list', 'revenuecat_app_get',
-  'revenuecat_offering_list', 'revenuecat_offering_get',
-  'revenuecat_product_list', 'revenuecat_product_get',
-  'revenuecat_package_list', 'revenuecat_package_get',
-  'revenuecat_entitlement_list', 'revenuecat_entitlement_get',
+  ...REVENUECAT_CATALOG_READ_TOOLS,
+  ...DEVELOPER_REVENUECAT_CATALOG_WRITE_TOOLS,
 ] as const;
 
 export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
@@ -530,6 +527,11 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
   // CONNECTOR_TOOLSET remains an exact override, and no other role inherits these names here.
   if (lane === 'developer' && !env.CONNECTOR_TOOLSET) {
     for (const name of DEVELOPER_SETUP_TOOLSET) tools.add(name);
+  }
+  // CTO can verify project-scoped configuration through its own reader bindings. This does not
+  // grant catalog mutations or change any other seat's existing RevenueCat surface.
+  if (lane === 'cto' && !env.CONNECTOR_TOOLSET) {
+    for (const name of REVENUECAT_CATALOG_READ_TOOLS) tools.add(name);
   }
   // AWARE release review needs the registered claims gate on its shipping
   // connectors. Preserve explicit overrides and all other default lane sets;
@@ -1247,6 +1249,21 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
 
       // Governance: every agent SEES every tool, but some actions are role-gated for EXECUTION.
       const callerAgent = currentCallerAgent();
+
+      // Curation is not authorization. Cached/internal/alias calls must respect the same bounded
+      // Developer grant before previews, handlers or upstream requests. Never fall back to a
+      // fleet-global credential for a Developer catalog write.
+      const revenueCatRejection = developerRevenueCatRejection(callerAgent, canonicalName, args);
+      if (revenueCatRejection) {
+        logToolEnd({ correlation_id: correlationId, tool: def.name, caller_hash: callerHash,
+          outcome: 'rejected', latency_ms: Date.now() - started, error_code: revenueCatRejection.code });
+        return {
+          isError: true,
+          content: [{ type: 'text', text: revenueCatRejection.message }],
+          structuredContent: { result: null, compliance_warning: null, correlation_id: correlationId,
+            dry_run: dryRun, error: revenueCatRejection },
+        };
+      }
 
       // PER-LANE TOOL-CATALOG CURATION (Wave 6 item 6.2), REPORT-MODE telemetry: fire-and-forget,
       // never blocks, never affects the outcome below. Re-reads TOOL_CATALOG_CURATION_MODE fresh from

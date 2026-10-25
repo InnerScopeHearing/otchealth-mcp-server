@@ -2,6 +2,7 @@ import { test, before, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { INTERCOM_OPERATIONS_TOOLSET } from '../config/intercom-operations.js';
+import { REVENUECAT_CATALOG_READ_TOOLS, DEVELOPER_REVENUECAT_CATALOG_WRITE_TOOLS } from '../config/revenuecat-operations.js';
 
 // Wave 6 item 6.2 (per-lane tool-catalog curation for internal client_credentials lanes).
 //
@@ -326,8 +327,8 @@ for (const [lane, upperBound, mustInclude] of [
   // 'checkpoint' when the 13 azure_* tools (and their CTO_M365_CURATED entries) were deleted
   // outright -- both are real, still-registered CTO_M365_CURATED members, so this proves the same
   // thing.
-  // Seven exact Intercom/Fin front doors are added intentionally; retain the previous drift buffer.
-  ['cto', 265 + INTERCOM_OPERATIONS_TOOLSET.length, ['brain_search', 'checkpoint', 'github_branch_get', 'github_dispatch_workflow', 'github_merge_pull_request', 'github_graphrag_observation_receipt_get', 'cio_admin_read_workspace_health', ...INTERCOM_OPERATIONS_TOOLSET]],
+  // Add only the twelve approved catalog readers; retain the previous drift buffer unchanged.
+  ['cto', 265 + INTERCOM_OPERATIONS_TOOLSET.length + REVENUECAT_CATALOG_READ_TOOLS.length, ['brain_search', 'checkpoint', 'github_branch_get', 'github_dispatch_workflow', 'github_merge_pull_request', 'github_graphrag_observation_receipt_get', 'cio_admin_read_workspace_health', ...INTERCOM_OPERATIONS_TOOLSET, ...REVENUECAT_CATALOG_READ_TOOLS]],
   ['cro', 273, ['brain_search', 'github_dispatch_workflow', 'github_merge_pull_request', 'cio_track_event', 'revenuecat_customer_get', 'cio_admin_read_workspace_health']],
   // 2026-08-02: developer_wake_lite was silently excluded from the developer lane's M365-curated
   // registration (no wildcard/exact match in LANE_TOOLSETS.developer covered it) -- invisible to
@@ -337,15 +338,16 @@ for (const [lane, upperBound, mustInclude] of [
   // The AWS always-on binding adds exactly its two named wrappers after M365 curation. Keep the
   // concrete bound and both representatives in sync so this intentional exposure cannot hide drift.
   // Twelve exact RevenueCat configuration reads are added for Developer setup. Assert every
-  // real registration here; customer/subscriber and mutation names remain outside this seed.
+  // real registration here; customer/subscriber operations remain outside this seed.
   // The Developer-only task rollup adds exactly one explicit read; preserve the existing buffer.
   // Public browser capture reuses the existing artifact reader, so only the separately-added
   // public-web discovery and exact Framer inspector each add one curated registration.
   // Add exactly one bounded redacted CI diagnostic, without widening other role families.
-  ['developer', 218, ['developer_task_rollup', 'brain_search', 'developer_wake_lite', 'catalog_probe', 'aws_mcp_tool_list', 'aws_mcp_tool_call', 'github_workflow_run_failed_log_excerpt',
+  // Add only the eight approved catalog writes, each checked at real registration below.
+  ['developer', 218 + DEVELOPER_REVENUECAT_CATALOG_WRITE_TOOLS.length, ['developer_task_rollup', 'brain_search', 'developer_wake_lite', 'catalog_probe', 'aws_mcp_tool_list', 'aws_mcp_tool_call', 'github_workflow_run_failed_log_excerpt',
     'revenuecat_list_projects', 'revenuecat_project_get', 'revenuecat_app_list', 'revenuecat_app_get',
     'revenuecat_offering_list', 'revenuecat_offering_get', 'revenuecat_product_list', 'revenuecat_product_get',
-    'revenuecat_package_list', 'revenuecat_package_get', 'revenuecat_entitlement_list', 'revenuecat_entitlement_get']],
+    'revenuecat_package_list', 'revenuecat_package_get', 'revenuecat_entitlement_list', 'revenuecat_entitlement_get', ...DEVELOPER_REVENUECAT_CATALOG_WRITE_TOOLS]],
 ] as const) {
   test(`TOOL_CATALOG_CURATION_MODE=curate-m365-only -- an M365 '${lane}' caller is narrowed to a concrete bound and keeps its representative tools (2026-08-02 Bug-2 fix)`, async () => {
     process.env.TOOL_CATALOG_CURATION_MODE = 'curate-m365-only';
@@ -354,7 +356,7 @@ for (const [lane, upperBound, mustInclude] of [
     assert.ok(
       names.length <= upperBound,
       `${lane}'s M365-curated registration should stay at or under ${upperBound} tools ` +
-        `(the existing bound increases only by the exact scoped Intercom/Fin front doors; ` +
+        `(the existing bound increases only by the exact approved scoped front doors; ` +
         `the prior small drift buffer remains unchanged) -- got ${names.length}. A ` +
         `count blowing past this means CTO_M365_CURATED/CRO_M365_CURATED regressed toward a wildcard ` +
         `again or the dedup fix broke.`,
@@ -386,8 +388,9 @@ test('curate-m365-only exposes the fixed receipt to CTO but excludes it from Dev
   assert.ok(ctoNames.includes(receiptTool) || ctoNames.includes(receiptAlias), 'CTO M365 must retain visibility of the fixed receipt reader');
   assert.equal(developerNames.includes(receiptTool), false, 'Developer M365 must exclude the canonical reader despite github_*');
   assert.equal(developerNames.includes(receiptAlias), false, 'the generated M365 alias must not bypass the exact exclusion');
-  assert.ok(developerNames.length <= 218, `Developer M365 catalog must stay at or under 218 tools after adding exactly one bounded redacted CI diagnostic to its prior 217-tool bound, got ${developerNames.length}`);
-  for (const name of ['revenuecat_customer_get', 'revenuecat_subscriber_get_v1', 'revenuecat_entitlement_create']) {
+  const upperBound = 218 + DEVELOPER_REVENUECAT_CATALOG_WRITE_TOOLS.length;
+  assert.ok(developerNames.length <= upperBound, `Developer M365 catalog must preserve its prior 218-tool bound plus exactly eight approved catalog writes, got ${developerNames.length}`);
+  for (const name of ['revenuecat_customer_get', 'revenuecat_subscriber_get_v1', 'revenuecat_entitlement_delete', 'revenuecat_product_delete', 'revenuecat_grant_entitlement', 'revenuecat_revoke_entitlement']) {
     const alias = /^[^_]+_(.+)$/.exec(name)![1]!;
     assert.equal(developerNames.includes(name), false, name);
     assert.equal(developerNames.includes(alias), false, alias);
