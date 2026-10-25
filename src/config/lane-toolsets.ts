@@ -38,6 +38,7 @@
 import { GITHUB_OPERATOR_TOOLSET } from './github-operator.js';
 import { INTERCOM_OPERATIONS_TOOLSET } from './intercom-operations.js';
 import { AWS_OPERATOR_LANES } from './aws-operators.js';
+import { REVENUECAT_CATALOG_READ_TOOLS, DEVELOPER_REVENUECAT_CATALOG_WRITE_TOOLS } from './revenuecat-operations.js';
 
 const AWS_MCP_TOOLS = ['aws_mcp_tool_list', 'aws_mcp_tool_call'] as const;
 
