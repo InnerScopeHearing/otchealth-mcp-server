@@ -57,9 +57,8 @@ function isSecretKey(value: string | undefined): value is string {
 
 /** Resolves only a key value already present in the process environment. Never fetches or logs secrets. */
 export function resolveRevenueCatApiKey(projectId?: string): string {
-  const mapping = parseProjectKeyEnvMap(process.env.REVENUECAT_PROJECT_KEY_ENV_JSON);
-
   if (projectId !== undefined) {
+    const mapping = parseProjectKeyEnvMap(process.env.REVENUECAT_PROJECT_KEY_ENV_JSON);
     if (typeof projectId !== 'string' || !PROJECT_ID_PATTERN.test(projectId)) {
       throw new RevenueCatCredentialError('revenuecat_project_key_mapping_invalid', 'RevenueCat project identifier is invalid.');
     }

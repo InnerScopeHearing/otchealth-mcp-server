@@ -87,6 +87,42 @@ test('malformed or unsafe project-key mappings fail closed rather than using the
   });
 });
 
+test('malformed app mappings do not disable the independent unscoped default credential', () => {
+  for (const badMapping of ['{', '[]', 'null', '{"proja2cc4776":"PATH"}']) {
+    withEnv({ REVENUECAT_API_KEY: globalKey, REVENUECAT_PROJECT_KEY_ENV_JSON: badMapping }, () => {
+      assert.equal(resolveRevenueCatApiKey(), globalKey);
+      assert.throws(() => resolveRevenueCatApiKey('proja2cc4776'));
+      assert.equal(hasRevenueCatProjectCredential('proja2cc4776'), false);
+    });
+  }
+});
+
+test('unscoped listing and legacy v1 clients retain the default connection with malformed app mapping', async () => {
+  const previous = { key: process.env.REVENUECAT_API_KEY, map: process.env.REVENUECAT_PROJECT_KEY_ENV_JSON };
+  const originalFetch = globalThis.fetch;
+  const requests: string[] = [];
+  process.env.REVENUECAT_API_KEY = globalKey;
+  process.env.REVENUECAT_PROJECT_KEY_ENV_JSON = '{';
+  globalThis.fetch = (async (_input, init) => {
+    requests.push(new Headers(init?.headers).get('authorization') ?? '');
+    return new Response('{"items":[]}', { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    const api = await import('./api-client.js');
+    const write = await import('./write-client.js');
+    const full = await import('./full-client.js');
+    await api.listProjects();
+    await write.setSubscriberAttributes({ app_user_id: 'synthetic-user', attributes: { source: { value: 'test' } } });
+    await assert.rejects(full.getProject('proja2cc4776'));
+    assert.deepEqual(requests, [`Bearer ${globalKey}`, `Bearer ${globalKey}`]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [name, value] of Object.entries({ REVENUECAT_API_KEY: previous.key, REVENUECAT_PROJECT_KEY_ENV_JSON: previous.map })) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  }
+});
+
 test('all RevenueCat clients route mapped project paths to that project key and keep unscoped calls global', async () => {
   const previous = new Map<string, string | undefined>();
   const configured: Record<string, string> = {

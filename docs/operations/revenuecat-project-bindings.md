@@ -2,6 +2,8 @@
 
 The legacy `REVENUECAT_API_KEY` remains the default credential for unscoped project listing,
 unmapped projects and legacy v1 subscriber operations. Do not replace it to repair a different app.
+Unscoped default-key operations do not parse the app mapping, so a malformed app binding cannot
+disable the independent fleet-default project listing or legacy v1 connection.
 
 For an approved app, set `REVENUECAT_PROJECT_KEY_ENV_JSON` to a JSON object mapping its exact
 RevenueCat project ID to a secret environment-variable name. The names must match
