@@ -152,6 +152,7 @@ const GRAPH_MAIL = ['graph_send_email', 'graph_list_messages', 'graph_message_ge
 // build-agents.mjs export, so it is no longer byte-identical to that generated file until the next
 // refresh removes the same names there too.
 const CTO_M365_CURATED = [
+  ...REVENUECAT_CATALOG_READ_TOOLS,
   ...INTERCOM_OPERATIONS_TOOLSET,
   'agent_dispatch',
   'framer_project_inspect',
