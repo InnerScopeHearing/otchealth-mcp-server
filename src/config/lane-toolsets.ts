@@ -255,15 +255,10 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
     'developer_wake_lite',
     // Read-only, project-bound metadata inspection; keep this exact rather than admitting all Framer APIs.
     'framer_project_inspect',
-    // Developer setup needs only exact RevenueCat project and catalog metadata. Keep the M365
-    // seed explicit so curate-m365-only does not require broadening to revenuecat_* (which would
-    // also admit customer, subscriber, token, admin, and mutation surfaces).
-    'revenuecat_list_projects', 'revenuecat_project_get',
-    'revenuecat_app_list', 'revenuecat_app_get',
-    'revenuecat_offering_list', 'revenuecat_offering_get',
-    'revenuecat_product_list', 'revenuecat_product_get',
-    'revenuecat_package_list', 'revenuecat_package_get',
-    'revenuecat_entitlement_list', 'revenuecat_entitlement_get',
+    // Explicit project metadata and bounded catalog configuration. Execution independently
+    // requires an explicit project credential and rejects every other Developer RC operation.
+    ...REVENUECAT_CATALOG_READ_TOOLS,
+    ...DEVELOPER_REVENUECAT_CATALOG_WRITE_TOOLS,
   ],
   // Finance / MNPI: Xero (accounting of record), the finance kb rooms, invoice document intelligence,
   // the CFO OneDrive/Graph exchange, plus the shared read/memory/task surface.
