@@ -48,7 +48,10 @@ export const cloudBrowserRuntime: CloudBrowserGatewayRuntime = {
 };
 
 /** Runs in the existing ECS gateway, never on the user's desktop. Durable claims fence replicas. */
-export function runCloudBrowserPolling(): () => void {
+export function runCloudBrowserPolling(canaryMode = false): () => void {
+  // A canary may retain the browser configuration for route/schema validation, but it must never
+  // claim or process shared durable browser jobs.
+  if (canaryMode) return () => undefined;
   if (process.env.CLOUD_BROWSER_WORKER_ENABLED !== 'true' || !cloudBrowserRuntimeStatus().enabled) return () => undefined;
   const worker = startCloudBrowserWorker(cloudBrowserRuntime);
   let stopped = false;

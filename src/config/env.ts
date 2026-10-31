@@ -675,6 +675,14 @@ const EnvSchema = z.object({
     .default('true')
     .transform((v) => v === 'true'),
 
+  // Isolated release-validation mode. This preserves initial revocation loading and static
+  // authentication readiness, but prevents autonomous background workers/reloaders from touching
+  // shared state. Production default remains false.
+  CANARY_MODE: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+
   // Server
   PORT: z
     .string()

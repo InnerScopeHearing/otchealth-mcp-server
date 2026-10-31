@@ -34,6 +34,7 @@ import { registerIntercomLoginRoutes } from './intercom-login.js';
 import { intercomLoginRuntime, websiteLoginRuntime } from './cloud-browser-runtime.js';
 import { registerWebsiteLoginRoutes } from './website-login.js';
 import { registerConfiguredDaytonaViewerRoutes } from './daytona-runtime.js';
+import { initializeStartup, startPostListenWorkers } from './startup-coordinator.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -150,28 +151,23 @@ async function main(): Promise<void> {
   // token that was revoked stays rejected across restarts / blue-green redeploys (the blocklist is
   // persisted in the configured state backend). A failed initial read keeps only static-token auth
   // closed; short-lived OAuth remains available so the process can start and expose diagnostics.
-  const revokedCount = await loadRevocations();
-  const revocationStatus = getRevocationStoreStatus();
-  if (!revocationStatus.static_token_auth_ready) {
-    logger.error(
-      { type: 'revocation_store_unavailable', state: revocationStatus.state },
-      'static-token authentication is closed until the durable revocation state loads',
-    );
-  }
+  const startup = await initializeStartup(env, {
+    loadRevocations,
+    getRevocationStoreStatus,
+    startRevocationReloader,
+    startDeindexResweepReloader,
+    runCloudBrowserPolling,
+    onRevocationUnavailable: (status) => {
+      logger.error(
+        { type: 'revocation_store_unavailable', state: status.state },
+        'static-token authentication is closed until the durable revocation state loads',
+      );
+    },
+  });
+  const { revokedCount } = startup;
   if (revokedCount > 0) {
     logger.warn({ type: 'revocations_loaded', count: revokedCount }, 'loaded durable token revocations at boot');
   }
-  // Behind Front Door / APIM the gateway can run >1 replica; a /admin/revoke only lands on one. This
-  // reconciler re-pulls the durable blocklist from Cosmos on an interval so any revoke reaches every
-  // replica within ~30s without a restart. Idempotent; no-op without Cosmos; unref'd (never blocks exit).
-  startRevocationReloader();
-  // THE PERMANENT FIX for the concurrent-pull-indexer resurrection race documented throughout PR #192
-  // (search-write.ts's module doc comment, "KNOWN RESIDUAL LIMITATION"): a delayed re-verification
-  // sweep over paths legal_blob_delete/legal_blob_move already enqueued, run safely past one full
-  // indexer cadence so it never races the same in-flight run the synchronous cleanup could. See
-  // agentstate/deindex-resweep.ts's module doc comment for the full design. Idempotent; no-op without
-  // Cosmos; unref'd; safe to run redundantly across replicas (deindexChunkedPath is idempotent).
-  startDeindexResweepReloader();
 
   try {
     const address = await app.listen({ port: env.PORT, host: '0.0.0.0' });
@@ -193,7 +189,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const stopCloudBrowserPolling = runCloudBrowserPolling();
+  const stopCloudBrowserPolling = startPostListenWorkers(env, { runCloudBrowserPolling });
   const shutdown = async (signal: string): Promise<void> => {
     stopCloudBrowserPolling();
     logger.info({ signal }, 'shutdown signal received');
