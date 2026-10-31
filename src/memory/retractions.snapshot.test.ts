@@ -5,6 +5,7 @@ import {
   __setRetractionReadersForTests,
   __seedRetractionCacheForTests,
   getRetractionSnapshot,
+  getRetractionAuthorityDiagnostic,
   noteRetraction,
 } from './retractions.js';
 
@@ -98,4 +99,39 @@ test('a local proof survives a refresh that began with a cold cache', async () =
     assert.equal(snapshot.verified, true);
     assert.equal(snapshot.byAgent.get('cto')?.has('cold-proof'), true);
   } finally { __resetRetractionCache(); }
+});
+
+test('diagnostic reports both source statuses and bounded cache age without rows', async () => {
+  __setRetractionReadersForTests({
+    shared: async () => [{ agent: 'cto', supersedes: 'hidden-shared-id' }],
+    memory: async () => [{ agent: 'cto', supersedes: 'hidden-memory-id' }],
+  });
+  try {
+    const diagnostic = await getRetractionAuthorityDiagnostic();
+    assert.deepEqual(diagnostic.schema, 'retraction-authority-diagnostic.v1');
+    assert.equal(diagnostic.shared_source, 'healthy');
+    assert.equal(diagnostic.memory_source, 'healthy');
+    assert.equal(diagnostic.verified, true);
+    assert.equal(typeof diagnostic.cache_age_ms, 'number');
+    assert.ok((diagnostic.cache_age_ms ?? -1) >= 0);
+    assert.equal(JSON.stringify(diagnostic).includes('hidden-'), false);
+  } finally {
+    __resetRetractionCache();
+  }
+});
+
+test('diagnostic preserves partial-source failure and does not expose the exception', async () => {
+  __setRetractionReadersForTests({
+    shared: async () => { throw new Error('secret-endpoint-value'); },
+    memory: async () => [],
+  });
+  try {
+    const diagnostic = await getRetractionAuthorityDiagnostic();
+    assert.equal(diagnostic.shared_source, 'error');
+    assert.equal(diagnostic.memory_source, 'healthy');
+    assert.equal(diagnostic.verified, false);
+    assert.equal(JSON.stringify(diagnostic).includes('secret-endpoint-value'), false);
+  } finally {
+    __resetRetractionCache();
+  }
 });

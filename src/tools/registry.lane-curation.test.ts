@@ -397,6 +397,19 @@ test('curate-m365-only exposes the fixed receipt to CTO but excludes it from Dev
   }
 });
 
+test('curate-m365-only excludes the CTO-only retraction diagnostic canonical and alias from non-CTO lanes', async () => {
+  process.env.TOOL_CATALOG_CURATION_MODE = 'curate-m365-only';
+  const ctoNames = await registeredToolNames('cto', true);
+  const developerNames = await registeredToolNames('developer', true);
+  const cfoNames = await registeredToolNames('cfo', true);
+  assert.ok(ctoNames.includes('memory_retraction_diagnostic') || ctoNames.includes('retraction_diagnostic'));
+  for (const [lane, names] of [['developer', developerNames], ['cfo', cfoNames]] as const) {
+    assert.equal(names.includes('memory_retraction_diagnostic'), false, `${lane} must exclude canonical diagnostic`);
+    assert.equal(names.includes('retraction_diagnostic'), false, `${lane} must exclude generated diagnostic alias`);
+  }
+  assert.ok(developerNames.length <= 226 + DEVELOPER_REVENUECAT_CATALOG_WRITE_TOOLS.length, 'Developer M365 bound must not grow for the CTO-only diagnostic');
+});
+
 test('Framer project inspection is visible only to CTO and Developer, including M365 short alias', async () => {
   process.env.TOOL_CATALOG_CURATION_MODE = 'curate-m365-only';
   const m365Cto = await registeredToolNames('cto', true);
