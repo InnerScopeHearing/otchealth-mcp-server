@@ -17,6 +17,7 @@ const M365_CTO_TOKEN = 'm'.repeat(40);
 // Deliberately a DIFFERENT string from M365_CTO_TOKEN: the Codex tests prove the two families are
 // independent (neither accepts the other's value) and that CODEX_* is its own variable.
 const CODEX_CTO_TOKEN = 'codex-cto-static-' + 'k'.repeat(40);
+const CODEX_CTO_NEXT_TOKEN = 'codex-cto-next-static-' + 'n'.repeat(40);
 const CODEX_CLO_PERSONAL_TOKEN = 'codex-clo-personal-static-' + 'p'.repeat(40);
 const CODEX_WEFUNDER_TOKEN = 'synthetic-wefunder-' + 'w'.repeat(40);
 const EVAL_TOKEN = 'e'.repeat(40);
@@ -42,6 +43,7 @@ before(() => {
     // PERPLEXITY_CONNECTOR_TOKEN (the exact bug this token was added to stop recurring).
     EVAL_AGENT_TOKEN: EVAL_TOKEN,
     CODEX_CTO_MCP_TOKEN: CODEX_CTO_TOKEN,
+    CODEX_CTO_MCP_TOKEN_NEXT: CODEX_CTO_NEXT_TOKEN,
     CODEX_CLO_PERSONAL_MCP_TOKEN: CODEX_CLO_PERSONAL_TOKEN,
     CODEX_WEFUNDER_MCP_TOKEN: CODEX_WEFUNDER_TOKEN,
   };
@@ -427,6 +429,27 @@ test('CODEX: the static cto token authenticates as caller_agent cto with connect
   await app.close();
 });
 
+test('CODEX: CTO primary and next overlap both resolve to the same curated CTO principal', async () => {
+  const { validateBearer } = await import('./bearer.js');
+  for (const token of [CODEX_CTO_TOKEN, CODEX_CTO_NEXT_TOKEN]) {
+    const ctx = await validateBearer(`Bearer ${token}`, () => true);
+    assert.ok(ctx);
+    assert.equal(ctx.caller_agent, 'cto');
+    assert.equal(ctx.connector_surface, true);
+    assert.equal(ctx.auth_kind, 'codex');
+  }
+});
+
+test('CODEX: revocation rejects only the selected CTO overlap token', async () => {
+  const { validateBearer } = await import('./bearer.js');
+  const { revokeToken } = await import('./revocation-store.js');
+  const result = await revokeToken(CODEX_CTO_NEXT_TOKEN, 'fictional overlap revocation test');
+  assert.equal(result.durability, 'memory_only', 'the test uses the explicit local test store');
+  assert.equal(await validateBearer(`Bearer ${CODEX_CTO_NEXT_TOKEN}`, () => true), null);
+  const primary = await validateBearer(`Bearer ${CODEX_CTO_TOKEN}`, () => true);
+  assert.equal(primary?.caller_agent, 'cto');
+});
+
 test('CODEX: a forged token and a too-short token are both rejected', async () => {
   const { default: Fastify } = await import('fastify');
   const { requireConnectorAuth } = await import('./bearer.js');
@@ -480,6 +503,10 @@ test('Codex static-token ownership fails closed on empty, short, or cross-seat c
   assert.equal(resolveCodexStaticAgent('short', { cto: 'short', 'clo-personal': '' }), null);
   assert.equal(resolveCodexStaticAgent(personal, { cto: personal, 'clo-personal': personal }), null);
   assert.equal(resolveCodexStaticAgent(personal, { clo: personal, 'clo-personal': personal }), null);
+  const next = 'next-' + 'n'.repeat(40);
+  assert.equal(resolveCodexStaticAgent(next, { cto: [cto, next], 'clo-personal': personal }), 'cto');
+  assert.equal(resolveCodexStaticAgent(next, { cto: [cto, next], cfo: next }), null);
+  assert.equal(resolveCodexStaticAgent(next, { cto: [cto, next, next] }), null);
   assert.equal(resolveUniqueStaticCredential(personal, [
     { agent: 'cto', kind: 'm365', value: personal },
     { agent: 'clo-personal', kind: 'codex', value: personal },
@@ -488,6 +515,10 @@ test('Codex static-token ownership fails closed on empty, short, or cross-seat c
     { agent: 'copilot-agent', kind: 'eval', value: personal },
     { agent: 'clo-personal', kind: 'codex', value: personal },
   ]), null);
+  assert.equal(resolveUniqueStaticCredential(next, [
+    { agent: 'cto', kind: 'codex', value: next },
+    { agent: 'cto', kind: 'codex', value: next },
+  ]), null, 'duplicate CTO slots must fail closed even when they map to the same seat');
 });
 
 test('CODEX: dedicated WeFunder token binds only its curated principal and fails closed without revocation readiness', async () => {

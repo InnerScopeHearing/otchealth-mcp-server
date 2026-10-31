@@ -168,28 +168,31 @@ function m365StaticAgentTokens(): Record<string, string> {
  * identity the OAuth seat would get, and is flagged connector_surface=true (see validateBearer) so
  * the seat receives the curated per-lane connector toolset rather than the raw internal catalog.
  */
-function codexStaticAgentTokens(): Record<string, string> {
+function codexStaticAgentTokens(): Record<string, string[]> {
   return {
-    cto: env.CODEX_CTO_MCP_TOKEN,
-    cfo: env.CODEX_CFO_MCP_TOKEN,
-    clo: env.CODEX_CLO_MCP_TOKEN,
-    'clo-personal': env.CODEX_CLO_PERSONAL_MCP_TOKEN,
-    coo: env.CODEX_COO_MCP_TOKEN,
-    cro: env.CODEX_CRO_MCP_TOKEN,
-    developer: env.CODEX_DEVELOPER_MCP_TOKEN,
-    'wefunder-campaign-director': env.CODEX_WEFUNDER_MCP_TOKEN,
+    cto: [env.CODEX_CTO_MCP_TOKEN, env.CODEX_CTO_MCP_TOKEN_NEXT],
+    cfo: [env.CODEX_CFO_MCP_TOKEN],
+    clo: [env.CODEX_CLO_MCP_TOKEN],
+    'clo-personal': [env.CODEX_CLO_PERSONAL_MCP_TOKEN],
+    coo: [env.CODEX_COO_MCP_TOKEN],
+    cro: [env.CODEX_CRO_MCP_TOKEN],
+    developer: [env.CODEX_DEVELOPER_MCP_TOKEN],
+    'wefunder-campaign-director': [env.CODEX_WEFUNDER_MCP_TOKEN],
   };
 }
 
 /** Resolve a Codex token only when exactly one configured seat owns it. */
 export function resolveCodexStaticAgent(
   token: string,
-  configured: Record<string, string> = codexStaticAgentTokens(),
+  configured: Record<string, string | string[]> = codexStaticAgentTokens(),
 ): string | null {
-  const matches = Object.entries(configured).filter(
-    ([, value]) => value && value.length >= 32 && safeEqual(token, value),
-  );
-  return matches.length === 1 ? matches[0][0] : null;
+  const matches = Object.entries(configured).flatMap(([agent, values]) => {
+    const candidates = Array.isArray(values) ? values : [values];
+    return candidates
+      .filter((value) => value && value.length >= 32 && safeEqual(token, value))
+      .map(() => agent);
+  });
+  return matches.length === 1 ? matches[0] : null;
 }
 
 type StaticCredentialKind = 'connector' | 'copilot' | 'eval' | 'copilot-dev' | 'm365' | 'codex';
@@ -213,7 +216,8 @@ function staticCredentialCandidates(): StaticCredentialCandidate[] {
     { agent: 'copilot-agent', kind: 'eval', value: env.EVAL_AGENT_TOKEN },
     { agent: 'developer', kind: 'copilot-dev', value: env.COPILOT_DEV_AGENT_TOKEN },
     ...Object.entries(m365StaticAgentTokens()).map(([agent, value]) => ({ agent, kind: 'm365' as const, value })),
-    ...Object.entries(codexStaticAgentTokens()).map(([agent, value]) => ({ agent, kind: 'codex' as const, value })),
+    ...Object.entries(codexStaticAgentTokens()).flatMap(([agent, values]) =>
+      values.map((value) => ({ agent, kind: 'codex' as const, value }))),
   ];
 }
 

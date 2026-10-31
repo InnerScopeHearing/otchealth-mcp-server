@@ -97,6 +97,9 @@ const EnvSchema = z.object({
   // on ~1000 tools). Individually named so each seat rotates independently. Inert when unset.
   // Rotate-before-launch.
   CODEX_CTO_MCP_TOKEN: z.string().optional().default(''),
+  // Temporary overlap slot for CTO-only static-token rotation. Keep unset except during a
+  // deliberate transition; it is resolved as the same CTO principal and must remain unique.
+  CODEX_CTO_MCP_TOKEN_NEXT: z.string().optional().default(''),
   CODEX_CFO_MCP_TOKEN: z.string().optional().default(''),
   CODEX_CLO_MCP_TOKEN: z.string().optional().default(''),
   // Protected personal-legal Codex seat. This is deliberately distinct from the company CLO
