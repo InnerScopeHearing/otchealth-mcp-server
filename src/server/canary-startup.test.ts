@@ -1,9 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runCloudBrowserPolling } from './cloud-browser-runtime.js';
-import { initializeStartup, startPostListenWorkers } from './startup-coordinator.js';
+import { initializeStartup, registerOptionalDaytonaRoutes, startPostListenWorkers } from './startup-coordinator.js';
 
 const ready = { static_token_auth_ready: true, state: 'ready' };
+
+test('canary skips Daytona construction, lifecycle ticks, and watchdog registration', async () => {
+  let calls = 0;
+  assert.equal(await registerOptionalDaytonaRoutes({ CANARY_MODE: true }, async () => { calls += 1; }), false);
+  assert.equal(calls, 0);
+});
+
+test('production preserves Daytona route registration', async () => {
+  let calls = 0;
+  assert.equal(await registerOptionalDaytonaRoutes({ CANARY_MODE: false }, async () => { calls += 1; }), true);
+  assert.equal(calls, 1);
+});
+
+test('canary has an explicit Datadog no-op gate in code and container entrypoint', async () => {
+  const fs = await import('node:fs/promises');
+  const instrument = await fs.readFile(new URL('../instrument.ts', import.meta.url), 'utf8');
+  const dockerfile = await fs.readFile(new URL('../../Dockerfile', import.meta.url), 'utf8');
+  assert.match(instrument, /DD_API_KEY && process\.env\.CANARY_MODE !== 'true'/);
+  assert.match(dockerfile, /DD_API_KEY.*CANARY_MODE.*true/);
+});
 
 test('canary initializes revocations but calls no reloaders or browser worker', async () => {
   const calls: string[] = [];

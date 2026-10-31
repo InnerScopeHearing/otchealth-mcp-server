@@ -51,3 +51,14 @@ export function startPostListenWorkers(
 ): () => void {
   return deps.runCloudBrowserPolling(env.CANARY_MODE);
 }
+
+/** Daytona construction initializes provider state and expiry/watchdog timers. It is a production
+ * route registration, not a harmless schema import, so canary mode must skip it before invocation. */
+export async function registerOptionalDaytonaRoutes(
+  env: StartupEnvironment,
+  registerRoutes: () => Promise<unknown>,
+): Promise<boolean> {
+  if (env.CANARY_MODE) return false;
+  await registerRoutes();
+  return true;
+}

@@ -34,7 +34,7 @@ import { registerIntercomLoginRoutes } from './intercom-login.js';
 import { intercomLoginRuntime, websiteLoginRuntime } from './cloud-browser-runtime.js';
 import { registerWebsiteLoginRoutes } from './website-login.js';
 import { registerConfiguredDaytonaViewerRoutes } from './daytona-runtime.js';
-import { initializeStartup, startPostListenWorkers } from './startup-coordinator.js';
+import { initializeStartup, registerOptionalDaytonaRoutes, startPostListenWorkers } from './startup-coordinator.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -113,7 +113,7 @@ async function main(): Promise<void> {
   registerMcpRoutes(app);
   registerIntercomLoginRoutes(app, intercomLoginRuntime);
   registerWebsiteLoginRoutes(app, websiteLoginRuntime);
-  await registerConfiguredDaytonaViewerRoutes(app);
+  await registerOptionalDaytonaRoutes(env, () => registerConfiguredDaytonaViewerRoutes(app));
   registerGraphWorkerBrokerRoutes(app, { identityRegistry: createProductionIdentityRegistryResolver() });
   registerGraphCatalogControllerRoutes(app);
   registerRelationshipArtifactGatewayRoutes(app);
