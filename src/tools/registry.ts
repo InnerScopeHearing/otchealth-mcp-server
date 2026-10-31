@@ -111,6 +111,8 @@ import { REVENUECAT_CATALOG_READ_TOOLS, DEVELOPER_REVENUECAT_CATALOG_WRITE_TOOLS
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 const CTO_ONLY_GITHUB_RECEIPT_TOOL = 'github_graphrag_observation_receipt_get';
 const CTO_ONLY_N8N_EXECUTION_LIST_TOOL = 'n8n_execution_list';
+const CTO_ONLY_RETRACTION_DIAGNOSTIC_TOOL = 'memory_retraction_diagnostic';
+const CTO_ONLY_M365_TOOLS = new Set([CTO_ONLY_RETRACTION_DIAGNOSTIC_TOOL]);
 const FRAMER_PROJECT_INSPECT_TOOL = 'framer_project_inspect';
 // AWS MCP bridge: durable read-only AWS access for five named operator lanes. Visibility, the
 // aws_mcp_* governance rule and the in-handler lane check are independent matching gates.
@@ -564,6 +566,10 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
   // This execution list returns bounded aggregate counts only. Keep its connector binding on the
   // CTO lane; the read handler also enforces the caller identity before making an upstream request.
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add(CTO_ONLY_N8N_EXECUTION_LIST_TOOL);
+  // Retraction authority diagnostics expose only fixed health metadata and are
+  // discoverable on the CTO connector only. The handler repeats the role gate.
+  if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add(CTO_ONLY_RETRACTION_DIAGNOSTIC_TOOL);
+  else tools.delete(CTO_ONLY_RETRACTION_DIAGNOSTIC_TOOL);
   // The read-only AWS bridge is a mandatory binding for the five named company operator lanes.
   // Add after override curation; strip it from every other identity even if an override names it.
   if (isAwsOperatorLane(lane)) for (const name of AWS_MCP_TOOLS) tools.add(name);
@@ -1009,6 +1015,7 @@ export function finalizeM365Aliases(server: McpServer, callerHashProvider: () =>
       continue;
     }
     const { canonicalName, def } = entries[0]!;
+    if (isM365StaticAuth() && currentCallerAgent() !== 'cto' && CTO_ONLY_M365_TOOLS.has(canonicalName)) continue;
     registerTool(server, { ...def, name: aliasName, canonicalName }, callerHashProvider, true);
     // DEDUP FIX (2026-08-02): the alias is unambiguous and just got registered under `aliasName` --
     // M365 Copilot will call it there, never under `canonicalName` (see this shim's header + the
@@ -1072,6 +1079,10 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   const catalogCuration = connectorSurfaceForThisTool
     ? null
     : evaluateCatalogCuration(catalogCurationMode, laneForThisTool, canonicalName, isM365StaticAuth(), curateLaneOverrides);
+  // Some CTO-only diagnostics have a broad seed prefix (memory_*) for ordinary
+  // internal tools. Keep the M365 path stricter than that broad allowlist, and
+  // apply the same exclusion to canonical and generated alias registrations.
+  if (isM365StaticAuth() && laneForThisTool !== 'cto' && CTO_ONLY_M365_TOOLS.has(canonicalName)) return;
   if (catalogCuration && !catalogCuration.advertise) return;
   // Only an explicitly opted-in tool receives a connector projection. A lane-specific projection
   // takes precedence over the neutral projection; strict validation uses the selected public schema,

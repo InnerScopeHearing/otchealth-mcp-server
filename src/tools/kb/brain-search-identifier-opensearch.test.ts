@@ -241,7 +241,12 @@ test('brain_search promotes an authorized full-text opaque identifier before fed
     throw new Error(`unexpected fetch ${u}`);
   }) as typeof fetch;
   try {
-    const result = await handleBrainSearch({ query: token, top: 3, include_ops: false }, { callerAgent: 'cto' } as any);
+    // This provider-free identifier test supplies an explicitly verified
+    // authority snapshot so it exercises identifier promotion rather than the
+    // production fail-closed unavailable-authority path.
+    const result = await handleBrainSearch({ query: token, top: 3, include_ops: false }, { callerAgent: 'cto' } as any, {
+      getRetractionSnapshot: async () => ({ byAgent: new Map(), verified: true }),
+    });
     const data = result.data as any;
     assert.equal(data.mode, 'identifier-match');
     assert.equal(data.matches[0].id, 'cto__literal');

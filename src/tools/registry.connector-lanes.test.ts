@@ -61,6 +61,7 @@ test('public-web discovery is in curated seeds for only the existing eligible in
 const CTO_CLOUD_BROWSER_PROVISIONING_TOOL = 'browser_cloud_profile_provision_public_trial';
 const CTO_ONLY_GITHUB_RECEIPT_TOOL = 'github_graphrag_observation_receipt_get';
 const CTO_ONLY_N8N_EXECUTION_LIST_TOOL = 'n8n_execution_list';
+const CTO_ONLY_RETRACTION_DIAGNOSTIC_TOOL = 'memory_retraction_diagnostic';
 const AWS_MCP_TOOLS = ['aws_mcp_tool_list', 'aws_mcp_tool_call'] as const;
 const RESTRICTED_GITHUB_MAKE_BROKER_TOOL = 'github_make_broker';
 const ORDINARY_SHARED_GITHUB_LANES = [
@@ -83,7 +84,7 @@ test('CTO_SHIP_LANE_TOOLSET and EXTERNAL_READONLY_TOOLSET are disjoint from each
 
 test('(a) cto lane gets the full ship-lane set, including the privileged tools', () => {
   const set = connectorToolset(testEnv(), 'cto');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...INTERCOM_OPERATIONS_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, 'github_workflow_run_failed_log_excerpt', CTO_ONLY_N8N_EXECUTION_LIST_TOOL, ...AWS_MCP_TOOLS, RESTRICTED_GITHUB_MAKE_BROKER_TOOL, 'graph_company_shared_relationship_query', 'claims_check', 'framer_project_inspect', ...REVENUECAT_CATALOG_READ_TOOLS].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...INTERCOM_OPERATIONS_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, 'github_workflow_run_failed_log_excerpt', CTO_ONLY_N8N_EXECUTION_LIST_TOOL, CTO_ONLY_RETRACTION_DIAGNOSTIC_TOOL, ...AWS_MCP_TOOLS, RESTRICTED_GITHUB_MAKE_BROKER_TOOL, 'graph_company_shared_relationship_query', 'claims_check', 'framer_project_inspect', ...REVENUECAT_CATALOG_READ_TOOLS].sort());
   assert.ok(set.has(CTO_CLOUD_BROWSER_PROVISIONING_TOOL), 'CTO connector must expose the protected public-profile provisioner');
   assert.ok(set.has('kb_search_privileged'));
   assert.ok(set.has('memory_write'));
@@ -175,6 +176,15 @@ test('bounded n8n execution counts are advertised only to the CTO connector lane
   }
   const overridden = { ...testEnv(), CONNECTOR_TOOLSET: 'brain_search' } as Env;
   assert.equal(connectorToolset(overridden, 'cto').has(CTO_ONLY_N8N_EXECUTION_LIST_TOOL), false);
+});
+
+test('retraction authority diagnostics are advertised only to the CTO connector lane', () => {
+  assert.equal(connectorToolset(testEnv(), 'cto').has(CTO_ONLY_RETRACTION_DIAGNOSTIC_TOOL), true);
+  for (const lane of ['developer', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec', 'external-read', 'unknown', '']) {
+    assert.equal(connectorToolset(testEnv(), lane).has(CTO_ONLY_RETRACTION_DIAGNOSTIC_TOOL), false, lane || '(empty lane)');
+  }
+  const overridden = { ...testEnv(), CONNECTOR_TOOLSET: 'brain_search' } as Env;
+  assert.equal(connectorToolset(overridden, 'cto').has(CTO_ONLY_RETRACTION_DIAGNOSTIC_TOOL), false);
 });
 
 test('the AWS MCP bridge is mandatory on five company operator lanes and absent from every other lane', () => {

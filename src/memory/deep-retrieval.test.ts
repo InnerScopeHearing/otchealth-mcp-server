@@ -23,8 +23,8 @@ process.env.AZURE_SEARCH_ENDPOINT ||= 'https://otchealth-dataroom-search.example
 process.env.AZURE_SEARCH_QUERY_KEY ||= 'test-search-key';
 
 const {
-  deepRetrieve,
-  fallbackFastSearch,
+  deepRetrieve: deepRetrieveImpl,
+  fallbackFastSearch: fallbackFastSearchImpl,
   parseDeepRetrievalMode,
   parseQueryPlan,
   parseRefineResponse,
@@ -54,6 +54,61 @@ import { chat } from '../azure/foundry.js';
 import { logger } from '../audit/logger.js';
 import { requestContext } from '../server/request-context.js';
 type FusedHit = import('./rrf.js').FusedHit;
+
+// Keep the existing provider-stubbed suite deterministic after current recall gains a mandatory
+// retraction-authority gate. Individual tests can override this seam for degraded-path checks.
+const verifiedRetractionSnapshot = async () => ({ byAgent: await retractedIdsByAgent(), verified: true });
+async function deepRetrieve(query: string, opts: Parameters<typeof deepRetrieveImpl>[1], deps: Parameters<typeof deepRetrieveImpl>[2] = {}) {
+  return deepRetrieveImpl(query, opts, { getRetractionSnapshot: verifiedRetractionSnapshot, ...deps });
+}
+async function fallbackFastSearch(...args: Parameters<typeof fallbackFastSearchImpl>) {
+  const [query, rooms, top, includeOps, embeddingCache] = args;
+  return fallbackFastSearchImpl(query, rooms, top, includeOps, embeddingCache, verifiedRetractionSnapshot);
+}
+
+test('deep current recall fails before provider work when retraction authority is unverified', async () => {
+  let providerCalls = 0;
+  await withStubbedFetch(async () => {
+    providerCalls++;
+    throw new Error('provider must not run');
+  }, async () => {
+    const result = await deepRetrieveImpl(
+      'blocked before provider',
+      { rooms: ['memory-exec'] },
+      { getRetractionSnapshot: async () => ({ byAgent: new Map(), verified: false }) },
+    );
+    assert.equal(result.mode, 'degraded-retraction-authority');
+    assert.deepEqual(result.hits, []);
+    assert.equal(providerCalls, 0);
+  });
+});
+
+test('deep fallback discards retrieved hits when authority becomes unverified before filtering', async () => {
+  let snapshotCalls = 0;
+  let searchCalls = 0;
+  await withStubbedFetch((async (url: string | URL) => {
+    const u = String(url);
+    if (isSearchUrl(u)) {
+      searchCalls++;
+      return new Response(JSON.stringify({ value: [{ id: 'synthetic-agent__live', agent: 'synthetic-agent', text: 'synthetic result', '@search.rerankerScore': 1 }] }), { status: 200 });
+    }
+    if (isEmbeddingsUrl(u)) return embeddingsOk();
+    return new Response('unavailable', { status: 503 });
+  }) as typeof fetch, async () => {
+    const result = await fallbackFastSearchImpl(
+      'mid-retrieval authority change',
+      ['memory-exec'],
+      1,
+      false,
+      undefined,
+      async () => ({ byAgent: new Map(), verified: ++snapshotCalls === 1 }),
+    );
+    assert.ok(searchCalls > 0);
+    assert.equal(snapshotCalls, 2);
+    assert.equal(result.mode, 'degraded-retraction-authority');
+    assert.deepEqual(result.hits, []);
+  });
+});
 
 test('deep stage timing fields are fixed, content-free, and clamp invalid clock deltas', () => {
   const event = deepStageTimingFields('retrieval', 10.2, 23.8, 'partial');
