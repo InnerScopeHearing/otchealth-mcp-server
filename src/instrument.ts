@@ -11,7 +11,7 @@
 import tracer from 'dd-trace';
 import { daytonaTracePrivacyOptions } from './safety/daytona-trace-privacy.js';
 
-if (process.env.DD_API_KEY) {
+if (process.env.DD_API_KEY && process.env.CANARY_MODE !== 'true') {
   tracer.init({
     service: process.env.DD_SERVICE || 'gateway-mcp',
     env: process.env.DD_ENV || process.env.NODE_ENV || 'development',
