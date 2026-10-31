@@ -33,6 +33,7 @@ const TTL_MS = 120_000;
  * cache is one built while a source was unreachable, so it is a stopgap, not an answer.
  */
 const DEGRADED_RETRY_MS = 20_000;
+const MEMORY_RETRACTION_MAX_ROWS = 5000;
 let cache: {
   at: number;
   ids: Set<string>;
@@ -245,6 +246,7 @@ async function loadRetractionCache(now: number): Promise<void> {
   let degraded = false;
   try {
     const rows = await readers.shared();
+    validateRetractionRows(rows, false);
     for (const id of collectRetracted(rows)) ids.add(id);
     merge(collectRetractedByAgent(rows));
   } catch {
@@ -253,6 +255,8 @@ async function loadRetractionCache(now: number): Promise<void> {
   // Cosmos memory-of-record (memory_write can declare supersedes since 2026-07-13).
   try {
     const rows = await readers.memory();
+    validateRetractionRows(rows, true);
+    if (rows.length >= MEMORY_RETRACTION_MAX_ROWS) throw new Error('retraction source reached its bounded page limit');
     const typed = rows as Array<{ agent?: unknown; supersedes?: unknown }>;
     for (const id of collectRetracted(typed)) ids.add(id);
     merge(collectRetractedByAgent(typed));
@@ -280,6 +284,30 @@ async function loadRetractionCache(now: number): Promise<void> {
     merge(cache.byAgent);
   }
   cache = { at: now, ids, byAgent, degraded };
+}
+
+/** A successful transport response is not authoritative if its projected row shape is malformed. */
+function validateRetractionRows(rows: unknown, requireRetractionFields: boolean): asserts rows is RetractionRows {
+  if (!Array.isArray(rows)) throw new Error('retraction source returned a non-array payload');
+  for (const row of rows) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error('retraction source returned a malformed row');
+    const value = row as { agent?: unknown; supersedes?: unknown };
+    if (requireRetractionFields && (typeof value.agent !== 'string' || !value.agent.trim() || typeof value.supersedes !== 'string' || !value.supersedes.trim())) {
+      throw new Error('retraction source returned an incomplete projected row');
+    }
+    if (value.agent !== undefined && (typeof value.agent !== 'string' || !value.agent.trim())) {
+      throw new Error('retraction source returned a malformed agent');
+    }
+    // Shared-feed rows are allowed to omit agent only when they are ordinary
+    // non-retraction records. A declared supersedes without an owner cannot be
+    // applied by the lane-scoped map, so do not treat that response as verified.
+    if (!requireRetractionFields && value.supersedes !== undefined && value.agent === undefined) {
+      throw new Error('retraction source returned an unowned declared retraction');
+    }
+    if (value.supersedes !== undefined && (typeof value.supersedes !== 'string' || !value.supersedes.trim())) {
+      throw new Error('retraction source returned a malformed supersedes value');
+    }
+  }
 }
 
 /**

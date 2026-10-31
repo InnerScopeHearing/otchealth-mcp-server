@@ -23,6 +23,56 @@ test('a healthy retraction snapshot returns complete status with its lane map', 
   }
 });
 
+test('malformed successful source rows are incomplete, not verified', async () => {
+  __setRetractionReadersForTests({
+    shared: async () => [{ agent: 'cto', supersedes: 42 }],
+    memory: async () => [],
+  });
+  try {
+    const snapshot = await getRetractionSnapshot();
+    assert.equal(snapshot.verified, false);
+  } finally {
+    __resetRetractionCache();
+  }
+});
+
+test('an unowned shared declared retraction is incomplete, while ordinary unowned rows remain valid', async () => {
+  __setRetractionReadersForTests({
+    shared: async () => [{ supersedes: 'unowned-retraction' }],
+    memory: async () => [],
+  });
+  try {
+    const snapshot = await getRetractionSnapshot();
+    assert.equal(snapshot.verified, false);
+  } finally {
+    __resetRetractionCache();
+  }
+
+  __setRetractionReadersForTests({
+    shared: async () => [{ text: 'ordinary shared note' }],
+    memory: async () => [],
+  });
+  try {
+    const snapshot = await getRetractionSnapshot();
+    assert.equal(snapshot.verified, true);
+  } finally {
+    __resetRetractionCache();
+  }
+});
+
+test('a bounded memory projection at its page limit is not claimed complete', async () => {
+  __setRetractionReadersForTests({
+    shared: async () => [],
+    memory: async () => Array.from({ length: 5000 }, (_, i) => ({ agent: 'cto', supersedes: `row-${i}` })),
+  });
+  try {
+    const snapshot = await getRetractionSnapshot();
+    assert.equal(snapshot.verified, false);
+  } finally {
+    __resetRetractionCache();
+  }
+});
+
 test('one failed source keeps the other source map and returns incomplete status', async () => {
   __setRetractionReadersForTests({
     shared: async () => { throw new Error('shared-provider-error-must-not-escape'); },

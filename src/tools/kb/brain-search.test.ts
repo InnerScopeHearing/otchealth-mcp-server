@@ -27,11 +27,22 @@ process.env.WEB_SEARCH_PROVIDER ||= 'azure';
 process.env.AZURE_SEARCH_ENDPOINT ||= 'https://otchealth-dataroom-search.example.invalid';
 process.env.AZURE_SEARCH_QUERY_KEY ||= 'test-search-key';
 
-const { roomsFor, rrfFuse, fuseWithDirectCandidate, exactIdentifierCandidate, isOpaqueIdentifierQuery, canUseEntityLookup, buildEntityPromotion, OPEN_ROOMS, RING_ROOMS, handleBrainSearch, brainSearchInputShape } = await import('./brain-search.js');
+const { roomsFor, rrfFuse, fuseWithDirectCandidate, exactIdentifierCandidate, isOpaqueIdentifierQuery, canUseEntityLookup, buildEntityPromotion, OPEN_ROOMS, RING_ROOMS, handleBrainSearch: handleBrainSearchImpl, brainSearchInputShape } = await import('./brain-search.js');
 const { activeEntityRows, matchEntity } = await import('../../memory/entity-lookup.js');
-const { filterRetractedByAgent, __resetRetractionCache, __seedRetractionCacheForTests } = await import('../../memory/retractions.js');
+const { filterRetractedByAgent, __resetRetractionCache, __seedRetractionCacheForTests, retractedIdsByAgent } = await import('../../memory/retractions.js');
 const { z } = await import('zod');
 type FixtureEntityRow = import('../../memory/entity-lookup.js').EntityRow;
+
+async function handleBrainSearch(...args: Parameters<typeof handleBrainSearchImpl>) {
+  const [input, ctx, dependencies = {}] = args;
+  if (!dependencies.getRetractionSnapshot && !dependencies.retractedIdsByAgent) {
+    return handleBrainSearchImpl(input, ctx, {
+      getRetractionSnapshot: async () => ({ byAgent: await retractedIdsByAgent(), verified: true }),
+      ...dependencies,
+    });
+  }
+  return handleBrainSearchImpl(input, ctx, dependencies);
+}
 
 // Pure network mocking via globalThis.fetch - the same seam src/memory/agentic.test.ts and
 // src/azure/search.test.ts use, since this repo's ESM build does not let node:test's mock.method()
@@ -277,24 +288,113 @@ test('fast and deep brain_search disclose incomplete retraction verification wit
 
     __seedRetractionCacheForTests(new Map([['cto', new Set(['known-proof'])]]), true);
     await withStubbedFetch(mockSearchOnlyFetch(), async () => {
-      const result = await handleBrainSearch({ query: 'q', mode: 'fast' }, fakeCtx('cto'));
+      const result = await handleBrainSearch({ query: 'q', mode: 'fast' }, fakeCtx('cto'), { getRetractionSnapshot: async () => ({ byAgent: new Map([['cto', new Set(['known-proof'])]]), verified: false }) });
       const data = result.data as Record<string, unknown>;
+      assert.equal(data.mode, 'degraded-retraction-authority');
       assert.equal(data.retraction_verification, 'incomplete');
-      assert.equal(result.summary.includes(warning), true);
+      assert.equal((data.matches as unknown[]).length, 0);
+      assert.equal(result.summary.includes(warning), false);
     });
 
     process.env.DEEP_RETRIEVAL_MODE = 'on';
     __seedRetractionCacheForTests(new Map([['cto', new Set(['known-proof'])]]), true);
     await withStubbedFetch(mockSearchOnlyFetch(), async () => {
-      const result = await handleBrainSearch({ query: 'q', mode: 'deep' }, fakeCtx('cto'));
+      const result = await handleBrainSearch({ query: 'q', mode: 'deep' }, fakeCtx('cto'), { getRetractionSnapshot: async () => ({ byAgent: new Map([['cto', new Set(['known-proof'])]]), verified: false }) });
       const data = result.data as Record<string, unknown>;
+      assert.equal(data.mode, 'degraded-retraction-authority');
       assert.equal(data.retraction_verification, 'incomplete');
-      assert.equal(result.summary.includes(warning), true);
+      assert.equal((data.matches as unknown[]).length, 0);
+      assert.equal(result.summary.includes(warning), false);
     });
   } finally {
     __resetRetractionCache();
     if (priorMode === undefined) delete process.env.DEEP_RETRIEVAL_MODE;
     else process.env.DEEP_RETRIEVAL_MODE = priorMode;
+  }
+});
+
+test('fast brain search with an incomplete retraction snapshot returns no partial-map hits', async () => {
+  let providerCalls = 0;
+  await withStubbedFetch((async () => {
+    providerCalls++;
+    return new Response(JSON.stringify({ value: [{ id: 'cto__live', text: 'must not surface', '@search.rerankerScore': 1 }] }), { status: 200 });
+  }) as typeof fetch, async () => {
+    const result = await handleBrainSearch(
+      { query: 'incomplete fast', mode: 'fast' },
+      fakeCtx('cto'),
+      { getRetractionSnapshot: async () => ({ byAgent: new Map([['cto', new Set(['known-proof'])]]), verified: false }) },
+    );
+    const data = result.data as Record<string, unknown>;
+    assert.equal(data.mode, 'degraded-retraction-authority');
+    assert.deepEqual(data.matches, []);
+    assert.equal(providerCalls, 0, 'preflight must block fast provider calls');
+  });
+});
+
+test('exact brain lookup with incomplete retraction snapshot does not return the exact hit', async () => {
+  const id = `cto__m_idem_${'a'.repeat(64)}`;
+  const result = await handleBrainSearch(
+    { query: id, mode: 'fast' },
+    fakeCtx('cto'),
+    {
+      getRetractionSnapshot: async () => ({ byAgent: new Map(), verified: false }),
+    },
+  );
+  const data = result.data as Record<string, unknown>;
+  assert.equal(data.mode, 'degraded-retraction-authority');
+  assert.deepEqual(data.matches, []);
+});
+
+test('deep brain wrapper discards a generated answer when final retraction verification becomes incomplete', async () => {
+  const prior = process.env.DEEP_RETRIEVAL_MODE;
+  process.env.DEEP_RETRIEVAL_MODE = 'on';
+  try {
+    const result = await handleBrainSearch(
+      { query: 'late authority loss', mode: 'deep' },
+      fakeCtx('cto'),
+      {
+        deepRetrieve: async () => ({
+          mode: 'deep-agentic', answer: 'already generated stale answer', citations: [],
+          sub_queries: ['late authority loss'], rounds_used: 1, hits: [], rooms_searched: ['memory-exec'],
+        }),
+        getRetractionSnapshot: async () => ({ byAgent: new Map(), verified: false }),
+      },
+    );
+    const data = result.data as Record<string, unknown>;
+    assert.equal(data.mode, 'degraded-retraction-authority');
+    assert.equal(data.answer, undefined);
+    assert.deepEqual(data.matches, []);
+  } finally {
+    if (prior === undefined) delete process.env.DEEP_RETRIEVAL_MODE;
+    else process.env.DEEP_RETRIEVAL_MODE = prior;
+  }
+});
+
+test('deep brain wrapper does not promote after a degraded result even if authority recovers', async () => {
+  const prior = process.env.DEEP_RETRIEVAL_MODE;
+  process.env.DEEP_RETRIEVAL_MODE = 'on';
+  let entityLookups = 0;
+  try {
+    const result = await handleBrainSearch(
+      { query: 'authority recovery after deep failure', mode: 'deep' },
+      fakeCtx('cto'),
+      {
+        deepRetrieve: async () => ({
+          mode: 'degraded-retraction-authority', answer: '', citations: [],
+          sub_queries: [], rounds_used: 0, hits: [], rooms_searched: ['memory-exec'],
+        } as any),
+        getRetractionSnapshot: async () => ({ byAgent: new Map(), verified: true }),
+        lookupEntity: async () => { entityLookups++; return null; },
+      },
+    );
+    const data = result.data as Record<string, unknown>;
+    assert.equal(data.mode, 'degraded-retraction-authority');
+    assert.equal(data.answer, undefined);
+    assert.deepEqual(data.matches, []);
+    assert.equal(entityLookups, 0, 'degraded deep results must not reach entity lookup');
+  } finally {
+    if (prior === undefined) delete process.env.DEEP_RETRIEVAL_MODE;
+    else process.env.DEEP_RETRIEVAL_MODE = prior;
   }
 });
 
