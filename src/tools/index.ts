@@ -91,6 +91,7 @@ import { registerCatalogServiceCapabilities } from './catalog/service-capabiliti
 import { registerCatalogAuditUnused } from './catalog/audit-unused.js';
 import { registerCatalogMaster } from './catalog/master.js';
 import { registerCatalogSkill } from './catalog/skill.js';
+import { registerRetractionAuthorityDiagnostic } from './memory/retraction-diagnostic.js';
 
 // P3 wave 1 connectors (read-only)
 import { registerSentryListProjects } from './sentry/list-projects.js';
@@ -1083,6 +1084,9 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerCatalogAuditUnused(server, callerHash);
   registerCatalogMaster(server, callerHash);
   registerCatalogSkill(server, callerHash);
+  // CTO-only metadata diagnostic. Registration is global for canonical catalog
+  // integrity; connector visibility and handler authorization remain CTO-only.
+  registerRetractionAuthorityDiagnostic(server, callerHash);
 
   // ===== P3 wave 1: Sentry + RevenueCat (read-only, ring-safe) =====
   registerSentryListProjects(server, callerHash);

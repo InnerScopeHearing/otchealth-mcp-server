@@ -41,7 +41,7 @@ import { registerTool, type CallerHashProvider, type ToolContext, type ToolResul
 import { hybridSearch, searchConfigured } from '../../search/index.js';
 import { roomsFor, OPEN_ROOMS } from './brain-search.js';
 import { rrfFuse } from '../../memory/rrf.js';
-import { retractedIdsByAgent, filterRetractedByAgent } from '../../memory/retractions.js';
+import { filterRetractedByAgent, getRetractionSnapshot } from '../../memory/retractions.js';
 import { buildCompositeId } from './openai-ids.js';
 
 export type OpenAiSearchMode = 'off' | 'on';
@@ -84,6 +84,12 @@ export interface OpenAiSearchResult {
   snippet?: string;
 }
 
+export interface OpenAiSearchDependencies {
+  searchConfigured?: typeof searchConfigured;
+  hybridSearch?: typeof hybridSearch;
+  getRetractionSnapshot?: typeof getRetractionSnapshot;
+}
+
 /** The gateway deep-link `url` a citation points at. Not fetchable by an anonymous browser (the
  *  underlying rooms are access-controlled) — a stable, inspectable reference that encodes exactly
  *  what fetch(id) will re-derive and re-check. See openai-fetch.ts. */
@@ -99,11 +105,14 @@ export function titleFor(room: string, path: string | undefined, text: string): 
   return snippet ? `${room}: ${snippet}` : room;
 }
 
-export async function handleOpenAiSearch(input: OpenAiSearchInput, ctx: ToolContext): Promise<ToolResultPayload> {
+export async function handleOpenAiSearch(input: OpenAiSearchInput, ctx: ToolContext, dependencies: OpenAiSearchDependencies = {}): Promise<ToolResultPayload> {
+  const configured = dependencies.searchConfigured ?? searchConfigured;
+  const runHybridSearch = dependencies.hybridSearch ?? hybridSearch;
+  const readRetractionSnapshot = dependencies.getRetractionSnapshot ?? getRetractionSnapshot;
   if (parseOpenAiSearchMode(process.env.OPENAI_SEARCH_MODE) === 'off') {
     return { data: { results: [] }, summary: 'search is disabled (OPENAI_SEARCH_MODE=off).' };
   }
-  if (!searchConfigured()) {
+  if (!configured()) {
     return { data: { results: [] }, summary: 'AI Search not configured.' };
   }
 
@@ -114,9 +123,17 @@ export async function handleOpenAiSearch(input: OpenAiSearchInput, ctx: ToolCont
     return { data: { results: [] }, summary: 'No readable rooms for this caller.' };
   }
 
+  const preflight = await readRetractionSnapshot();
+  if (!preflight.verified) {
+    return {
+      data: { results: [], status: 'degraded-retraction-authority' },
+      summary: 'Search temporarily unavailable because the retraction authority could not be verified.',
+    };
+  }
+
   const perRoomTop = Math.min(25, RESULT_TOP * 2);
   const settled = await Promise.allSettled(
-    rooms.map(async (room) => ({ room, res: await hybridSearch(room, input.query, perRoomTop, { includeOps: false }) })),
+    rooms.map(async (room) => ({ room, res: await runHybridSearch(room, input.query, perRoomTop, { includeOps: false }) })),
   );
   const perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string }> }> = [];
   for (const s of settled) {
@@ -126,8 +143,14 @@ export async function handleOpenAiSearch(input: OpenAiSearchInput, ctx: ToolCont
   // Fuse a wider pool first, drop retracted beliefs, THEN trim — mirrors brain_search's own order
   // so a retracted hit never leaves a hole instead of promoting a real result into its place.
   const pool = rrfFuse(perRoom, RESULT_TOP * 3);
-  const retracted = await retractedIdsByAgent();
-  const { kept } = filterRetractedByAgent(pool, retracted);
+  const finalSnapshot = await readRetractionSnapshot();
+  if (!finalSnapshot.verified) {
+    return {
+      data: { results: [], status: 'degraded-retraction-authority' },
+      summary: 'Search result discarded because the retraction authority became unverifiable during retrieval.',
+    };
+  }
+  const { kept } = filterRetractedByAgent(pool, finalSnapshot.byAgent);
   const trimmed = kept.slice(0, RESULT_TOP);
 
   const results: OpenAiSearchResult[] = trimmed
@@ -173,6 +196,7 @@ export function registerOpenAiSearch(server: McpServer, callerHash: CallerHashPr
             snippet: z.string().optional(),
           }),
         ),
+        status: z.string().optional(),
       },
       handler: handleOpenAiSearch,
     },

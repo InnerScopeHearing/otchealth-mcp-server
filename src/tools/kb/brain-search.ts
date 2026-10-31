@@ -244,6 +244,7 @@ export interface BrainSearchDependencies {
   lookupEntity?: typeof lookupEntity;
   /** Provider-free handler seam; production uses the existing lane-scoped retraction reader. */
   retractedIdsByAgent?: typeof retractedIdsByAgent;
+  getRetractionSnapshot?: typeof getRetractionSnapshot;
   /** Provider-free handler seam for exercising deep response and shield outcomes. */
   deepRetrieve?: typeof deepRetrieve;
 }
@@ -255,6 +256,17 @@ const SOURCE_CURRENTNESS_UNAVAILABLE = {
   reasons: ['trusted_source_authority_unavailable'],
 } as const;
 
+function degradedRetractionResult(top: number, includeOps: boolean, rooms: string[], summary: string): ToolResultPayload {
+  return {
+    data: {
+      matches: [], count: 0, mode: 'degraded-retraction-authority', rooms_searched: rooms, include_ops: includeOps,
+      retraction_verification: 'incomplete',
+      evidence_pack: createRetrievalEvidencePack({ hits: [], requestedTop: top, roomsSearched: rooms, roomsFailed: rooms, emptyReason: 'search_unavailable' }),
+    },
+    summary,
+  };
+}
+
 export async function handleBrainSearch(
   input: BrainSearchInput,
   ctx: ToolContext,
@@ -263,9 +275,9 @@ export async function handleBrainSearch(
   const top = input.top ?? 8;
   const includeOps = input.include_ops ?? false;
   const resolveEntity = dependencies.lookupEntity ?? lookupEntity;
-  const readSnapshot = dependencies.retractedIdsByAgent
+  const readSnapshot = dependencies.getRetractionSnapshot ?? (dependencies.retractedIdsByAgent
     ? async () => ({ byAgent: await dependencies.retractedIdsByAgent!(), verified: true })
-    : getRetractionSnapshot;
+    : getRetractionSnapshot);
   const retrieveDeep = dependencies.deepRetrieve ?? deepRetrieve;
   if (!searchConfigured()) {
     return {
@@ -323,6 +335,9 @@ export async function handleBrainSearch(
       };
     }
 
+    const exactPreflight = await readSnapshot();
+    if (!exactPreflight.verified) return degradedRetractionResult(top, includeOps, ['memory-exec'], 'Exact memory lookup temporarily unavailable because the retraction authority could not be verified.');
+
     let result;
     try {
       result = await hybridSearch('memory-exec', exactMemoryId, 1, { includeOps });
@@ -362,6 +377,7 @@ export async function handleBrainSearch(
       };
     }
     const snapshot = await readSnapshot();
+    if (!snapshot.verified) return degradedRetractionResult(top, includeOps, ['memory-exec'], `Exact memory lookup temporarily unavailable because the retraction authority could not be verified.`);
     const candidate: FusedHit = {
       score: 1, source: 'memory-exec', text: exact.text, id: exact.id,
       agent: exact.agent, path: exact.path, variants: exact.variants, type: exact.type,
@@ -399,9 +415,25 @@ export async function handleBrainSearch(
   // called, so 'fast' (the default, and every existing caller that never passes `mode` at all)
   // stays the EXACT prior code path, byte-identical output shape.
   if (input.mode === 'deep' && parseDeepRetrievalMode(process.env.DEEP_RETRIEVAL_MODE) === 'on') {
-    const retrieved = await retrieveDeep(input.query, { rooms, top, includeOps, continuation: input.continuation });
+    const retrieved = await retrieveDeep(
+      input.query,
+      { rooms, top, includeOps, continuation: input.continuation },
+      { getRetractionSnapshot: readSnapshot },
+    );
+    // A degraded deep result is terminal. Do not let a later snapshot recovery
+    // re-open entity lookup or promotion for a result that was already discarded
+    // by the deep retrieval authority gate.
+    if (retrieved.mode === 'degraded-retraction-authority') {
+      return degradedRetractionResult(
+        top,
+        includeOps,
+        retrieved.rooms_searched,
+        'Deep search result discarded because the retraction authority could not be verified during retrieval.',
+      );
+    }
     // Capture after retrieval so local writes during synthesis cannot re-promote a stale entity.
     const retractionSnapshot = await readSnapshot();
+    if (!retractionSnapshot.verified) return degradedRetractionResult(top, includeOps, retrieved.rooms_searched, 'Deep search result discarded because the retraction authority could not be verified after retrieval.');
     const boundary = filterRetractedByAgent(retrieved.hits, retractionSnapshot.byAgent);
     const retractionChanged = boundary.dropped.length > 0;
     // A late retraction invalidates the generated answer. Preserve live evidence and a resume
@@ -511,6 +543,9 @@ export async function handleBrainSearch(
     };
   }
 
+  const fastPreflight = await readSnapshot();
+  if (!fastPreflight.verified) return degradedRetractionResult(top, includeOps, rooms, 'Search temporarily unavailable because the retraction authority could not be verified.');
+
   // ---- fast path: the ORIGINAL brain_search behavior, untouched line-for-line ----
   // Over-fetch per room so RRF has depth to fuse from, then trim to `top`.
   const perRoomTop = Math.min(25, Math.max(top, 10));
@@ -564,6 +599,7 @@ export async function handleBrainSearch(
   const preferredCandidate = directCandidate ?? identifierCandidate;
   const pool = fuseWithDirectCandidate(perRoom, top, preferredCandidate);
   const retractionSnapshot = await readSnapshot();
+  if (!retractionSnapshot.verified) return degradedRetractionResult(top, includeOps, searched, 'Search temporarily unavailable because the retraction authority could not be verified.');
   const retracted = retractionSnapshot.byAgent;
   const { kept, dropped } = filterRetractedByAgent(pool, retracted);
   const directSurvived = Boolean(directCandidate && kept.some((hit) =>

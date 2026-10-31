@@ -33,12 +33,15 @@ const TTL_MS = 120_000;
  * cache is one built while a source was unreachable, so it is a stopgap, not an answer.
  */
 const DEGRADED_RETRY_MS = 20_000;
+const MEMORY_RETRACTION_MAX_ROWS = 5000;
 let cache: {
   at: number;
   ids: Set<string>;
   byAgent: Map<string, Set<string>>;
   /** True when at least one source failed to load, so this cache may be MISSING retractions. */
   degraded: boolean;
+  sharedSource: 'healthy' | 'error' | 'unknown';
+  memorySource: 'healthy' | 'error' | 'unknown';
 } | null = null;
 let refreshInFlight: Promise<void> | null = null;
 
@@ -61,6 +64,14 @@ export interface RetractionSnapshot {
   /** Lane-scoped retractions and their verification state captured from the same cache revision. */
   byAgent: Map<string, Set<string>>;
   /** False means at least one authoritative retraction source could not be read. */
+  verified: boolean;
+}
+
+export interface RetractionAuthorityDiagnostic {
+  schema: 'retraction-authority-diagnostic.v1';
+  shared_source: 'healthy' | 'error' | 'unknown';
+  memory_source: 'healthy' | 'error' | 'unknown';
+  cache_age_ms: number | null;
   verified: boolean;
 }
 
@@ -208,6 +219,19 @@ export async function getRetractionSnapshot(): Promise<RetractionSnapshot> {
   return { byAgent, verified: current ? !current.degraded : false };
 }
 
+/** Metadata-only projection; never returns ids, rows, endpoints, or source errors. */
+export async function getRetractionAuthorityDiagnostic(): Promise<RetractionAuthorityDiagnostic> {
+  await refreshCache();
+  const current = cache;
+  return {
+    schema: 'retraction-authority-diagnostic.v1',
+    shared_source: current?.sharedSource ?? 'unknown',
+    memory_source: current?.memorySource ?? 'unknown',
+    cache_age_ms: current ? Math.max(0, Date.now() - current.at) : null,
+    verified: current ? !current.degraded : false,
+  };
+}
+
 /** Shared cache-fill for retractedIds/retractedIdsForAgent -- one fetch of both stores serves both
  * the bare fleet-wide Set and the per-agent grouping. FAIL-OPEN throughout: a failed fetch leaves
  * whatever was already collected (possibly nothing) rather than throwing. */
@@ -243,21 +267,30 @@ async function loadRetractionCache(now: number): Promise<void> {
   // retraction set means "nothing has been retracted", which is the strongest possible claim this
   // module can make, and it would be made on the basis of a network error. See the cache write below.
   let degraded = false;
+  let sharedSource: 'healthy' | 'error' | 'unknown' = 'unknown';
+  let memorySource: 'healthy' | 'error' | 'unknown' = 'unknown';
   try {
     const rows = await readers.shared();
+    validateRetractionRows(rows, false);
+    sharedSource = 'healthy';
     for (const id of collectRetracted(rows)) ids.add(id);
     merge(collectRetractedByAgent(rows));
   } catch {
     degraded = true;
+    sharedSource = 'error';
   }
   // Cosmos memory-of-record (memory_write can declare supersedes since 2026-07-13).
   try {
     const rows = await readers.memory();
+    validateRetractionRows(rows, true);
+    if (rows.length >= MEMORY_RETRACTION_MAX_ROWS) throw new Error('retraction source reached its bounded page limit');
+    memorySource = 'healthy';
     const typed = rows as Array<{ agent?: unknown; supersedes?: unknown }>;
     for (const id of collectRetracted(typed)) ids.add(id);
     merge(collectRetractedByAgent(typed));
   } catch {
     degraded = true;
+    memorySource = 'error';
   }
 
   // NEVER let a load DROP a retraction we already knew about, including a local noteRetraction
@@ -279,7 +312,31 @@ async function loadRetractionCache(now: number): Promise<void> {
     for (const id of cache.ids) ids.add(id);
     merge(cache.byAgent);
   }
-  cache = { at: now, ids, byAgent, degraded };
+  cache = { at: now, ids, byAgent, degraded, sharedSource, memorySource };
+}
+
+/** A successful transport response is not authoritative if its projected row shape is malformed. */
+function validateRetractionRows(rows: unknown, requireRetractionFields: boolean): asserts rows is RetractionRows {
+  if (!Array.isArray(rows)) throw new Error('retraction source returned a non-array payload');
+  for (const row of rows) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error('retraction source returned a malformed row');
+    const value = row as { agent?: unknown; supersedes?: unknown };
+    if (requireRetractionFields && (typeof value.agent !== 'string' || !value.agent.trim() || typeof value.supersedes !== 'string' || !value.supersedes.trim())) {
+      throw new Error('retraction source returned an incomplete projected row');
+    }
+    if (value.agent !== undefined && (typeof value.agent !== 'string' || !value.agent.trim())) {
+      throw new Error('retraction source returned a malformed agent');
+    }
+    // Shared-feed rows are allowed to omit agent only when they are ordinary
+    // non-retraction records. A declared supersedes without an owner cannot be
+    // applied by the lane-scoped map, so do not treat that response as verified.
+    if (!requireRetractionFields && value.supersedes !== undefined && value.agent === undefined) {
+      throw new Error('retraction source returned an unowned declared retraction');
+    }
+    if (value.supersedes !== undefined && (typeof value.supersedes !== 'string' || !value.supersedes.trim())) {
+      throw new Error('retraction source returned a malformed supersedes value');
+    }
+  }
 }
 
 /**
@@ -293,7 +350,7 @@ async function loadRetractionCache(now: number): Promise<void> {
 export function noteRetraction(agent: unknown, supersedes: unknown): void {
   try {
     if (typeof agent !== 'string' || !agent.trim() || typeof supersedes !== 'string' || !supersedes.trim()) return;
-    if (!cache) cache = { at: 0, ids: new Set(), byAgent: new Map(), degraded: true };
+    if (!cache) cache = { at: 0, ids: new Set(), byAgent: new Map(), degraded: true, sharedSource: 'unknown', memorySource: 'unknown' };
     const a = agent.trim().toLowerCase();
     cache.ids.add(supersedes.trim());
     let set = cache.byAgent.get(a);
@@ -319,7 +376,7 @@ export function __seedRetractionCacheForTests(
 ): void {
   const copy = new Map<string, Set<string>>();
   for (const [agent, ids] of byAgent) copy.set(agent, new Set(ids));
-  cache = { at: Date.now() - ageMs, ids: new Set([...copy.values()].flatMap((ids) => [...ids])), byAgent: copy, degraded };
+  cache = { at: Date.now() - ageMs, ids: new Set([...copy.values()].flatMap((ids) => [...ids])), byAgent: copy, degraded, sharedSource: degraded ? 'error' : 'healthy', memorySource: degraded ? 'error' : 'healthy' };
   refreshInFlight = null;
 }
 
