@@ -62,7 +62,7 @@ import { chat, chatConfigured, type ChatMessage, type ProviderRequestBudget } fr
 import { hybridSearch, searchConfigured, type KbHit } from '../search/index.js';
 import { createEmbeddingRequestCache, type EmbeddingRequestCache } from '../search/embedding-request-cache.js';
 import { rrfFuse, type FusedHit } from './rrf.js';
-import { retractedIdsByAgent, filterRetractedByAgent } from './retractions.js';
+import { filterRetractedByAgent, getRetractionSnapshot } from './retractions.js';
 import { retrievalShield, type GuardMode } from '../safety/auto-guard.js';
 import { logger } from '../audit/logger.js';
 import { currentCorrelationId } from '../server/request-context.js';
@@ -243,6 +243,7 @@ export interface DeepRetrieveOptions {
 /** Test-only dependency seam. Production callers leave this unset. */
 export interface DeepRetrieveTestDeps {
   retrievalShield?: typeof retrievalShield;
+  getRetractionSnapshot?: typeof getRetractionSnapshot;
 }
 
 export interface Citation {
@@ -256,7 +257,7 @@ export interface Citation {
 }
 
 export interface DeepRetrieveResult {
-  mode: 'deep-agentic' | 'deep-fallback-fast' | 'unconfigured' | 'no-rooms';
+  mode: 'deep-agentic' | 'deep-fallback-fast' | 'degraded-retraction-authority' | 'unconfigured' | 'no-rooms';
   answer: string;
   citations: Citation[];
   sub_queries: string[];
@@ -288,6 +289,25 @@ export interface DeepRetrieveResult {
    *  can still be non-partial (round 1's hits are real and still get a real synthesized answer),
    *  but a quality-improving step was skipped, and this discloses which one and why. */
   budget_skipped?: string[];
+}
+
+class RetractionAuthorityUnavailable extends Error {
+  constructor() {
+    super('Retraction authority is unavailable or incomplete; deep current recall is temporarily unavailable.');
+    this.name = 'RetractionAuthorityUnavailable';
+  }
+}
+
+function degradedRetractionResult(query: string, rooms: string[]): DeepRetrieveResult {
+  return {
+    mode: 'degraded-retraction-authority',
+    answer: 'Current recall is temporarily unavailable because the retraction authority could not be verified.',
+    citations: [],
+    sub_queries: [query],
+    rounds_used: 0,
+    hits: [],
+    rooms_searched: rooms,
+  };
 }
 
 /** Defensive sanitizer for a caller-supplied continuation. Round-tripped through an external,
@@ -783,11 +803,13 @@ async function runDeepFlow(
   continuation?: DeepContinuation,
   embeddingCache?: EmbeddingRequestCache,
   shield: typeof retrievalShield = retrievalShield,
+  readRetractionSnapshot: typeof getRetractionSnapshot = getRetractionSnapshot,
 ): Promise<DeepRetrieveResult> {
   const { deadline, now } = budget;
   // Check both the budget clock and the authoritative cancellation signal. The signal closes
   // the timeout race where provider abort fires before a delayed wall clock observes its deadline.
   const overBudget = (): boolean => Boolean(budget.signal?.aborted) || now() >= deadline;
+  if (!(await readRetractionSnapshot()).verified) throw new RetractionAuthorityUnavailable();
   const budgetSkipped: string[] = [];
   const anchorQuery = extractExactIdentifierAnchor(query);
   let preferredWitnesses: FusedHit[] = [];
@@ -887,8 +909,9 @@ async function runDeepFlow(
   }
 
   const fusedFinal = dedupeById([...preferredWitnesses, ...rrfFuse(pool, top * 3)]);
-  const retracted = await retractedIdsByAgent();
-  const { kept, dropped } = filterRetractedByAgent(fusedFinal, retracted);
+  const finalSnapshot = await readRetractionSnapshot();
+  if (!finalSnapshot.verified) throw new RetractionAuthorityUnavailable();
+  const { kept, dropped } = filterRetractedByAgent(fusedFinal, finalSnapshot.byAgent);
   const hits = kept.slice(0, top);
 
   // BUDGET GATE: the single most expensive, least-bounded remaining stretch (an injection-shield
@@ -1014,14 +1037,17 @@ export async function fallbackFastSearch(
   top: number,
   includeOps: boolean,
   embeddingCache: EmbeddingRequestCache = createEmbeddingRequestCache(),
+  readRetractionSnapshot: typeof getRetractionSnapshot = getRetractionSnapshot,
 ): Promise<DeepRetrieveResult> {
   return timedDeepStage('retrieval', async () => {
     try {
+      if (!(await readRetractionSnapshot()).verified) return { value: degradedRetractionResult(query, rooms), outcome: 'partial' };
       const anchorQuery = extractExactIdentifierAnchor(query);
       const round = await runRetrievalRound([query], rooms, top, includeOps, undefined, embeddingCache, anchorQuery ? { query: anchorQuery, rooms } : undefined);
       const pool = [...round.preferredWitnesses, ...rrfFuse(round.perRoom, top * 3)];
-      const retracted = await retractedIdsByAgent();
-      const { kept, dropped } = filterRetractedByAgent(dedupeById(pool), retracted);
+      const finalSnapshot = await readRetractionSnapshot();
+      if (!finalSnapshot.verified) return { value: degradedRetractionResult(query, rooms), outcome: 'partial' };
+      const { kept, dropped } = filterRetractedByAgent(dedupeById(pool), finalSnapshot.byAgent);
       const hits = kept.slice(0, top);
       const result: DeepRetrieveResult = {
         mode: 'deep-fallback-fast',
@@ -1105,8 +1131,10 @@ export async function deepRetrieve(
       opts.continuation,
       embeddingCache,
       testDeps.retrievalShield,
+      testDeps.getRetractionSnapshot,
     );
-  } catch {
+  } catch (error) {
+    if (error instanceof RetractionAuthorityUnavailable) return degradedRetractionResult(query, rooms);
     // Once the caller's budget has expired, never enter the unbounded fast-path fallback: it
     // would start a fresh embedding/search request after cancellation. Return the honest partial
     // shape, constrained to the rooms this invocation was already authorized to read.
@@ -1122,7 +1150,7 @@ export async function deepRetrieve(
     // FAIL-OPEN: any unexpected error anywhere in the agentic flow degrades to a single plain
     // search pass across the same rooms — deep mode can never throw, and can never be WORSE than
     // brain_search's existing fast path, only sometimes no better than it.
-    return fallbackFastSearch(query, rooms, top, includeOps, embeddingCache);
+    return fallbackFastSearch(query, rooms, top, includeOps, embeddingCache, testDeps.getRetractionSnapshot);
   }
 }
 

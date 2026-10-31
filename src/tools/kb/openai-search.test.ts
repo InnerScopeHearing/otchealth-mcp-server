@@ -22,8 +22,16 @@ process.env.WEB_SEARCH_PROVIDER ||= 'azure';
 process.env.AZURE_SEARCH_ENDPOINT ||= 'https://otchealth-dataroom-search.example.invalid';
 process.env.AZURE_SEARCH_QUERY_KEY ||= 'test-search-key';
 
-const { handleOpenAiSearch, nonPrivilegedRoomsFor, parseOpenAiSearchMode, titleFor } = await import('./openai-search.js');
+const { handleOpenAiSearch: handleOpenAiSearchImpl, nonPrivilegedRoomsFor, parseOpenAiSearchMode, titleFor } = await import('./openai-search.js');
 const { OPEN_ROOMS, RING_ROOMS } = await import('./brain-search.js');
+
+async function handleOpenAiSearch(...args: Parameters<typeof handleOpenAiSearchImpl>) {
+  const [input, ctx, dependencies = {}] = args;
+  return handleOpenAiSearchImpl(input, ctx, {
+    getRetractionSnapshot: async () => ({ byAgent: new Map(), verified: true }),
+    ...dependencies,
+  });
+}
 
 async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
   const original = globalThis.fetch;
@@ -164,4 +172,42 @@ test('an empty/unauthenticated caller still gets a well-formed result (open room
     const result = await handleOpenAiSearch({ query: 'ping' }, fakeCtx(''));
     assert.ok(Array.isArray((result.data as { results: unknown[] }).results));
   });
+});
+
+test('search preflights retraction authority before querying any room', async () => {
+  let providerCalls = 0;
+  const result = await handleOpenAiSearch(
+    { query: 'blocked before provider' },
+    fakeCtx('external-read'),
+    {
+      searchConfigured: () => true,
+      getRetractionSnapshot: async () => ({ byAgent: new Map(), verified: false }),
+      hybridSearch: async () => {
+        providerCalls++;
+        throw new Error('provider must not run');
+      },
+    },
+  );
+  assert.equal(providerCalls, 0);
+  assert.deepEqual(result.data, { results: [], status: 'degraded-retraction-authority' });
+});
+
+test('search discards provider results if authority becomes unverified before filtering', async () => {
+  let snapshotCalls = 0;
+  let providerCalls = 0;
+  const result = await handleOpenAiSearch(
+    { query: 'changed during retrieval' },
+    fakeCtx('external-read'),
+    {
+      searchConfigured: () => true,
+      getRetractionSnapshot: async () => ({ byAgent: new Map(), verified: ++snapshotCalls === 1 }),
+      hybridSearch: async () => {
+        providerCalls++;
+        return { matches: [{ id: 'cto__live', agent: 'cto', text: 'synthetic result', '@search.rerankerScore': 1 }] };
+      },
+    },
+  );
+  assert.ok(providerCalls > 0);
+  assert.equal(snapshotCalls, 2);
+  assert.deepEqual(result.data, { results: [], status: 'degraded-retraction-authority' });
 });
