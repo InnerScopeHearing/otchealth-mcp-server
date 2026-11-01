@@ -420,6 +420,45 @@ test('handleBrainSearch mode:"fast" is a regression: same output shape as brain_
   });
 });
 
+test('handleBrainSearch fast output redacts labeled values and preserves hit IDs', async () => {
+  const sentinel = 'SYNTHETIC_SECRET_SENTINEL_FAST_01';
+  const stub = (async (url: string | URL) => {
+    if (isSearchUrl(String(url))) return new Response(JSON.stringify({ value: [
+      { id: 'fast-secret-doc', text: `workspace secret: ${sentinel}`, '@search.rerankerScore': 3 },
+      { id: 'fast-support-1', text: 'synthetic supporting record one', '@search.rerankerScore': 2.5 },
+      { id: 'fast-support-2', text: 'synthetic supporting record two', '@search.rerankerScore': 2 },
+    ] }), { status: 200 });
+    throw new Error(`unexpected fetch to ${String(url)}`);
+  }) as typeof fetch;
+  await withStubbedFetch(stub, async () => {
+    const result = await handleBrainSearch({ query: 'synthetic fast label check', mode: 'fast' }, fakeCtx('cto'));
+    const data = result.data as { matches: Array<{ id: string; text: string }> };
+    const match = data.matches.find((item) => item.id === 'fast-secret-doc');
+    assert.ok(match);
+    assert.equal(match.text, 'workspace secret: [REDACTED: explicitly labeled secret]');
+    assert.ok(!JSON.stringify(result).includes(sentinel));
+  });
+});
+
+test('entity promotion redacts explicit secret keys and values while retaining the source ID', async () => {
+  const sentinel = 'SYNTHETIC_SECRET_SENTINEL_ENTITY_01';
+  await withStubbedFetch(mockSearchOnlyFetch(), async () => {
+    const result = await handleBrainSearch({ query: 'what is workspace_secret', mode: 'fast' }, fakeCtx('cto'), {
+      lookupEntity: async () => ({
+        ekey: 'workspace_secret', evalue: sentinel, ts: '2026-11-01T00:00:00Z',
+        id: 'entity-secret-01', source: 'synthetic owner fixture', owner: 'cto', matchedBy: 'exact-key',
+      }) as any,
+    });
+    const data = result.data as { matches: Array<{ id: string; text: string }>; entity_answer: { key: string; value: string; id: string } };
+    assert.equal(data.matches[0]!.id, 'entity-secret-01');
+    assert.equal(data.matches[0]!.text, 'workspace_secret = [REDACTED: explicitly labeled secret]');
+    assert.equal(data.entity_answer.value, '[REDACTED: explicitly labeled secret]');
+    assert.equal(data.entity_answer.id, 'entity-secret-01');
+    assert.ok(!result.summary.includes(sentinel));
+    assert.ok(!JSON.stringify(result).includes(sentinel));
+  });
+});
+
 test('DEEP_RETRIEVAL_MODE=off: mode:"deep" behaves EXACTLY like mode:"fast" (kill-switch short-circuits before deepRetrieve/Foundry is ever reached)', async () => {
   const prior = process.env.DEEP_RETRIEVAL_MODE;
   process.env.DEEP_RETRIEVAL_MODE = 'off';
