@@ -1019,6 +1019,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
 
   // ===== Phase 2: n8n meta-tools =====
   registerN8nListWorkflows(server, callerHash);
+  registerN8nCooWorkflowMetadata(server, callerHash);
   registerN8nGetExecution(server, callerHash);
   // Ordinary Chat has a deliberately narrow asynchronous route through n8n.
   // It can submit only an allowlisted Brain read or checkpoint and then retrieve
