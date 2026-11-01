@@ -13,6 +13,7 @@ const {
   buildPreview,
   pageCount,
   pageSlice,
+  cursorSlice,
   shouldOffload,
   mayOffloadToolResult,
   recordInlineResultProjection,
@@ -24,6 +25,7 @@ const {
   compactResultJsonWritesEnabled,
 } = await import('./result-store.js');
 const { handleGatewayFetchResult } = await import('./gateway-fetch-result.js');
+const { buildTextContent } = await import('./registry.js');
 const { resultProjectionLogFields } = await import('../audit/result-projection.js');
 
 async function captureResultProjection<T>(run: (log: (measurement: Parameters<typeof resultProjectionLogFields>[0]) => void) => Promise<T>) {
@@ -323,6 +325,77 @@ function fakeResultStore(nowValue = Date.parse('2026-09-08T00:00:00.000Z')) {
     },
   };
 }
+
+test('cursor mode reconstructs pretty and compact records with changing limits and bounded output', async () => {
+  for (const format of [undefined, 'compact-json-v1']) {
+    const store = fakeResultStore();
+    const caller = 'a'.repeat(64);
+    const data = { text: ('quote" slash\\ control\n emoji😀 lone\ud800 ').repeat(4000) };
+    store.docs.set('cursor-fixture', { type: 'jit_result', caller_hash: caller, data,
+      serialization_format: format, expiresAt: store.deps.now() + 1000 });
+    const expected = format ? JSON.stringify(data) : JSON.stringify(data, null, 2);
+    let offset = 0;
+    const chunks: string[] = [];
+    let counter = 0;
+    while (true) {
+      const maxChunkBytes = counter++ % 2 ? 1024 : 8192;
+      const result = await fetchStoredResult('cursor-fixture', 0, caller, store.deps, { offset, maxChunkBytes });
+      assert.equal(result.found, true);
+      assert.equal(result.offset, offset);
+      assert.ok(Buffer.byteLength(JSON.stringify(result.chunk), 'utf8') <= maxChunkBytes + 2);
+      const rendered = buildTextContent({ data: result, summary: 'synthetic result' }, null);
+      assert.ok(Buffer.byteLength(rendered, 'utf8') < 8500);
+      const simulatedWireResponse = { content: [{ type: 'text', text: rendered }], structuredContent: { result } };
+      assert.ok(Buffer.byteLength(JSON.stringify(simulatedWireResponse), 'utf8') < 40000);
+      chunks.push(result.chunk!);
+      if (result.done) { assert.equal(result.next_offset, null); break; }
+      assert.ok(result.next_offset! > offset);
+      offset = result.next_offset!;
+    }
+    assert.equal(chunks.join(''), expected);
+    assert.deepEqual(JSON.parse(chunks.join('')), data);
+  }
+});
+
+test('cursor validation rejects invalid positions and never splits surrogate pairs', () => {
+  const text = 'a'.repeat(1023) + '😀' + '\\"\n'.repeat(500);
+  const first = cursorSlice(text, { offset: 0, maxChunkBytes: 1024 });
+  assert.equal(first.next_offset, 1023);
+  assert.throws(() => cursorSlice(text, { offset: 1024, maxChunkBytes: 1024 }), /Invalid/);
+  for (const cursor of [{ offset: -1, maxChunkBytes: 1024 }, { offset: text.length + 1, maxChunkBytes: 1024 },
+    { offset: 0, maxChunkBytes: 1023 }, { offset: 0, maxChunkBytes: 30001 }, { offset: 1.5, maxChunkBytes: 1024 }]) {
+    assert.throws(() => cursorSlice(text, cursor), /Invalid/);
+  }
+  assert.deepEqual(cursorSlice(text, { offset: text.length, maxChunkBytes: 1024 }),
+    { offset: text.length, next_offset: null, done: true, chunk: '' });
+});
+
+test('cursor retrieval keeps authorization, expiry and legacy paging semantics', async () => {
+  const store = fakeResultStore();
+  const caller = 'b'.repeat(64);
+  const result = await offloadResult('fixture', { text: '😀'.repeat(9000) }, 'corr', caller, store.deps);
+  assert.ok(result);
+  const legacy = await fetchStoredResult(result.resultId, 0, caller, store.deps);
+  assert.deepEqual(legacy, await fetchStoredResult(result.resultId, 0, caller, store.deps, undefined));
+  assert.deepEqual(await fetchStoredResult(result.resultId, 0, 'c'.repeat(64), store.deps,
+    { offset: 999999, maxChunkBytes: 1024 }), { found: false });
+  store.setNow(store.deps.now() + 3_700_000);
+  assert.deepEqual(await fetchStoredResult(result.resultId, 0, caller, store.deps,
+    { offset: 0, maxChunkBytes: 1024 }), { found: false, expired: true });
+});
+
+test('cursor handler rejects mixed modes and passes authenticated continuation', async () => {
+  const callerHash = '1'.repeat(64);
+  const calls: unknown[] = [];
+  const deps = { fetchStoredResult: async (...args: unknown[]) => {
+    calls.push(args); return { found: true, total_bytes: 5, offset: 3, next_offset: null, done: true, chunk: 'end' };
+  } };
+  await assert.rejects(() => handleGatewayFetchResult({ result_id: 'fixture', page: 0, max_chunk_bytes: 8192 }, { callerHash }, deps), /Invalid/);
+  await assert.rejects(() => handleGatewayFetchResult({ result_id: 'fixture', offset: 1 }, { callerHash }, deps), /Invalid/);
+  const result = await handleGatewayFetchResult({ result_id: 'fixture', offset: 3, max_chunk_bytes: 8192 }, { callerHash }, deps);
+  assert.deepEqual(calls, [['fixture', 0, callerHash, { offset: 3, maxChunkBytes: 8192 }]]);
+  assert.equal((result.data as { done: boolean }).done, true);
+});
 
 test('offloaded result persists the exact authenticated caller hash and same caller pages it', async () => {
   const store = fakeResultStore();
