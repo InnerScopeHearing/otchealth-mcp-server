@@ -8,6 +8,7 @@ import { agenticRecall } from '../../memory/agentic.js';
 import type { ToolContext, ToolResultPayload } from '../registry.js';
 import { filterPersonalSharedMemory, sharedMemoryAgentAllowed } from './shared-memory-access.js';
 import { filterRetractedByAgent, getRetractionSnapshot, type RetractionSnapshot } from '../../memory/retractions.js';
+import { sanitizeRetrievedPayload } from '../../safety/retrieval-redaction.js';
 
 const RECALL_INPUT_SHAPE = {
   query: z.string().min(1).describe('Keywords to match against entry text, tags, type, and agent (case-insensitive; all terms must match).'),
@@ -260,7 +261,7 @@ export async function recallHandler(
   dependencies: RecallHandlerDependencies = {},
 ): Promise<ToolResultPayload> {
   try {
-    return await recallHandlerImpl(input, ctx, dependencies);
+    return sanitizeRetrievedPayload(await recallHandlerImpl(input, ctx, dependencies));
   } catch (error) {
     if (error instanceof RetractionAuthorityUnavailable) {
       return {

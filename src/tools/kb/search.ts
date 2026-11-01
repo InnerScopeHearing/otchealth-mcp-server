@@ -14,9 +14,58 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { hybridSearch, searchConfigured } from '../../search/index.js';
 import { tagWithFeedbackRefs } from '../../memory/retrieval-feedback.js';
+import { sanitizeToolResult } from '../../safety/retrieval-redaction.js';
 
 const OPEN_INDEXES = new Set(['commons-company-journal', 'memory-exec']);
 const RING_GATED_PREFIXES = ['finance-', 'legal-'];
+
+type KbSearchInput = { index: string; query: string; top?: number; include_ops?: boolean };
+export type KbSearchDependencies = {
+  configured: typeof searchConfigured;
+  search: typeof hybridSearch;
+  tag: typeof tagWithFeedbackRefs;
+};
+
+/** The registered handler's complete response path, with injectable offline dependencies for tests. */
+export async function handleKbSearch(
+  input: KbSearchInput,
+  deps: KbSearchDependencies = { configured: searchConfigured, search: hybridSearch, tag: tagWithFeedbackRefs },
+) {
+  return sanitizeToolResult(await (async () => {
+    const index = input.index.trim();
+    const top = input.top ?? 6;
+    const includeOps = input.include_ops ?? false;
+    if (RING_GATED_PREFIXES.some((p) => index.startsWith(p))) {
+      return {
+        data: { index, matches: [], count: 0, mode: 'ring-gated', error: 'use_kb_search_privileged', include_ops: includeOps },
+        summary: `"${index}" is ring-gated (finance/attorney-privileged). Use kb_search_privileged with a trusted role (cfo/clo/clo-personal).`,
+      };
+    }
+    if (!OPEN_INDEXES.has(index)) {
+      return {
+        data: { index, matches: [], count: 0, mode: 'unknown-index', error: 'unknown_index', include_ops: includeOps },
+        summary: `Unknown/closed index "${index}". Open: ${[...OPEN_INDEXES].join(', ')}.`,
+      };
+    }
+    if (!deps.configured()) {
+      return { data: { index, matches: [], count: 0, mode: 'unconfigured', include_ops: includeOps }, summary: 'AI Search not configured.' };
+    }
+    try {
+      const res = await deps.search(index, input.query, top, { includeOps });
+      if (!res) return { data: { index, matches: [], count: 0, mode: 'unconfigured', include_ops: includeOps }, summary: 'AI Search not configured.' };
+      // Tag each hit with a stable, short-lived feedback_ref (pure/synchronous, cannot fail or
+      // add latency) so a later call can report whether it was useful without re-sending content.
+      const tagged = deps.tag(res.matches, { tool: 'kb_search', query: input.query, defaultRoom: index });
+      return {
+        data: { index, matches: tagged, count: tagged.length, mode: res.mode, include_ops: includeOps },
+        summary: `${res.matches.length} ${res.mode} match(es) in "${index}" for "${input.query}".` + (includeOps ? ' Operational chatter included.' : ''),
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { data: { index, matches: [], count: 0, mode: 'error', error: msg, include_ops: includeOps }, summary: `Search failed: ${msg}.` };
+    }
+  })());
+}
 
 export function registerKbSearch(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
@@ -52,41 +101,7 @@ export function registerKbSearch(server: McpServer, callerHash: CallerHashProvid
         include_ops: z.boolean(),
         error: z.string().optional(),
       },
-      handler: async (input) => {
-        const index = input.index.trim();
-        const top = input.top ?? 6;
-        const includeOps = input.include_ops ?? false;
-        if (RING_GATED_PREFIXES.some((p) => index.startsWith(p))) {
-          return {
-            data: { index, matches: [], count: 0, mode: 'ring-gated', error: 'use_kb_search_privileged', include_ops: includeOps },
-            summary: `"${index}" is ring-gated (finance/attorney-privileged). Use kb_search_privileged with a trusted role (cfo/clo/clo-personal).`,
-          };
-        }
-        if (!OPEN_INDEXES.has(index)) {
-          return {
-            data: { index, matches: [], count: 0, mode: 'unknown-index', error: 'unknown_index', include_ops: includeOps },
-            summary: `Unknown/closed index "${index}". Open: ${[...OPEN_INDEXES].join(', ')}.`,
-          };
-        }
-        if (!searchConfigured()) {
-          return { data: { index, matches: [], count: 0, mode: 'unconfigured', include_ops: includeOps }, summary: 'AI Search not configured.' };
-        }
-        try {
-          const res = await hybridSearch(index, input.query, top, { includeOps });
-          if (!res) return { data: { index, matches: [], count: 0, mode: 'unconfigured', include_ops: includeOps }, summary: 'AI Search not configured.' };
-          // Tag each hit with a stable, short-lived feedback_ref (pure/synchronous, cannot fail or
-          // add latency) so a later call can report whether it was useful without re-sending content.
-          // See memory/retrieval-feedback.ts.
-          const tagged = tagWithFeedbackRefs(res.matches, { tool: 'kb_search', query: input.query, defaultRoom: index });
-          return {
-            data: { index, matches: tagged, count: tagged.length, mode: res.mode, include_ops: includeOps },
-            summary: `${res.matches.length} ${res.mode} match(es) in "${index}" for "${input.query}".` + (includeOps ? ' Operational chatter included.' : ''),
-          };
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          return { data: { index, matches: [], count: 0, mode: 'error', error: msg, include_ops: includeOps }, summary: `Search failed: ${msg}.` };
-        }
-      },
+      handler: async (input) => handleKbSearch(input),
     },
     callerHash,
   );

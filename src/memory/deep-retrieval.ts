@@ -68,6 +68,7 @@ import { logger } from '../audit/logger.js';
 import { currentCorrelationId } from '../server/request-context.js';
 import { withProviderUsageStage } from '../telemetry/provider-usage-receipt.js';
 import { identifierEvidenceSnippet, literalIndex, opaqueIdentifierQuery } from '../search/identifier-match.js';
+import { sanitizeRetrievedPayload } from '../safety/retrieval-redaction.js';
 
 // Stage events use the existing structured application logger. Keep the schema deliberately
 // content-free: stage/outcome are closed enums, duration is a finite non-negative number, and no
@@ -912,7 +913,9 @@ async function runDeepFlow(
   const finalSnapshot = await readRetractionSnapshot();
   if (!finalSnapshot.verified) throw new RetractionAuthorityUnavailable();
   const { kept, dropped } = filterRetractedByAgent(fusedFinal, finalSnapshot.byAgent);
-  const hits = kept.slice(0, top);
+  // Remove explicitly labeled secret values before either content safety or synthesis sees them.
+  // This is a narrow label-boundary check, not general secret detection.
+  const hits = sanitizeRetrievedPayload(kept.slice(0, top));
 
   // BUDGET GATE: the single most expensive, least-bounded remaining stretch (an injection-shield
   // call plus a tier:'high' synthesis call) is skipped entirely once the deadline has passed.
@@ -975,7 +978,9 @@ async function runDeepFlow(
     return result;
   }
   if (postShield === 'blocked') recordSkippedDeepStage('synthesis');
-  const answer = postShield === 'blocked' ? INJECTION_DETECTED_ANSWER : await synthesizeAnswer(query, hits, deadline, now, budget.signal, budget.expire);
+  const answer = sanitizeRetrievedPayload(postShield === 'blocked'
+    ? INJECTION_DETECTED_ANSWER
+    : await synthesizeAnswer(query, hits, deadline, now, budget.signal, budget.expire));
 
   // A provider may abort at the deadline after fetch headers while its response body is still
   // streaming. Preserve the retrieved, retraction-filtered passages and report the skipped answer
@@ -1048,7 +1053,7 @@ export async function fallbackFastSearch(
       const finalSnapshot = await readRetractionSnapshot();
       if (!finalSnapshot.verified) return { value: degradedRetractionResult(query, rooms), outcome: 'partial' };
       const { kept, dropped } = filterRetractedByAgent(dedupeById(pool), finalSnapshot.byAgent);
-      const hits = kept.slice(0, top);
+      const hits = sanitizeRetrievedPayload(kept.slice(0, top));
       const result: DeepRetrieveResult = {
         mode: 'deep-fallback-fast',
         answer: SYNTH_UNAVAILABLE_ANSWER,

@@ -69,6 +69,7 @@ import { rrfFuse, type FusedHit } from '../../memory/rrf.js';
 import { buildCitations, deepRetrieve, parseDeepRetrievalMode } from '../../memory/deep-retrieval.js';
 import { lookupEntity, type EntityHit } from '../../memory/entity-lookup.js';
 import { tagWithFeedbackRefs } from '../../memory/retrieval-feedback.js';
+import { sanitizeRetrievedPayload } from '../../safety/retrieval-redaction.js';
 import { opaqueIdentifierQuery } from '../../search/identifier-match.js';
 import { createRetrievalEvidencePack } from '../../brain-capabilities/evidence-view.js';
 
@@ -267,7 +268,7 @@ function degradedRetractionResult(top: number, includeOps: boolean, rooms: strin
   };
 }
 
-export async function handleBrainSearch(
+async function handleBrainSearchImpl(
   input: BrainSearchInput,
   ctx: ToolContext,
   dependencies: BrainSearchDependencies = {},
@@ -666,6 +667,15 @@ export async function handleBrainSearch(
   };
 }
 
+/** Apply explicit-label redaction to every fast/deep result branch, including entity promotion. */
+export async function handleBrainSearch(
+  input: BrainSearchInput,
+  ctx: ToolContext,
+  dependencies: BrainSearchDependencies = {},
+): Promise<ToolResultPayload> {
+  return sanitizeRetrievedPayload(await handleBrainSearchImpl(input, ctx, dependencies));
+}
+
 export function registerBrainSearch(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
     server,
@@ -715,6 +725,8 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
         resumed: z.boolean().optional(),
         budget_skipped: z.array(z.string()).optional(),
       },
+      // Deep retrieval also sanitizes passages before synthesis; this boundary covers fast, deep,
+      // and entity-promotion outputs. Neither is general secret or PHI detection.
       handler: handleBrainSearch,
     },
     callerHash,

@@ -619,6 +619,46 @@ test('deepRetrieve: happy path — plans, searches, synthesizes a cited answer (
   );
 });
 
+test('deepRetrieve: explicitly labeled secret values are redacted before synthesis and preserved only as marked hits', async () => {
+  const secretSentinel = 'SYNTHETIC_SECRET_SENTINEL_DEEP_01';
+  let synthesisContext = '';
+  await withStubbedFetch(
+    (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isChatUrl(u)) {
+        const body = init?.body ? (JSON.parse(init.body as string) as { messages: Array<{ role: string; content: string }> }) : { messages: [] };
+        const sys = body.messages[0]?.content ?? '';
+        if (sys.includes('retrieval query planner')) return chatJson({ sub_queries: ['synthetic secret check'], rooms: ['memory-exec'] });
+        if (sys.includes('One Brain')) {
+          synthesisContext = body.messages.map((message) => message.content).join('\n');
+          return chatText('The retrieved record is available with a redacted field [1].');
+        }
+        throw new Error('the fixture should not require refinement');
+      }
+      if (isSearchUrl(u)) {
+        return new Response(JSON.stringify({ value: [
+          { id: 'synthetic-secret-doc', text: `Workspace secret: ${secretSentinel}`, '@search.rerankerScore': 3 },
+          { id: 'synthetic-related-doc-1', text: 'synthetic supporting fact one', '@search.rerankerScore': 2.5 },
+          { id: 'synthetic-related-doc-2', text: 'synthetic supporting fact two', '@search.rerankerScore': 2 },
+        ] }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      const result = await deepRetrieve('synthetic secret check', { rooms: ['memory-exec'] });
+      assert.equal(result.mode, 'deep-agentic');
+      assert.ok(synthesisContext.includes('[REDACTED: explicitly labeled secret]'));
+      assert.ok(!synthesisContext.includes(secretSentinel), 'the labeled value must not reach the synthesis provider');
+      const hit = result.hits.find((candidate) => candidate.id === 'synthetic-secret-doc');
+      assert.ok(hit, 'the result ID is preserved for citation and follow-up');
+      assert.equal(hit.text, 'Workspace secret: [REDACTED: explicitly labeled secret]');
+      assert.ok(!result.answer.includes(secretSentinel));
+      assert.ok(result.citations.some((citation) => citation.id === 'synthetic-secret-doc'));
+    },
+  );
+});
+
 test('deepRetrieve SECURITY: the plan cannot escalate rooms beyond what the caller passed in', async () => {
   await withStubbedFetch(
     (async (url: string | URL) => {
