@@ -667,6 +667,15 @@ async function handleBrainSearchImpl(
   };
 }
 
+/** Apply explicit-label redaction to every fast/deep result branch, including entity promotion. */
+export async function handleBrainSearch(
+  input: BrainSearchInput,
+  ctx: ToolContext,
+  dependencies: BrainSearchDependencies = {},
+): Promise<ToolResultPayload> {
+  return sanitizeRetrievedPayload(await handleBrainSearchImpl(input, ctx, dependencies));
+}
+
 export function registerBrainSearch(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
     server,
