@@ -69,6 +69,7 @@ import { rrfFuse, type FusedHit } from '../../memory/rrf.js';
 import { buildCitations, deepRetrieve, parseDeepRetrievalMode } from '../../memory/deep-retrieval.js';
 import { lookupEntity, type EntityHit } from '../../memory/entity-lookup.js';
 import { tagWithFeedbackRefs } from '../../memory/retrieval-feedback.js';
+import { sanitizeRetrievedPayload } from '../../safety/retrieval-redaction.js';
 import { opaqueIdentifierQuery } from '../../search/identifier-match.js';
 import { createRetrievalEvidencePack } from '../../brain-capabilities/evidence-view.js';
 
