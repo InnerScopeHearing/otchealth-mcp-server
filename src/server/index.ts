@@ -8,6 +8,9 @@ import { runCloudBrowserPolling } from './cloud-browser-runtime.js';
 import { registerHealth } from './health.js';
 import { registerAdmin } from './admin.js';
 import { registerMcpRoutes } from './mcp.js';
+import { registerDeveloperGitReadRoutes } from './developer-git-read.js';
+import { validateBearer } from '../auth/bearer.js';
+import { githubDeveloperGitRead } from '../github/api-client.js';
 import { registerOAuthRoutes } from './oauth.js';
 import { registerHeyGenPairingRoute } from './heygen-pairing.js';
 import { registerHeyGenApprovalCallback } from './heygen-approval-callback.js';
@@ -111,6 +114,11 @@ async function main(): Promise<void> {
   registerHeyGenPairingRoute(app);
   registerHeyGenApprovalCallback(app);
   registerMcpRoutes(app);
+  registerDeveloperGitReadRoutes(app, {
+    authenticate: async (request) => validateBearer(request.headers.authorization),
+    upstream: githubDeveloperGitRead,
+    onError: (event) => logger.warn({ type: 'developer_git_read_error', ...event }, 'developer git read failed'),
+  });
   registerIntercomLoginRoutes(app, intercomLoginRuntime);
   registerWebsiteLoginRoutes(app, websiteLoginRuntime);
   await registerOptionalDaytonaRoutes(env, () => registerConfiguredDaytonaViewerRoutes(app));

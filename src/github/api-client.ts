@@ -8,6 +8,7 @@ import {
 } from '../config/github-operator.js';
 import { evaluateGitHubPreShareGate } from '../safety/github-pre-share.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import { createDeveloperGitUpstream } from './developer-git-upstream.js';
 import {
   buildGitHubApiUrl,
   encodeGitHubHierarchicalRoutePath,
@@ -218,6 +219,9 @@ async function getInstallationToken(): Promise<string> {
   tokenExpiresAt = expiresAt ? new Date(expiresAt).getTime() : now + 55 * 60 * 1000;
   return cachedToken;
 }
+
+/** Server-only Git transport; this returns a response stream, never the App token. */
+export const githubDeveloperGitRead = createDeveloperGitUpstream(getInstallationToken);
 
 async function githubGet<T = any>(path: string): Promise<T> {
   validatedGitHubApiUrl(path);
