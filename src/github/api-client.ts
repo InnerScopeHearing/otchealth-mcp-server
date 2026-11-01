@@ -8,6 +8,7 @@ import {
 } from '../config/github-operator.js';
 import { evaluateGitHubPreShareGate } from '../safety/github-pre-share.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import { createDeveloperGitUpstream } from './developer-git-upstream.js';
 import {
   buildGitHubApiUrl,
   encodeGitHubHierarchicalRoutePath,
