@@ -268,7 +268,7 @@ function degradedRetractionResult(top: number, includeOps: boolean, rooms: strin
   };
 }
 
-export async function handleBrainSearch(
+async function handleBrainSearchImpl(
   input: BrainSearchInput,
   ctx: ToolContext,
   dependencies: BrainSearchDependencies = {},
