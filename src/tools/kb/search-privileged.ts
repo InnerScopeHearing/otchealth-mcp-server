@@ -79,6 +79,7 @@ import { registerTool, type CallerHashProvider } from '../registry.js';
 // cannot widen a ring. INDEX_LANES, PERSONAL_LEGAL_RING, isLaneAllowed, and the order of the ring
 // check relative to the search call are all unchanged.
 import { hybridSearch, searchConfigured } from '../../search/index.js';
+import { sanitizeToolResult } from '../../safety/retrieval-redaction.js';
 
 /** The executive ring: the only identities permitted on privileged indexes. Defined once, applied to all.
  * 'exec' = the UNIFIED executive identity (CEO direction 2026-07-04): the solo operator wears every C-suite
