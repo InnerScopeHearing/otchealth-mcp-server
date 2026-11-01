@@ -261,7 +261,7 @@ export async function recallHandler(
   dependencies: RecallHandlerDependencies = {},
 ): Promise<ToolResultPayload> {
   try {
-    return await recallHandlerImpl(input, ctx, dependencies);
+    return sanitizeRetrievedPayload(await recallHandlerImpl(input, ctx, dependencies));
   } catch (error) {
     if (error instanceof RetractionAuthorityUnavailable) {
       return {
