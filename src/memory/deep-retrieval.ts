@@ -68,6 +68,7 @@ import { logger } from '../audit/logger.js';
 import { currentCorrelationId } from '../server/request-context.js';
 import { withProviderUsageStage } from '../telemetry/provider-usage-receipt.js';
 import { identifierEvidenceSnippet, literalIndex, opaqueIdentifierQuery } from '../search/identifier-match.js';
+import { sanitizeRetrievedPayload } from '../safety/retrieval-redaction.js';
 
 // Stage events use the existing structured application logger. Keep the schema deliberately
 // content-free: stage/outcome are closed enums, duration is a finite non-negative number, and no
