@@ -1805,13 +1805,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
             // Bounded inline summary (pagination.itemCount/pageCount, shim page counts, array
             // lengths) so a caller sizing a population never has to page to the tail (issue #291a).
             const summary = extractResultSummary(result);
-            structured.result = {
-              _jit_offloaded: true,
-              result_id: off.resultId,
-              total_bytes: off.totalBytes,
-              ...(summary ? { summary } : {}),
-              note: 'Full payload offloaded to keep context small; call gateway_fetch_result(result_id).',
-            };
+            structured.result = buildOffloadedResultReference(off.resultId, off.totalBytes, summary);
           }
         }
         if (inlineProjectionEligible && !offloadAttempted) recordInlineResultProjection(text);
