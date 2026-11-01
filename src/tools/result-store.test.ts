@@ -11,6 +11,7 @@ process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
 
 const {
   buildPreview,
+  buildOffloadedResultReference,
   pageCount,
   pageSlice,
   cursorSlice,
@@ -212,6 +213,18 @@ test('buildPreview embeds the result_id, the JIT marker, and head+tail for long 
   assert.ok(p.length < full.length, 'preview is smaller than the full payload');
 });
 
+test('offloaded wake reference preserves the exact five-field provenance consumer contract', () => {
+  const reference = buildOffloadedResultReference('jitres_fake_12345678', 133553, {
+    array_lengths: { sections: 9 },
+  });
+  assert.deepEqual(Object.keys(reference).sort(), [
+    '_jit_offloaded', 'note', 'result_id', 'summary', 'total_bytes',
+  ]);
+  assert.equal(reference._jit_offloaded, true);
+  assert.equal(reference.result_id, 'jitres_fake_12345678');
+  assert.equal(reference.total_bytes, 133553);
+});
+
 test('buildPreview omits the tail when input is short enough (head+marker only)', () => {
   const p = buildPreview('abc', 'jitres_x');
   assert.ok(p.startsWith('abc'));
@@ -394,6 +407,9 @@ test('cursor handler rejects mixed modes and passes authenticated continuation',
   await assert.rejects(() => handleGatewayFetchResult({ result_id: 'fixture', offset: 1 }, { callerHash }, deps), /Invalid/);
   const result = await handleGatewayFetchResult({ result_id: 'fixture', offset: 3, max_chunk_bytes: 8192 }, { callerHash }, deps);
   assert.deepEqual(calls, [['fixture', 0, callerHash, { offset: 3, maxChunkBytes: 8192 }]]);
+  await handleGatewayFetchResult({ result_id: 'fixture', offset: 3, max_chunk_bytes: 8192,
+    expected_origin_tool: 'wake' }, { callerHash }, deps);
+  assert.deepEqual(calls[1], ['fixture', 0, callerHash, { offset: 3, maxChunkBytes: 8192 }, 'wake']);
   assert.equal((result.data as { done: boolean }).done, true);
 });
 
@@ -441,6 +457,147 @@ test('every page rejects a different caller without payload or existence metadat
     assert.equal('chunk' in denied, false);
     assert.equal('expired' in denied, false);
   }
+});
+
+test('origin binding preserves legacy explicit-id reads and verifies new records after caller authorization', async () => {
+  const store = fakeResultStore();
+  const ownerHash = 'a'.repeat(64);
+  const otherHash = 'b'.repeat(64);
+  const legacyId = 'jitres_legacy_origin';
+  store.docs.set(legacyId, {
+    id: legacyId,
+    cacheScope: legacyId,
+    type: 'jit_result',
+    caller_hash: ownerHash,
+    correlation_id: 'corr_legacy_origin',
+    data: { payload: 'legacy synthetic wake context' },
+    expiresAt: store.deps.now() + 60_000,
+  });
+
+  const legacyRead = await fetchStoredResult(legacyId, 0, ownerHash, store.deps);
+  assert.equal(legacyRead.found, true, 'old records remain readable by explicit id without an origin check');
+  assert.deepEqual(
+    await fetchStoredResult(legacyId, 0, ownerHash, store.deps, undefined, 'wake'),
+    { found: false },
+    'asking to verify origin on an old record fails generically because no origin was recorded',
+  );
+  assert.deepEqual(
+    await fetchStoredResult(legacyId, 0, otherHash, store.deps),
+    { found: false },
+    'legacy result remains bound to its original caller',
+  );
+
+  const data = { payload: 'x'.repeat(PAGE_CHARS + 20) };
+  const outcome = await offloadResult(JSON.stringify(data), data, 'corr_new_origin', ownerHash, store.deps, 'wake');
+  assert.ok(outcome);
+  assert.equal(store.docs.get(outcome.resultId)?.origin_tool, 'wake');
+  assert.equal(
+    (await fetchStoredResult(outcome.resultId, 0, ownerHash, store.deps, undefined, 'wake')).found,
+    true,
+    'same caller can retrieve with matching expected origin',
+  );
+
+  const aliasOutcome = await offloadResult(
+    'synthetic alias result', { payload: 'synthetic alias result' }, 'corr_alias_origin',
+    ownerHash, store.deps, 'github_repo_get',
+  );
+  assert.ok(aliasOutcome);
+  assert.equal(
+    store.docs.get(aliasOutcome.resultId)?.origin_tool,
+    'github_repo_get',
+    'origin binding records canonical github_repo_get for its M365 repo_get alias',
+  );
+  assert.deepEqual(
+    await fetchStoredResult(outcome.resultId, 0, ownerHash, store.deps, undefined, 'memory_pack'),
+    { found: false },
+    'wrong expected origin is indistinguishable from a miss',
+  );
+  assert.deepEqual(
+    await fetchStoredResult(outcome.resultId, 0, otherHash, store.deps, undefined, 'wake'),
+    { found: false },
+    'wrong caller stays indistinguishable from a miss even with matching origin',
+  );
+
+  const firstCursor = await fetchStoredResult(
+    outcome.resultId, 0, ownerHash, store.deps,
+    { offset: 0, maxChunkBytes: 8192 }, 'wake',
+  );
+  assert.equal(firstCursor.found, true);
+  assert.equal(firstCursor.offset, 0);
+  assert.ok(firstCursor.next_offset !== null);
+  const nextCursor = await fetchStoredResult(
+    outcome.resultId, 0, ownerHash, store.deps,
+    { offset: firstCursor.next_offset!, maxChunkBytes: 8192 }, 'wake',
+  );
+  assert.equal(nextCursor.found, true);
+  assert.equal(nextCursor.offset, firstCursor.next_offset);
+});
+
+test('fetch result reports verified origin only for matching authorized page and cursor reads', async () => {
+  const store = fakeResultStore();
+  const ownerHash = 'c'.repeat(64);
+  const otherHash = 'd'.repeat(64);
+  const legacyId = 'jitres_legacy_without_origin';
+  store.docs.set(legacyId, {
+    id: legacyId,
+    cacheScope: legacyId,
+    type: 'jit_result',
+    caller_hash: ownerHash,
+    correlation_id: 'corr_legacy_without_origin',
+    data: { payload: 'legacy' },
+    expiresAt: store.deps.now() + 60_000,
+  });
+  const data = { payload: 'x'.repeat(PAGE_CHARS + 200) };
+  const stored = await offloadResult(JSON.stringify(data), data, 'corr_verified_origin', ownerHash, store.deps, 'wake');
+  assert.ok(stored);
+  const deps = {
+    fetchStoredResult: (id: string, page: number, callerHash: string,
+      cursor?: Parameters<typeof fetchStoredResult>[4], expectedOriginTool?: string) =>
+      fetchStoredResult(id, page, callerHash, store.deps, cursor, expectedOriginTool),
+  };
+
+  const page = await handleGatewayFetchResult(
+    { result_id: stored.resultId, expected_origin_tool: 'wake' }, { callerHash: ownerHash }, deps,
+  );
+  const pageData = page.data as Record<string, unknown>;
+  assert.equal(pageData.found, true);
+  assert.equal(pageData.verified_origin_tool, 'wake');
+
+  const cursor = await handleGatewayFetchResult(
+    { result_id: stored.resultId, offset: 0, max_chunk_bytes: 1024, expected_origin_tool: 'wake' },
+    { callerHash: ownerHash }, deps,
+  );
+  const cursorData = cursor.data as Record<string, unknown>;
+  assert.equal(cursorData.found, true);
+  assert.equal(cursorData.verified_origin_tool, 'wake');
+
+  const unrequested = await handleGatewayFetchResult(
+    { result_id: stored.resultId }, { callerHash: ownerHash }, deps,
+  );
+  assert.equal((unrequested.data as Record<string, unknown>).found, true);
+  assert.equal(Object.hasOwn(unrequested.data as object, 'verified_origin_tool'), false,
+    'old callers retain the original successful response shape');
+
+  const legacy = await handleGatewayFetchResult(
+    { result_id: legacyId, expected_origin_tool: 'wake' }, { callerHash: ownerHash }, deps,
+  );
+  const wrongCaller = await handleGatewayFetchResult(
+    { result_id: stored.resultId, expected_origin_tool: 'wake' }, { callerHash: otherHash }, deps,
+  );
+  const mismatchedOrigin = await handleGatewayFetchResult(
+    { result_id: stored.resultId, expected_origin_tool: 'memory_pack' }, { callerHash: ownerHash }, deps,
+  );
+  assert.deepEqual(legacy.data, { found: false }, 'legacy records cannot claim verified origin');
+  assert.deepEqual(wrongCaller.data, { found: false }, 'wrong caller cannot claim verified origin');
+  assert.deepEqual(mismatchedOrigin.data, { found: false }, 'origin mismatch remains a generic miss');
+  assert.equal(wrongCaller.summary, mismatchedOrigin.summary,
+    'wrong-caller and origin-mismatch misses for the same ID remain indistinguishable');
+  assert.equal(legacy.summary,
+    'no stored result for ' + legacyId + ' (invalid id, unauthorized, or expired).',
+    'legacy-origin miss uses the same generic miss format');
+  assert.equal(Object.hasOwn(legacy.data as object, 'verified_origin_tool'), false);
+  assert.equal(Object.hasOwn(wrongCaller.data as object, 'verified_origin_tool'), false);
+  assert.equal(Object.hasOwn(mismatchedOrigin.data as object, 'verified_origin_tool'), false);
 });
 
 test('legacy unbound and malformed-caller result access fails closed', async () => {

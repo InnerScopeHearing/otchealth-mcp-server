@@ -10,6 +10,10 @@ import { evaluateGitHubPreShareGate } from '../safety/github-pre-share.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { createDeveloperGitUpstream } from './developer-git-upstream.js';
 import {
+  createDeveloperGitReadTokenProvider,
+  type DeveloperGitTokenMintRequest,
+} from './developer-git-token.js';
+import {
   buildGitHubApiUrl,
   encodeGitHubHierarchicalRoutePath,
   encodeGitHubOpaqueRouteParam,
@@ -220,8 +224,37 @@ async function getInstallationToken(): Promise<string> {
   return cachedToken;
 }
 
+/** Mint only a repository- and permission-restricted token for the Developer Git read route. */
+async function mintDeveloperGitReadInstallationToken(
+  scope: DeveloperGitTokenMintRequest,
+): Promise<{ token: string; expires_at: string }> {
+  const installationId = env.GITHUB_APP_INSTALLATION_ID;
+  if (!installationId) throw new Error('github_not_configured');
+  const accessTokenPath = `/app/installations/${encodeGitHubRepositorySegment(installationId)}/access_tokens`;
+  const res = await githubApiFetch(accessTokenPath, {
+    method: 'POST',
+    headers: {
+      ...GITHUB_HEADERS,
+      Authorization: `Bearer ${mintJwt()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(scope),
+  }, 0);
+  const text = await res.text();
+  let data: any;
+  try { data = JSON.parse(text); } catch { data = null; }
+  if (!res.ok || !data || typeof data !== 'object') {
+    throw new Error('github_developer_git_token_mint_failed');
+  }
+  return { token: data.token, expires_at: data.expires_at };
+}
+
+const getDeveloperGitReadInstallationToken = createDeveloperGitReadTokenProvider(
+  mintDeveloperGitReadInstallationToken,
+);
+
 /** Server-only Git transport; this returns a response stream, never the App token. */
-export const githubDeveloperGitRead = createDeveloperGitUpstream(getInstallationToken);
+export const githubDeveloperGitRead = createDeveloperGitUpstream(getDeveloperGitReadInstallationToken);
 
 async function githubGet<T = any>(path: string): Promise<T> {
   validatedGitHubApiUrl(path);

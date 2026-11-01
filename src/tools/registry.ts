@@ -40,7 +40,7 @@ import { lazyCallerSurfaceEntry, type CallerSurfaceTool } from './catalog/caller
 import { hideDeniedWefunderChatActions } from './catalog/wefunder-visibility.js';
 import { requiredRoleFor, roleAllows } from '../catalog/governance.js';
 import { currentCallerAgent, isConnectorSurface, isM365StaticAuth } from '../server/request-context.js';
-import { shouldOffload, offloadResult, extractResultSummary, mayOffloadToolResult, recordInlineResultProjection } from './result-store.js';
+import { shouldOffload, offloadResult, extractResultSummary, mayOffloadToolResult, recordInlineResultProjection, buildOffloadedResultReference } from './result-store.js';
 import { WEFUNDER_CAMPAIGN_DIRECTOR_LANE } from './hyperagent/ring.js';
 import { HEYGEN_DATA_TOOLS, HEYGEN_PREFLIGHT_TOOLS } from './heygen/access.js';
 import {
@@ -1795,7 +1795,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         const offloadAttempted = inlineProjectionEligible && shouldOffload(text);
         if (offloadAttempted) {
           const writeStarted = Date.now();
-          const off = await offloadResult(text, result, correlationId, callerHash);
+          const off = await offloadResult(text, result, correlationId, callerHash, undefined, canonicalName);
           logToolPhase({
             phase: 'write', durationMs: Date.now() - writeStarted,
             outcome: off ? 'success' : 'unknown', toolCorrelationId: correlationId,
@@ -1805,13 +1805,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
             // Bounded inline summary (pagination.itemCount/pageCount, shim page counts, array
             // lengths) so a caller sizing a population never has to page to the tail (issue #291a).
             const summary = extractResultSummary(result);
-            structured.result = {
-              _jit_offloaded: true,
-              result_id: off.resultId,
-              total_bytes: off.totalBytes,
-              ...(summary ? { summary } : {}),
-              note: 'Full payload offloaded to keep context small; call gateway_fetch_result(result_id).',
-            };
+            structured.result = buildOffloadedResultReference(off.resultId, off.totalBytes, summary);
           }
         }
         if (inlineProjectionEligible && !offloadAttempted) recordInlineResultProjection(text);
