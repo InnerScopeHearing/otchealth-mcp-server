@@ -725,6 +725,8 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
         resumed: z.boolean().optional(),
         budget_skipped: z.array(z.string()).optional(),
       },
+      // Deep retrieval also sanitizes passages before synthesis; this boundary covers fast, deep,
+      // and entity-promotion outputs. Neither is general secret or PHI detection.
       handler: handleBrainSearch,
     },
     callerHash,
