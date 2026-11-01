@@ -154,6 +154,31 @@ export function pageSlice(s: string, page: number): { page: number; pages: numbe
   return { page: p, pages, chunk: s.slice(start, end) };
 }
 
+/** Cursor offsets are opaque UTF-16 positions returned by the preceding call, not byte offsets. */
+export interface ResultCursor { offset: number; maxChunkBytes: number }
+
+export function cursorSlice(s: string, cursor: ResultCursor): {
+  offset: number; next_offset: number | null; done: boolean; chunk: string;
+} {
+  const { offset, maxChunkBytes } = cursor;
+  if (!Number.isSafeInteger(maxChunkBytes) || maxChunkBytes < 1024 || maxChunkBytes > PAGE_CHARS ||
+      !Number.isSafeInteger(offset) || offset < 0 || offset > s.length ||
+      (offset > 0 && offset < s.length && s.charCodeAt(offset) >= 0xdc00 && s.charCodeAt(offset) <= 0xdfff &&
+       s.charCodeAt(offset - 1) >= 0xd800 && s.charCodeAt(offset - 1) <= 0xdbff)) {
+    throw new Error('Invalid result cursor');
+  }
+  let end = offset;
+  let size = 0;
+  for (const symbol of s.slice(offset)) {
+    const cost = jsonEscapedUtf8Bytes(symbol);
+    if (size + cost > maxChunkBytes) break;
+    size += cost;
+    end += symbol.length;
+  }
+  const done = end === s.length;
+  return { offset, next_offset: done ? null : end, done, chunk: s.slice(offset, end) };
+}
+
 export interface OffloadOutcome {
   preview: string;
   resultId: string;
@@ -275,6 +300,9 @@ export interface FetchOutcome {
   chunk?: string;
   created?: string;
   expired?: boolean;
+  offset?: number;
+  next_offset?: number | null;
+  done?: boolean;
 }
 
 /** Retrieve a stored result by id, paged. Returns {found:false} on miss/expiry. */
@@ -283,6 +311,7 @@ export async function fetchStoredResult(
   page: number,
   callerHash: string,
   deps: ResultStoreDeps = DEFAULT_RESULT_STORE_DEPS,
+  cursor?: ResultCursor,
 ): Promise<FetchOutcome> {
   const emitProjection = deps.logProjection ?? logResultProjection;
   if (!validCallerHash(callerHash)) return { found: false };
@@ -304,6 +333,20 @@ export async function fetchStoredResult(
   } else {
     // Unknown formats cannot be safely paged. Hide them as a miss without serializing the payload.
     return { found: false };
+  }
+  if (cursor) {
+    const sliced = cursorSlice(serialized, cursor);
+    emitProjection({
+      outcome: 'retrieved',
+      originalBytes: Buffer.byteLength(serialized, 'utf8'),
+      returnedBytes: Buffer.byteLength(sliced.chunk, 'utf8'),
+    });
+    return {
+      found: true,
+      total_bytes: Buffer.byteLength(serialized, 'utf8'),
+      ...sliced,
+      created: typeof doc.created === 'string' ? doc.created : undefined,
+    };
   }
   const sliced = pageSlice(serialized, page);
   emitProjection({
