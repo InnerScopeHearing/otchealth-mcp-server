@@ -7,7 +7,7 @@ const LABEL_ASSIGNMENT = /(^|[\s,{;"'])((?:["']?)(?:workspace[ _-]?secret|client
 // Some stored prose uses the explicit label followed by a bare token-like value, without `:` or `=`.
 // Require a long non-space token shape so ordinary sentences such as "workspace secret belongs..."
 // remain readable.
-const BARE_WORKSPACE_SECRET = /(^|[\s,{;"'])(workspace[ _-]?secret)([ \t]+)[A-Za-z0-9][A-Za-z0-9._~+/_-]{15,}={0,2}(?=$|[\s,;}"'])/i;
+const BARE_WORKSPACE_SECRET = /(^|[\s,{;"'])(workspace[ _-]?secret)([ \t]+)[A-Za-z0-9][A-Za-z0-9.~+/_-]{15,}={0,2}(?=$|[\s,;}"'])/i;
 // Match fields that hold credential values, not descriptive metadata such as token_type,
 // token_status, secret_name, or api_key_name. Explicit compound labels remain recognized.
 const SECRET_FIELD_NAME = /^(?:secret|secret_value|workspace_secret|client_secret|token|password|credential|api_key|bearer|access_token|refresh_token)$/i;
