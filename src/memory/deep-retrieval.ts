@@ -978,7 +978,9 @@ async function runDeepFlow(
     return result;
   }
   if (postShield === 'blocked') recordSkippedDeepStage('synthesis');
-  const answer = postShield === 'blocked' ? INJECTION_DETECTED_ANSWER : await synthesizeAnswer(query, hits, deadline, now, budget.signal, budget.expire);
+  const answer = sanitizeRetrievedPayload(postShield === 'blocked'
+    ? INJECTION_DETECTED_ANSWER
+    : await synthesizeAnswer(query, hits, deadline, now, budget.signal, budget.expire));
 
   // A provider may abort at the deadline after fetch headers while its response body is still
   // streaming. Preserve the retrieved, retraction-filtered passages and report the skipped answer
