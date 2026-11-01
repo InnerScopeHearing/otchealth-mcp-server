@@ -1053,7 +1053,7 @@ export async function fallbackFastSearch(
       const finalSnapshot = await readRetractionSnapshot();
       if (!finalSnapshot.verified) return { value: degradedRetractionResult(query, rooms), outcome: 'partial' };
       const { kept, dropped } = filterRetractedByAgent(dedupeById(pool), finalSnapshot.byAgent);
-      const hits = kept.slice(0, top);
+      const hits = sanitizeRetrievedPayload(kept.slice(0, top));
       const result: DeepRetrieveResult = {
         mode: 'deep-fallback-fast',
         answer: SYNTH_UNAVAILABLE_ANSWER,
