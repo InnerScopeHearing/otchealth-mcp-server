@@ -185,6 +185,21 @@ export interface OffloadOutcome {
   totalBytes: number;
 }
 
+/** Preserve the established five-field wake JIT reference contract; origin stays in the cache doc. */
+export function buildOffloadedResultReference(
+  resultId: string,
+  totalBytes: number,
+  summary?: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    _jit_offloaded: true,
+    result_id: resultId,
+    total_bytes: totalBytes,
+    ...(summary ? { summary } : {}),
+    note: 'Full payload offloaded to keep context small; call gateway_fetch_result(result_id).',
+  };
+}
+
 /**
  * Small, bounded summary of an offloaded payload so a caller can learn population size WITHOUT
  * paging gateway_fetch_result to the tail (CFO close request 2026-09-05, issue #291 part a).
@@ -240,6 +255,7 @@ export async function offloadResult(
   correlationId: string,
   callerHash: string,
   deps: ResultStoreDeps = DEFAULT_RESULT_STORE_DEPS,
+  originTool?: string,
 ): Promise<OffloadOutcome | null> {
   const emitProjection = deps.logProjection ?? logResultProjection;
   try {
@@ -264,6 +280,7 @@ export async function offloadResult(
       type: 'jit_result',
       caller_hash: callerHash,
       correlation_id: correlationId,
+      ...(originTool ? { origin_tool: originTool } : {}),
       ...(compactWrite ? { serialization_format: 'compact-json-v1' } : {}),
       data,
       total_bytes: totalBytes,
@@ -312,6 +329,7 @@ export async function fetchStoredResult(
   callerHash: string,
   deps: ResultStoreDeps = DEFAULT_RESULT_STORE_DEPS,
   cursor?: ResultCursor,
+  expectedOriginTool?: string,
 ): Promise<FetchOutcome> {
   const emitProjection = deps.logProjection ?? logResultProjection;
   if (!validCallerHash(callerHash)) return { found: false };
@@ -321,6 +339,10 @@ export async function fetchStoredResult(
   // Mismatch and legacy unbound records are indistinguishable from a miss. Check the binding before
   // expiry or serialization so no metadata or payload leaks to another authenticated principal.
   if (doc.type !== 'jit_result' || doc.caller_hash !== callerHash) return { found: false };
+  // The optional origin check is deliberately applied only after caller authorization, and a
+  // mismatch is indistinguishable from an invalid or unauthorized result id. Records written
+  // before origin_tool existed remain readable when callers omit the expected origin.
+  if (expectedOriginTool !== undefined && doc.origin_tool !== expectedOriginTool) return { found: false };
   if (typeof doc.expiresAt === 'number' && deps.now() > doc.expiresAt) {
     return { found: false, expired: true };
   }
@@ -365,3 +387,4 @@ export async function fetchStoredResult(
     created: typeof doc.created === 'string' ? doc.created : undefined,
   };
 }
+
