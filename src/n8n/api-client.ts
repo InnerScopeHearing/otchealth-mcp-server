@@ -136,18 +136,47 @@ export async function n8nGet<T = unknown>(path: string, opts: N8nGetOptions = {}
         accept: 'application/json',
       },
     }, { timeoutMs: opts.timeoutMs ?? 30_000, retries: 1 });
-    const body = await res.text();
+    const body = await readResponseText(res, opts.maxResponseBytes);
     const latency = Date.now() - started;
     if (res.status >= 200 && res.status < 300) {
       logger.debug(
         { type: 'n8n_api_ok', path, status: res.status, latency_ms: latency, correlation_id: opts.correlationId },
         'n8n api ok',
       );
-      return body ? (JSON.parse(body) as T) : ({} as T);
+      if (!body) return {} as T;
+      try {
+        return JSON.parse(body) as T;
+      } catch (err) {
+        if (opts.maxResponseBytes !== undefined) {
+          throw boundedResponseError(
+            res.status,
+            'n8n_invalid_json',
+            'n8n returned an invalid bounded API response.',
+            'Check the n8n API response using the call correlation ID.',
+          );
+        }
+        throw err;
+      }
+    }
+    if (opts.maxResponseBytes !== undefined) {
+      throw boundedResponseError(
+        res.status,
+        res.status === 401 || res.status === 403 ? 'n8n_auth_failed' : res.status === 404 ? 'n8n_not_found' : res.status >= 500 ? 'n8n_upstream_error' : 'n8n_request_error',
+        `n8n returned ${res.status} for ${path}.`,
+        'Check n8n connectivity and access using the call correlation ID.',
+      );
     }
     throw mapError(res.status, path, body);
   } catch (err) {
     if (err instanceof N8nApiError) throw err;
+    if (opts.maxResponseBytes !== undefined) {
+      throw boundedResponseError(
+        0,
+        'n8n_network_error',
+        'Unable to read the bounded n8n API response safely.',
+        'Check n8n connectivity using the call correlation ID.',
+      );
+    }
     throw new N8nApiError({
       code: 'n8n_network_error',
       status: 0,
