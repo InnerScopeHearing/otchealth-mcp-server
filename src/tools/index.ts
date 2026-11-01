@@ -35,6 +35,7 @@ import { registerIntercomGetArticle } from './intercom/get-article.js';
 
 // Phase 2 — n8n meta-tools
 import { registerN8nListWorkflows } from './n8n/list-workflows.js';
+import { registerN8nCooWorkflowMetadata } from './n8n/coo-workflow-metadata.js';
 import { registerN8nGetExecution } from './n8n/get-execution.js';
 import { registerN8nChatActions } from './n8n/chat-actions.js';
 
@@ -1018,6 +1019,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
 
   // ===== Phase 2: n8n meta-tools =====
   registerN8nListWorkflows(server, callerHash);
+  registerN8nCooWorkflowMetadata(server, callerHash);
   registerN8nGetExecution(server, callerHash);
   // Ordinary Chat has a deliberately narrow asynchronous route through n8n.
   // It can submit only an allowlisted Brain read or checkpoint and then retrieve

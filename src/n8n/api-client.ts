@@ -62,9 +62,66 @@ export interface N8nGetOptions {
   query?: Record<string, string | number | undefined>;
   timeoutMs?: number;
   correlationId?: string;
+  /**
+   * Optional hard ceiling for the decoded response body. When set, the body is
+   * consumed as a byte stream and cancelled as soon as this limit is exceeded.
+   * Omitted callers keep the existing unbounded `Response.text()` behavior.
+   */
+  maxResponseBytes?: number;
+}
+
+function boundedResponseError(status: number, code: string, message: string, nextStep: string): N8nApiError {
+  return new N8nApiError({ code, status, message, nextStep });
+}
+
+async function readResponseText(res: Response, maxResponseBytes?: number): Promise<string> {
+  if (maxResponseBytes === undefined) return res.text();
+
+  const reader = res.body?.getReader();
+  if (!reader) return '';
+
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxResponseBytes) {
+        try { await reader.cancel(); } catch { /* Preserve the sanitized size-limit failure. */ }
+        throw boundedResponseError(
+          res.status,
+          'n8n_response_too_large',
+          'n8n API response exceeded the configured byte limit.',
+          'Request a smaller page or review the response-size limit.',
+        );
+      }
+      chunks.push(value);
+    }
+  } catch (err) {
+    if (err instanceof N8nApiError) throw err;
+    throw boundedResponseError(
+      res.status,
+      'n8n_response_read_failed',
+      'Unable to read the bounded n8n API response safely.',
+      'Check n8n connectivity using the call correlation ID.',
+    );
+  } finally {
+    try { reader.releaseLock(); } catch { /* A cancelled or errored reader may already be released. */ }
+  }
+
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), totalBytes).toString('utf8');
 }
 
 export async function n8nGet<T = unknown>(path: string, opts: N8nGetOptions = {}): Promise<T> {
+  if (opts.maxResponseBytes !== undefined && (!Number.isSafeInteger(opts.maxResponseBytes) || opts.maxResponseBytes < 1)) {
+    throw new N8nApiError({
+      code: 'n8n_invalid_response_limit',
+      status: 0,
+      message: 'The n8n response byte limit must be a positive safe integer.',
+      nextStep: 'Use a positive response-size limit.',
+    });
+  }
   const key = requireKey();
   await assertN8nReachable();
   const base = env.N8N_BASE_URL.replace(/\/$/, '');
@@ -79,18 +136,47 @@ export async function n8nGet<T = unknown>(path: string, opts: N8nGetOptions = {}
         accept: 'application/json',
       },
     }, { timeoutMs: opts.timeoutMs ?? 30_000, retries: 1 });
-    const body = await res.text();
+    const body = await readResponseText(res, opts.maxResponseBytes);
     const latency = Date.now() - started;
     if (res.status >= 200 && res.status < 300) {
       logger.debug(
         { type: 'n8n_api_ok', path, status: res.status, latency_ms: latency, correlation_id: opts.correlationId },
         'n8n api ok',
       );
-      return body ? (JSON.parse(body) as T) : ({} as T);
+      if (!body) return {} as T;
+      try {
+        return JSON.parse(body) as T;
+      } catch (err) {
+        if (opts.maxResponseBytes !== undefined) {
+          throw boundedResponseError(
+            res.status,
+            'n8n_invalid_json',
+            'n8n returned an invalid bounded API response.',
+            'Check the n8n API response using the call correlation ID.',
+          );
+        }
+        throw err;
+      }
+    }
+    if (opts.maxResponseBytes !== undefined) {
+      throw boundedResponseError(
+        res.status,
+        res.status === 401 || res.status === 403 ? 'n8n_auth_failed' : res.status === 404 ? 'n8n_not_found' : res.status >= 500 ? 'n8n_upstream_error' : 'n8n_request_error',
+        `n8n returned ${res.status} for ${path}.`,
+        'Check n8n connectivity and access using the call correlation ID.',
+      );
     }
     throw mapError(res.status, path, body);
   } catch (err) {
     if (err instanceof N8nApiError) throw err;
+    if (opts.maxResponseBytes !== undefined) {
+      throw boundedResponseError(
+        0,
+        'n8n_network_error',
+        'Unable to read the bounded n8n API response safely.',
+        'Check n8n connectivity using the call correlation ID.',
+      );
+    }
     throw new N8nApiError({
       code: 'n8n_network_error',
       status: 0,

@@ -63,3 +63,133 @@ test('n8nGet: when n8n is reachable, the call proceeds to the real API path with
   assert.equal(calls[1].url, 'https://cs-n8n.otchealthmart.com/api/v1/workflows');
   assert.equal(calls[1].headers['x-n8n-api-key'], 'test-n8n-key');
 });
+
+test('n8nGet: optional response ceiling accepts a streamed body exactly at the byte limit', async () => {
+  __resetN8nReachabilityCache();
+  const expected = JSON.stringify({ data: [{ id: 'wf_1' }] });
+  const encoded = new TextEncoder().encode(expected);
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoded.slice(0, 5));
+      controller.enqueue(encoded.slice(5));
+      controller.close();
+    },
+  });
+  const result = await withFetch(
+    (async (u: string | URL | Request) => String(u).endsWith('/healthz')
+      ? new Response('ok')
+      : new Response(body, { headers: { 'content-length': '1' } })) as unknown as typeof fetch,
+    () => n8nGet<{ data: Array<{ id: string }> }>('/workflows', { maxResponseBytes: encoded.byteLength }),
+  );
+  assert.deepEqual(result, { data: [{ id: 'wf_1' }] });
+});
+
+test('n8nGet: optional response ceiling cancels the stream on overflow despite a small Content-Length', async () => {
+  __resetN8nReachabilityCache();
+  const sensitive = 'UPSTREAM_SECRET_SENTINEL';
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(sensitive));
+      controller.enqueue(new TextEncoder().encode('more bytes beyond the cap'));
+    },
+    cancel() { cancelled = true; },
+  });
+
+  await assert.rejects(
+    () => withFetch(
+      (async (u: string | URL | Request) => String(u).endsWith('/healthz')
+        ? new Response('ok')
+        : new Response(body, { headers: { 'content-length': '1' } })) as unknown as typeof fetch,
+      () => n8nGet('/workflows', { maxResponseBytes: 8 }),
+    ),
+    (err: unknown) => {
+      assert.ok(err instanceof N8nApiError);
+      assert.equal(err.code, 'n8n_response_too_large');
+      assert.equal(err.upstream, undefined);
+      assert.equal(err.message.includes(sensitive), false);
+      return true;
+    },
+  );
+  assert.equal(cancelled, true, 'the overflowing response reader must be cancelled');
+});
+
+test('n8nGet: bounded non-success responses omit upstream text and body', async () => {
+  __resetN8nReachabilityCache();
+  const sensitive = 'UPSTREAM_SECRET_SENTINEL';
+  await assert.rejects(
+    () => withFetch(
+      (async (u: string | URL | Request) => String(u).endsWith('/healthz')
+        ? new Response('ok')
+        : new Response(JSON.stringify({ error: sensitive }), { status: 500 } as ResponseInit)) as unknown as typeof fetch,
+      () => n8nGet('/workflows', { maxResponseBytes: 1024 }),
+    ),
+    (err: unknown) => {
+      assert.ok(err instanceof N8nApiError);
+      assert.equal(err.code, 'n8n_upstream_error');
+      assert.equal(err.upstream, undefined);
+      assert.equal(err.message.includes(sensitive), false);
+      return true;
+    },
+  );
+});
+
+test('n8nGet: bounded invalid JSON is reported without preserving response content', async () => {
+  __resetN8nReachabilityCache();
+  const sensitive = 'UPSTREAM_SECRET_SENTINEL';
+  await assert.rejects(
+    () => withFetch(
+      (async (u: string | URL | Request) => String(u).endsWith('/healthz')
+        ? new Response('ok')
+        : new Response(sensitive)) as unknown as typeof fetch,
+      () => n8nGet('/workflows', { maxResponseBytes: 1024 }),
+    ),
+    (err: unknown) => {
+      assert.ok(err instanceof N8nApiError);
+      assert.equal(err.code, 'n8n_invalid_json');
+      assert.equal(err.upstream, undefined);
+      assert.equal(err.message.includes(sensitive), false);
+      return true;
+    },
+  );
+});
+
+test('n8nGet: bounded stream read failures are sanitized', async () => {
+  __resetN8nReachabilityCache();
+  const sensitive = 'UPSTREAM_SECRET_SENTINEL';
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) { controller.error(new Error(sensitive)); },
+  });
+  await assert.rejects(
+    () => withFetch(
+      (async (u: string | URL | Request) => String(u).endsWith('/healthz')
+        ? new Response('ok')
+        : new Response(body)) as unknown as typeof fetch,
+      () => n8nGet('/workflows', { maxResponseBytes: 1024 }),
+    ),
+    (err: unknown) => {
+      assert.ok(err instanceof N8nApiError);
+      assert.equal(err.code, 'n8n_response_read_failed');
+      assert.equal(err.upstream, undefined);
+      assert.equal(err.message.includes(sensitive), false);
+      return true;
+    },
+  );
+});
+
+test('n8nGet: bounded response ceilings must be positive safe integers', async () => {
+  __resetN8nReachabilityCache();
+  const calls: string[] = [];
+  await assert.rejects(
+    () => withFetch(
+      (async (u: string | URL | Request) => { calls.push(String(u)); return new Response('ok'); }) as unknown as typeof fetch,
+      () => n8nGet('/workflows', { maxResponseBytes: 0 }),
+    ),
+    (err: unknown) => {
+      assert.ok(err instanceof N8nApiError);
+      assert.equal(err.code, 'n8n_invalid_response_limit');
+      return true;
+    },
+  );
+  assert.equal(calls.length, 0);
+});
