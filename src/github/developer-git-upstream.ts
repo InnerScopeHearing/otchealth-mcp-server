@@ -20,9 +20,9 @@ export interface DeveloperGitUpstreamResponse {
  * The GitHub App token remains in the gateway process. The caller can never choose an
  * origin, supply upstream authorization or invoke receive-pack through this adapter.
  */
-export function createDeveloperGitUpstream(getToken: () => Promise<string>) {
+export function createDeveloperGitUpstream(getToken: (repo: string) => Promise<string>) {
   return async (input: DeveloperGitUpstreamRequest): Promise<DeveloperGitUpstreamResponse> => {
-    const allowed = [...DEVELOPER_GIT_REPOSITORIES].some((repo) => {
+    const allowed = [...DEVELOPER_GIT_REPOSITORIES].find((repo) => {
       const base = `https://github.com/InnerScopeHearing/${repo}.git/`;
       return (input.method === 'GET' && input.url === `${base}info/refs?service=git-upload-pack`) ||
         (input.method === 'POST' && input.url === `${base}git-upload-pack`);
@@ -33,7 +33,7 @@ export function createDeveloperGitUpstream(getToken: () => Promise<string>) {
       throw new Error('Invalid Developer Git upstream request');
     }
     if (input.signal.aborted) throw new Error('Developer Git request aborted');
-    const token = await getToken();
+    const token = await getToken(allowed);
     if (input.signal.aborted) throw new Error('Developer Git request aborted');
     const headers: Record<string, string> = {
       authorization: 'Basic ' + Buffer.from('x-access-token:' + token, 'utf8').toString('base64'),

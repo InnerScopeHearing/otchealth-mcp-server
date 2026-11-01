@@ -52,6 +52,37 @@ function makeApp(options: {
 const route = (repo: string, suffix: string): string => `/developer/git/v1/${repo}/${suffix}`;
 const bearerHeader = { authorization: `Bearer ${bearer}` };
 
+test('each Developer app repository is forwarded only to its fixed organization path', async () => {
+  const repositories = ['iheartest', 'aware-aural-rehab', 'otchealth-companion', 'innerease',
+    'fourvault', 'flatstick', 'plantid-app', 'fictionary'];
+  const fixture = makeApp();
+  try {
+    for (const repo of repositories) {
+      const response = await fixture.app.inject({ method: 'GET',
+        url: `${route(repo, 'info/refs')}?service=git-upload-pack`, headers: bearerHeader });
+      assert.equal(response.statusCode, 200, repo);
+      assert.equal(fixture.upstreamRequests.at(-1)?.url,
+        `https://github.com/InnerScopeHearing/${repo}.git/info/refs?service=git-upload-pack`);
+    }
+    assert.equal(fixture.upstreamRequests.length, repositories.length);
+  } finally { await fixture.app.close(); }
+});
+
+test('each Developer app fetch uses its fixed upload-pack path', async () => {
+  for (const repo of ['iheartest', 'aware-aural-rehab', 'otchealth-companion', 'innerease',
+    'fourvault', 'flatstick', 'plantid-app', 'fictionary']) {
+    const fixture = makeApp();
+    try {
+      const response = await fixture.app.inject({ method: 'POST', url: route(repo, 'git-upload-pack'),
+        headers: { ...bearerHeader, 'content-type': 'application/x-git-upload-pack-request' },
+        payload: Buffer.from('synthetic') });
+      assert.equal(response.statusCode, 200, repo);
+      assert.equal(fixture.upstreamRequests[0]?.url,
+        `https://github.com/InnerScopeHearing/${repo}.git/git-upload-pack`);
+    } finally { await fixture.app.close(); }
+  }
+});
+
 test('unauthenticated and non-Developer callers are denied before upstream', async () => {
   const unauthenticated = makeApp({ caller: null });
   try {

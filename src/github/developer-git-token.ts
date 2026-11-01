@@ -1,13 +1,20 @@
 /** Route-only GitHub App installation token for the Developer Git read pilot. */
 
-// Fixed mapping from the sole Developer Git route repo to its GitHub numeric ID. Any allowlist
-// expansion must deliberately redesign this token scope and update the invariant test.
-export const DEVELOPER_GIT_TOKEN_REPOSITORY_NAME = 'iheartest';
-export const DEVELOPER_GIT_REPOSITORY_ID = 1_231_250_532;
+// Fixed GitHub repository IDs. Never derive token scope from an unverified caller value.
+export const DEVELOPER_GIT_REPOSITORY_IDS: Readonly<Record<string, number>> = Object.freeze({
+  iheartest: 1_231_250_532,
+  'aware-aural-rehab': 1_233_196_567,
+  'otchealth-companion': 1_249_343_095,
+  innerease: 1_254_834_356,
+  fourvault: 1_249_412_178,
+  flatstick: 1_257_949_398,
+  'plantid-app': 1_271_529_369,
+  fictionary: 1_257_976_525,
+});
 export const DEVELOPER_GIT_TOKEN_EARLY_REFRESH_MS = 60_000;
 
 export interface DeveloperGitTokenMintRequest {
-  repository_ids: readonly [typeof DEVELOPER_GIT_REPOSITORY_ID];
+  repository_ids: readonly [number];
   permissions: { contents: 'read' };
 }
 
@@ -21,26 +28,27 @@ export type DeveloperGitTokenMinter = (
 ) => Promise<DeveloperGitMintedToken>;
 
 /**
- * Create an isolated cache for the single-repository, contents:read Git transport.
- * No caller-controlled repository or permission parameters are accepted.
+ * Cache repository-scoped, contents:read tokens independently for each fixed repository.
  */
 export function createDeveloperGitReadTokenProvider(
   mint: DeveloperGitTokenMinter,
   now: () => number = Date.now,
-): () => Promise<string> {
-  let cachedToken: string | null = null;
-  let expiresAtMs = 0;
-  let mintInFlight: Promise<string> | null = null;
+): (repo: string) => Promise<string> {
+  const cache = new Map<string, { token: string; expiresAtMs: number }>();
+  const inFlight = new Map<string, Promise<string>>();
 
-  return async () => {
+  return async (repo) => {
+    if (!Object.hasOwn(DEVELOPER_GIT_REPOSITORY_IDS, repo)) throw new Error('invalid_developer_git_repository');
+    const cached = cache.get(repo);
     const currentTime = now();
-    if (cachedToken && currentTime < expiresAtMs - DEVELOPER_GIT_TOKEN_EARLY_REFRESH_MS) {
-      return cachedToken;
+    if (cached && currentTime < cached.expiresAtMs - DEVELOPER_GIT_TOKEN_EARLY_REFRESH_MS) {
+      return cached.token;
     }
-    if (mintInFlight) return mintInFlight;
+    const existing = inFlight.get(repo);
+    if (existing) return existing;
 
     const request: DeveloperGitTokenMintRequest = {
-      repository_ids: [DEVELOPER_GIT_REPOSITORY_ID],
+      repository_ids: [DEVELOPER_GIT_REPOSITORY_IDS[repo]],
       permissions: { contents: 'read' },
     };
     const pending = (async () => {
@@ -55,15 +63,14 @@ export function createDeveloperGitReadTokenProvider(
           !Number.isFinite(expiry) || expiry <= now() + DEVELOPER_GIT_TOKEN_EARLY_REFRESH_MS) {
         throw new Error('github_developer_git_token_response_invalid');
       }
-      cachedToken = minted.token;
-      expiresAtMs = expiry;
-      return cachedToken;
+      cache.set(repo, { token: minted.token, expiresAtMs: expiry });
+      return minted.token;
     })();
-    mintInFlight = pending;
+    inFlight.set(repo, pending);
     try {
       return await pending;
     } finally {
-      if (mintInFlight === pending) mintInFlight = null;
+      if (inFlight.get(repo) === pending) inFlight.delete(repo);
     }
   };
 }
