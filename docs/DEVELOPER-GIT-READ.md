@@ -1,10 +1,10 @@
 # Developer Git read pilot
 
 The gateway exposes a read-only Git smart-HTTP route for the authenticated Developer lane and the
-single `InnerScopeHearing/iheartest` repository. It permits only upload-pack discovery and fetch;
-it does not provide receive-pack, Git pushes, arbitrary repositories or Git LFS. The route uses
-the gateway's existing GitHub App installation token, which stays in the gateway process. That
-existing token has the App installation's permissions and is not itself narrowed by this route.
+eight explicitly listed `InnerScopeHearing` Developer app repositories. It permits only upload-pack
+discovery and fetch; it does not provide receive-pack, Git pushes, arbitrary repositories or Git LFS. The route uses
+the gateway's existing GitHub App to mint a contents-read token scoped to the requested, pinned
+repository ID. Each repository has an independent token cache; tokens stay in the gateway process.
 
 Only an Authorization bearer header is accepted. Browser-origin requests, alternate roles,
 unsupported queries and unexpected paths are rejected. Caller headers are not forwarded to

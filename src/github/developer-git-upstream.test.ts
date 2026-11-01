@@ -5,6 +5,35 @@ import { createDeveloperGitUpstream } from './developer-git-upstream.js';
 
 const base = 'https://github.com/InnerScopeHearing/iheartest.git/';
 
+test('all eight exact app repositories are accepted by the fixed upstream policy', async () => {
+  const previous = getGlobalDispatcher();
+  const mock = new MockAgent();
+  mock.disableNetConnect();
+  setGlobalDispatcher(mock);
+  const repositories = ['iheartest', 'aware-aural-rehab', 'otchealth-companion', 'innerease',
+    'fourvault', 'flatstick', 'plantid-app', 'fictionary'];
+  try {
+    for (const repo of repositories) {
+      mock.get('https://github.com').intercept({
+        path: `/InnerScopeHearing/${repo}.git/info/refs?service=git-upload-pack`, method: 'GET',
+      }).reply(200, 'synthetic', { headers: { 'content-type': 'application/x-git-upload-pack-advertisement' } });
+    }
+    const requestedScopes: string[] = [];
+    const read = createDeveloperGitUpstream(async (repo) => { requestedScopes.push(repo); return 'fictional-token'; });
+    for (const repo of repositories) {
+      const result = await read({ url: `https://github.com/InnerScopeHearing/${repo}.git/info/refs?service=git-upload-pack`,
+        method: 'GET', headers: {}, signal: new AbortController().signal });
+      assert.equal(result.statusCode, 200, repo);
+      for await (const _chunk of result.body) { /* consume the synthetic response */ }
+    }
+    assert.deepEqual(requestedScopes, repositories);
+    mock.assertNoPendingInterceptors();
+  } finally {
+    setGlobalDispatcher(previous);
+    await mock.close();
+  }
+});
+
 test('fixed Git read origin sends only server-supplied App authentication', async () => {
   const previous = getGlobalDispatcher();
   const mock = new MockAgent();

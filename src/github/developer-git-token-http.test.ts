@@ -49,26 +49,33 @@ test('Git transport mints its fixed scope while REST continues using the indepen
       throw new Error('unexpected synthetic HTTP request');
     }) as typeof fetch;
 
-    mock.get('https://github.com').intercept({
-      path: '/InnerScopeHearing/iheartest.git/info/refs?service=git-upload-pack',
-      method: 'GET',
-      headers: { authorization: 'Basic ' + Buffer.from('x-access-token:fake-scoped-git-token').toString('base64') },
-    }).reply(200, 'synthetic-git-advertisement', {
-      headers: { 'content-type': 'application/x-git-upload-pack-advertisement' },
-    });
-
-    const result = await githubDeveloperGitRead({
-      url: 'https://github.com/InnerScopeHearing/iheartest.git/info/refs?service=git-upload-pack',
-      method: 'GET', headers: {}, signal: new AbortController().signal,
-    });
-    result.body.destroy();
+    const repositories = [
+      ['iheartest', 1_231_250_532], ['aware-aural-rehab', 1_233_196_567],
+      ['otchealth-companion', 1_249_343_095], ['innerease', 1_254_834_356],
+      ['fourvault', 1_249_412_178], ['flatstick', 1_257_949_398],
+      ['plantid-app', 1_271_529_369], ['fictionary', 1_257_976_525],
+    ] as const;
+    for (const [repo] of repositories) {
+      mock.get('https://github.com').intercept({
+        path: `/InnerScopeHearing/${repo}.git/info/refs?service=git-upload-pack`,
+        method: 'GET',
+        headers: { authorization: 'Basic ' + Buffer.from('x-access-token:fake-scoped-git-token').toString('base64') },
+      }).reply(200, 'synthetic-git-advertisement', {
+        headers: { 'content-type': 'application/x-git-upload-pack-advertisement' },
+      });
+      const result = await githubDeveloperGitRead({
+        url: `https://github.com/InnerScopeHearing/${repo}.git/info/refs?service=git-upload-pack`,
+        method: 'GET', headers: {}, signal: new AbortController().signal,
+      });
+      result.body.destroy();
+    }
     await listPullRequests('InnerScopeHearing', 'otchealth-mcp-server');
 
     assert.deepEqual(tokenRequests.map((request) => request.body), [
-      { repository_ids: [1_231_250_532], permissions: { contents: 'read' } },
+      ...repositories.map(([, id]) => ({ repository_ids: [id], permissions: { contents: 'read' } })),
       undefined,
     ]);
-    assert.equal(tokenRequests.length, 2);
+    assert.equal(tokenRequests.length, 9);
     assert.equal(tokenRequests.every((request) => request.authorization?.startsWith('Bearer ')), true);
     mock.assertNoPendingInterceptors();
   } finally {
