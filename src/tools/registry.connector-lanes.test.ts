@@ -609,10 +609,14 @@ test('coo lane: seat-memory, ledger coordination, and bounded GitHub operations 
   const set = connectorToolset(testEnv(), 'coo');
   assert.deepEqual([...set].sort(), [...COO_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS, ...AWS_MCP_TOOLS, 'browser_cloud_intercom_login_start'].sort());
   assert.ok(set.has('brain_public_kb_search'), 'coo connector must expose fixed public-only KB retrieval');
+  assert.ok(set.has('n8n_coo_workflow_metadata'), 'COO receives only the dedicated bounded workflow metadata reader');
+  for (const lane of ['cto', 'cfo', 'clo', 'clo-personal', 'cro', 'developer', 'exec', 'external-read', 'totally-unknown-lane']) {
+    assert.equal(connectorToolset(testEnv(), lane).has('n8n_coo_workflow_metadata'), false, `${lane} must not receive the COO-only reader`);
+  }
   for (const needed of ['memory_team', 'memory_remember', 'memory_pack', 'checkpoint', 'incident_match', 'task_list', 'task_create', 'task_claim', 'task_update', 'task_heartbeat', 'task_complete', 'agent_dispatch', 'inbox_read', 'brain_search', 'brain_graph_search', 'catalog_probe', 'search', 'fetch', 'github_push_files', 'github_merge_pull_request', 'github_dispatch_workflow', 'intercom_conversation_list', 'intercom_conversation_search', 'intercom_conversation_get']) {
     assert.ok(set.has(needed), `coo connector must advertise ${needed} (its instruction block names it)`);
   }
-  for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'legal_blob_put', 'xero_orgs', 'shopify_list_products', 'shopify_location_list', 'memory_write', 'cio_send_transactional', 'cio_admin_read_workspace_health', 'graph_send_email', 'intercom_reply_conversation', 'intercom_conversation_assign', 'intercom_conversation_close']) {
+  for (const excluded of ['n8n_list_workflows', 'n8n_create_workflow', 'n8n_update_workflow', 'n8n_credential_list', 'n8n_variable_list', 'n8n_get_execution', 'kb_search_privileged', 'legal_blob_list', 'legal_blob_put', 'xero_orgs', 'shopify_list_products', 'shopify_location_list', 'memory_write', 'cio_send_transactional', 'cio_admin_read_workspace_health', 'graph_send_email', 'intercom_reply_conversation', 'intercom_conversation_assign', 'intercom_conversation_close']) {
     assert.equal(set.has(excluded), false, `coo connector must NOT advertise ${excluded}`);
   }
 });
