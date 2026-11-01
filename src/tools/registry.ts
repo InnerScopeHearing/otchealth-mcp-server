@@ -1795,7 +1795,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         const offloadAttempted = inlineProjectionEligible && shouldOffload(text);
         if (offloadAttempted) {
           const writeStarted = Date.now();
-          const off = await offloadResult(text, result, correlationId, callerHash);
+          const off = await offloadResult(text, result, correlationId, callerHash, undefined, canonicalName);
           logToolPhase({
             phase: 'write', durationMs: Date.now() - writeStarted,
             outcome: off ? 'success' : 'unknown', toolCorrelationId: correlationId,
