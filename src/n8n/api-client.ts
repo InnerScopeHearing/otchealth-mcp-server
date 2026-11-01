@@ -62,9 +62,66 @@ export interface N8nGetOptions {
   query?: Record<string, string | number | undefined>;
   timeoutMs?: number;
   correlationId?: string;
+  /**
+   * Optional hard ceiling for the decoded response body. When set, the body is
+   * consumed as a byte stream and cancelled as soon as this limit is exceeded.
+   * Omitted callers keep the existing unbounded `Response.text()` behavior.
+   */
+  maxResponseBytes?: number;
+}
+
+function boundedResponseError(status: number, code: string, message: string, nextStep: string): N8nApiError {
+  return new N8nApiError({ code, status, message, nextStep });
+}
+
+async function readResponseText(res: Response, maxResponseBytes?: number): Promise<string> {
+  if (maxResponseBytes === undefined) return res.text();
+
+  const reader = res.body?.getReader();
+  if (!reader) return '';
+
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxResponseBytes) {
+        try { await reader.cancel(); } catch { /* Preserve the sanitized size-limit failure. */ }
+        throw boundedResponseError(
+          res.status,
+          'n8n_response_too_large',
+          'n8n API response exceeded the configured byte limit.',
+          'Request a smaller page or review the response-size limit.',
+        );
+      }
+      chunks.push(value);
+    }
+  } catch (err) {
+    if (err instanceof N8nApiError) throw err;
+    throw boundedResponseError(
+      res.status,
+      'n8n_response_read_failed',
+      'Unable to read the bounded n8n API response safely.',
+      'Check n8n connectivity using the call correlation ID.',
+    );
+  } finally {
+    try { reader.releaseLock(); } catch { /* A cancelled or errored reader may already be released. */ }
+  }
+
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), totalBytes).toString('utf8');
 }
 
 export async function n8nGet<T = unknown>(path: string, opts: N8nGetOptions = {}): Promise<T> {
+  if (opts.maxResponseBytes !== undefined && (!Number.isSafeInteger(opts.maxResponseBytes) || opts.maxResponseBytes < 1)) {
+    throw new N8nApiError({
+      code: 'n8n_invalid_response_limit',
+      status: 0,
+      message: 'The n8n response byte limit must be a positive safe integer.',
+      nextStep: 'Use a positive response-size limit.',
+    });
+  }
   const key = requireKey();
   await assertN8nReachable();
   const base = env.N8N_BASE_URL.replace(/\/$/, '');
