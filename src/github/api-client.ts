@@ -220,6 +220,9 @@ async function getInstallationToken(): Promise<string> {
   return cachedToken;
 }
 
+/** Server-only Git transport; this returns a response stream, never the App token. */
+export const githubDeveloperGitRead = createDeveloperGitUpstream(getInstallationToken);
+
 async function githubGet<T = any>(path: string): Promise<T> {
   validatedGitHubApiUrl(path);
   const token = await getInstallationToken();
