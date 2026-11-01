@@ -112,4 +112,3 @@ export function registerGatewayFetchResult(server: McpServer, callerHash: Caller
     callerHash,
   );
 }
-

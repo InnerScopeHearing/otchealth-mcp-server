@@ -387,4 +387,3 @@ export async function fetchStoredResult(
     created: typeof doc.created === 'string' ? doc.created : undefined,
   };
 }
-

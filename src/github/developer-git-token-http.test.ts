@@ -77,4 +77,3 @@ test('Git transport mints its fixed scope while REST continues using the indepen
     await mock.close();
   }
 });
-

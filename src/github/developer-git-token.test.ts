@@ -104,4 +104,3 @@ test('missing, malformed, or too-near expiry token responses are rejected withou
     await assert.rejects(getToken, /github_developer_git_token_response_invalid/);
   }
 });
-

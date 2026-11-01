@@ -760,4 +760,3 @@ test('unknown stored serialization formats fail closed before payload serializat
   });
   assert.deepEqual(result, { found: false });
 });
-
