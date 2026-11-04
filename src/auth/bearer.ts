@@ -172,7 +172,7 @@ function codexStaticAgentTokens(): Record<string, string[]> {
   return {
     cto: [env.CODEX_CTO_MCP_TOKEN, env.CODEX_CTO_MCP_TOKEN_NEXT],
     cfo: [env.CODEX_CFO_MCP_TOKEN],
-    clo: [env.CODEX_CLO_MCP_TOKEN],
+    clo: [env.CODEX_CLO_MCP_TOKEN, env.CODEX_CLO_MCP_TOKEN_NEXT],
     'clo-personal': [env.CODEX_CLO_PERSONAL_MCP_TOKEN],
     coo: [env.CODEX_COO_MCP_TOKEN],
     cro: [env.CODEX_CRO_MCP_TOKEN],
