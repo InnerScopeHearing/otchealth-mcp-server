@@ -832,6 +832,25 @@ test('consent rejects forged sessions and origins without consuming pending requ
   await app.close();
 });
 
+test('consent accepts the exact forwarded HTTPS origin including a non-default port', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { registerOAuthRoutes } = await import('./oauth.js');
+  const app = Fastify({ trustProxy: true }); addFormUrlEncodedParser(app);
+  const stack = fakeConsentStack(); registerOAuthRoutes(app, stack);
+  const clientId = await registerDcrClient(app); const { challenge } = pkcePair();
+  const url = `/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CLAUDE_CALLBACK)}&response_type=code&code_challenge=${challenge}&code_challenge_method=S256`;
+  const forwarded = { host: 'internal.invalid:8080', 'x-forwarded-host': 'gateway.example:8443', 'x-forwarded-proto': 'https' };
+  const page = await app.inject({method:'GET',url,headers:forwarded});
+  const browser = browserConsent(page);
+  const pending = page.payload.match(/name="pending_id" value="([a-f0-9]{32})"/)![1]!;
+  const payload = `pending_id=${pending}&action=readonly&csrf_token=${browser.csrf}`;
+  const wrong = await app.inject({method:'POST',url:'/oauth/authorize/consent',headers:{...browser.headers,...forwarded,origin:'https://gateway.example'},payload});
+  assert.equal(wrong.statusCode,403,'the same hostname without the non-default port is a different origin');
+  const valid = await app.inject({method:'POST',url:'/oauth/authorize/consent',headers:{...browser.headers,...forwarded,origin:'https://gateway.example:8443'},payload});
+  assert.equal(valid.statusCode,302,valid.payload);
+  await app.close();
+});
+
 test('retry keeps the session, while exhausted or expired consent clears only that pending cookie', async () => {
   const { default: Fastify } = await import('fastify');
   const { registerOAuthRoutes } = await import('./oauth.js');
@@ -841,8 +860,13 @@ test('retry keeps the session, while exhausted or expired consent clears only th
   const url = `/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CLAUDE_CALLBACK)}&response_type=code&code_challenge=${challenge}&code_challenge_method=S256`;
   const page = await app.inject({method:'GET',url}); const browser = browserConsent(page);
   const pending = page.payload.match(/name="pending_id" value="([a-f0-9]{32})"/)![1]!;
-  const send = () => app.inject({method:'POST',url:'/oauth/authorize/consent',headers:browser.headers,payload:`pending_id=${pending}&action=elevate&code=wrong&csrf_token=${browser.csrf}`});
-  for (let n = 0; n < 4; n++) { const retry = await send(); assert.equal(retry.statusCode,200); assert.equal(retry.headers['set-cookie'],undefined); }
+  let csrf = browser.csrf;
+  const send = () => app.inject({method:'POST',url:'/oauth/authorize/consent',headers:browser.headers,payload:`pending_id=${pending}&action=elevate&code=wrong&csrf_token=${csrf}`});
+  for (let n = 0; n < 4; n++) {
+    const retry = await send(); assert.equal(retry.statusCode,200); assert.equal(retry.headers['set-cookie'],undefined);
+    const rendered = retry.payload.match(/name="csrf_token" value="([a-f0-9]{64})"/);
+    assert.ok(rendered, 'retry must render a usable CSRF token'); csrf = rendered[1]!;
+  }
   const burned = await send(); assert.equal(burned.statusCode,400);
   assert.match(String(burned.headers['set-cookie']),new RegExp(`^__Host-consent-${pending}=;.*Max-Age=0`));
   const expiredPage = await app.inject({method:'GET',url}); const expiredBrowser = browserConsent(expiredPage);

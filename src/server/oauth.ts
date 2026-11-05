@@ -59,7 +59,7 @@ function consentCsrf(pendingId: string, nonce: string): string {
   return createHmac('sha256', env.OAUTH_TOKEN_SIGNING_SECRET)
     .update(`oauth-consent-csrf-v1\0${pendingId}\0${nonce}`).digest('hex');
 }
-function validConsentBrowser(req: { headers: Record<string, unknown>; protocol: string; hostname: string }, pendingId: string, csrf: unknown): boolean {
+function validConsentBrowser(req: { headers: Record<string, unknown>; protocol: string; host: string }, pendingId: string, csrf: unknown): boolean {
   if (typeof req.headers.origin !== 'string' || req.headers.origin !== new URL(baseUrlOf(req)).origin) return false;
   if (typeof req.headers.cookie !== 'string' || typeof csrf !== 'string' || !/^[a-f0-9]{64}$/.test(csrf)) return false;
   const name = consentCookieName(pendingId);
@@ -130,9 +130,9 @@ function connectorSurfaceFor(clientId: string, client: ResolvedAnyClient): boole
 
 /** Exported so auth/bearer.ts can point a 401's WWW-Authenticate header at the same base URL the
  * OAuth metadata endpoints use (RFC 9728 protected-resource discovery) without re-deriving it. */
-export function baseUrlOf(req: { protocol: string; hostname: string }): string {
+export function baseUrlOf(req: { protocol: string; host: string }): string {
   if (env.PUBLIC_BASE_URL) return env.PUBLIC_BASE_URL.replace(/\/$/, '');
-  return `${req.protocol}://${req.hostname}`;
+  return `${req.protocol}://${req.host}`;
 }
 
 /** True for an RFC 8252 loopback redirect: http://127.0.0.1:PORT/... or http://[::1]:PORT/...
