@@ -10,7 +10,7 @@ function setup(){let handler:any;let configured=0;const writes:any[]=[];let rese
 async function run(callerAgent:string,agent:string,dry_run:boolean){const f=setup();const response=await requestContext.run({callerHash:'synthetic-hash',correlationId:'synthetic',callerAgent},()=>f.handler({agent,memories:[{kind:'fact',text:'Synthetic checkpoint'}],dry_run}));return {f,response};}
 
 test('direct checkpoint refuses foreign, protected, missing and malformed identities before storage',async()=>{
- for(const [caller,target] of [['coo','cto'],['coo','clo-personal'],['clo-personal','clo-personal'],['','cto'],['../invalid','cto'],['coo','../invalid'],['external-read','external-read'],['unknown','unknown']]){
+ for(const [caller,target] of [['coo','cto'],['coo','clo-personal'],['clo-personal','clo-personal'],['','cto'],['../invalid','cto'],['coo','../invalid'],['external-read','external-read'],['unknown','unknown'],['agents-shared','cto'],['coo','agents-shared'],['agents-shared','clo-personal'],['clo-personal','agents-shared']]){
   const {f,response}=await run(caller,target,false);assert.equal(f.configured,0,`${caller}/${target}`);assert.deepEqual(f.writes,[]);assert.equal(f.resets,0);assert.match(JSON.stringify(response),/checkpoint_scope_forbidden/);
  }
 });
