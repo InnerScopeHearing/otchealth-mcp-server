@@ -50,6 +50,19 @@ test('registered tool exposes unconfigured, denied, successful hit and actual mi
   }
 });
 
+test('registered non-ID searches retain their prior configured and unconfigured response shapes', async () => {
+  const unconfigured = setup(false, record);
+  const u = await unconfigured.invoke({ contains: 'synthetic' });
+  assert.deepEqual(u.structuredContent.result, { count: 0, records: [], note: 'agent-state Cosmos not configured.' });
+  assert.equal(unconfigured.reads(), 0);
+
+  let handler!: (args: unknown) => Promise<any>;
+  const server = { registerTool: (_name: string, _config: unknown, fn: typeof handler) => { handler = fn; } } as unknown as McpServer;
+  registerMemorySearch(server, () => 'test', { isConfigured: () => true, search: async () => [record] });
+  const response = await requestContext.run({ callerAgent: 'cto', callerHash: 'test', correlationId: 'test', authKind: 'codex' }, () => handler({ contains: 'synthetic' }));
+  assert.deepEqual(response.structuredContent.result, { count: 1, records: [record] });
+});
+
 test('registered exact invalid inputs and non-exact failures retain their error identity', async () => {
   const s = setup(true, record);
   const invalidId = await s.invoke({ id: '../bad' });
