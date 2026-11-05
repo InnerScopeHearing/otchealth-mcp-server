@@ -107,6 +107,7 @@ export function registerMemorySearch(server: McpServer, callerHash: CallerHashPr
       },
       inputShape: {
         agent: z.string().optional().describe('Filter by agent lane.'),
+        id: z.string().min(1).max(200).optional().describe('Retrieve one exact memory record ID within the selected agent. Defaults to the caller agent when no agent is supplied.'),
         kind: z.enum(MEMORY_KINDS).optional().describe('Filter by kind.'),
         contains: z.string().optional().describe('Case-insensitive substring match on the text.'),
         limit: z.number().int().min(1).max(100).optional().describe('Max results (default 25).'),
