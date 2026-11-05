@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { buildTaskPageQuery, queryTaskPage } from './task-page-postgres.js';
 
 const input = {board:'fleet', owner:'cto', status:'open', after:'t_0000', limit:3, includePersonal:false};
-const doc = (id, extra = {}) => ({id, board:'fleet', type:'task', owner_agent:'cto', created_by:'cto', status:'open', ...extra});
+const doc = (id, extra = {}) => ({id, board:'fleet', type:'task', owner_agent:'cto', created_by:'cto', status:'open', priority:'normal', created_at:'2026-01-01T00:00:00Z', updated_at:'2026-01-01T00:00:00Z', ...extra});
 function fakePool(rows, failAt = '') {
   const calls = [], state = { released: null };
   const client = { async query(text, values) {
@@ -60,6 +60,17 @@ test('provider errors are sanitized and rollback failures discard the connection
   const client = {query:async text => {if (text.startsWith('SELECT') || text === 'ROLLBACK') throw Error('synthetic');return {rows:[]};}, release: v => {client.discarded=v;}};
   await assert.rejects(queryTaskPage({connect:async () => client},input), /^Error: task_page_unavailable$/);
   assert.equal(client.discarded, true);
+});
+
+test('missing or invalid task metadata never forms a successful page', async () => {
+  const unfiltered = {...input, status:undefined};
+  for (const extra of [{status:undefined},{status:'invented'},{priority:undefined},{priority:'invented'},
+    {created_at:undefined},{updated_at:'invalid-date'},{claim_ts:'invalid-date'},
+    {lease_version:-1},{attempt_count:'unknown'}]) {
+    const fake = fakePool([{id:'t_0001',doc:doc('t_0001',extra)}]);
+    await assert.rejects(queryTaskPage(fake.pool,unfiltered), /^Error: task_page_unavailable$/);
+    assert.equal(fake.calls.at(-1).text, 'ROLLBACK');
+  }
 });
 
 test('connection acquisition and release errors do not expose provider details', async () => {

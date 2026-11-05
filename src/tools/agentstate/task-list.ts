@@ -70,7 +70,7 @@ export async function handleTaskList(
       visibleTo: taskVisibleToCaller,
       project: (t: Task, c: string) => compactTask(projectTaskForCaller(t, c)),
     });
-    return { data: { count: result.tasks.length, ...result }, summary: `${result.tasks.length} task(s); paged, not a snapshot.`, compactText: true };
+    return { data: { count: result.tasks.length, ...result, cursor_integrity: 'unsigned' }, summary: `${result.tasks.length} task(s); paged, not a snapshot.`, compactText: true };
   }
   const tasks = await deps.listTasks({ ...filter, exclude_personal_legal: excludePersonalLegal });
   // Defense in depth for malformed or stale store adapters. The database query performs the same
@@ -108,9 +108,9 @@ export function registerTaskList(server: McpServer, callerHash: CallerHashProvid
         limit: z.number().int().min(1).max(200).optional().describe('Max results (default 50).'),
         view: z.enum(['full', 'summary']).optional().describe('Summary omits notes, descriptions and other details; cross-seat visibility remains unchanged. Default full.'),
         paginate: z.boolean().optional().describe('Opt into ID-ordered, non-snapshot pages on PostgreSQL; requires summary view and limit at most 100.'),
-        cursor: z.string().max(2048).optional().describe('Opaque continuation returned by a prior page with identical caller, board, filters and limit.'),
+        cursor: z.string().max(2048).optional().describe('Unsigned, client-editable continuation. Pass the exact returned value unchanged with the same caller, board, filters and limit. A null next_cursor does not prove prior coverage or snapshot completeness.'),
       },
-      outputShape: { count: z.number(), tasks: z.unknown(), next_cursor: z.string().nullable().optional(), snapshot: z.boolean().optional(), scan_incomplete: z.boolean().optional() },
+      outputShape: { count: z.number(), tasks: z.unknown(), next_cursor: z.string().nullable().optional(), snapshot: z.boolean().optional(), scan_incomplete: z.boolean().optional(), cursor_integrity: z.enum(['unsigned']).optional() },
       handler: handleTaskList,
     },
     callerHash,

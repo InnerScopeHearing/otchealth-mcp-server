@@ -41,6 +41,7 @@ test('offloaded task page preserves cursor and caller binding in both storage fo
         assert.equal(part.found,true);chunks.push(part.chunk);if(p+1>=part.pages)break;}
       const parsed=JSON.parse(chunks.join(''));
       assert.equal(parsed.next_cursor,first.data.next_cursor);
+      assert.equal(parsed.cursor_integrity,'unsigned');
       assert.equal(parsed.tasks.length,100);
       assert.doesNotMatch(JSON.stringify(parsed),/private-synthetic|hidden-synthetic|restricted-synthetic/);
       const second=await handleTaskList({view:'summary',paginate:true,limit:100,cursor:parsed.next_cursor},{callerAgent:'cto'},deps);

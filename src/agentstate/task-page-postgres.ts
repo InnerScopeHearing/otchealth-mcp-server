@@ -6,7 +6,11 @@ export interface TaskPageQuery {
 const ID = /^[A-Za-z0-9_.-]{1,255}$/;
 const AGENT = /^[a-z0-9][a-z0-9_-]{0,40}$/;
 const STATUS = new Set(['open','claimed','in_progress','blocked','done','cancelled','dead_letter']);
+const PRIORITY = new Set(['low','normal','high','urgent']);
 const validId = (v: unknown): v is string => typeof v === 'string' && ID.test(v) && !/^\.+$/.test(v);
+const validDate = (v: unknown): boolean => typeof v === 'string' && v.trim().length > 0 && Number.isFinite(Date.parse(v));
+const optionalDate = (v: unknown): boolean => v === undefined || v === null || validDate(v);
+const optionalCount = (v: unknown): boolean => v === undefined || (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0);
 
 export function buildTaskPageQuery(i: TaskPageQuery): {text:string; values:(string|number)[]} {
   if (!validId(i.board) || (i.owner !== undefined && !AGENT.test(i.owner)) ||
@@ -44,6 +48,10 @@ export async function queryTaskPage(pool: pg.Pool, input: TaskPageQuery): Promis
       if (!validId(row.id) || !d || typeof d !== 'object' || d.id !== row.id ||
           !validId(d.board) || d.board !== input.board || d.type !== 'task' ||
           typeof d.owner_agent !== 'string' || !d.owner_agent.trim() || typeof d.created_by !== 'string' || !d.created_by.trim() ||
+          typeof d.status !== 'string' || !STATUS.has(d.status) || typeof d.priority !== 'string' || !PRIORITY.has(d.priority) ||
+          !validDate(d.created_at) || !validDate(d.updated_at) ||
+          !optionalDate(d.claim_ts) || !optionalDate(d.lease_until) || !optionalDate(d.done_ts) ||
+          !optionalCount(d.lease_version) || !optionalCount(d.attempt_count) ||
           (input.owner !== undefined && d.owner_agent !== input.owner) ||
           (input.status !== undefined && d.status !== input.status) ||
           (!input.includePersonal && [d.owner_agent,d.created_by].some(v => v.trim().toLowerCase() === 'clo-personal')) ||

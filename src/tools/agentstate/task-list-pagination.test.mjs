@@ -47,7 +47,7 @@ test('paged summary enumerates 251 synthetic tasks with real privacy checks',asy
   const f=fixture(data);let cursor, rows=[];
   do {
     const out=await handleTaskList({view:'summary',paginate:true,limit:100,...(cursor?{cursor}:{})},{callerAgent:'cto'},f.deps);
-    assert.equal(out.data.snapshot,false);assert.equal(out.compactText,true);
+    assert.equal(out.data.snapshot,false);assert.equal(out.data.cursor_integrity,'unsigned');assert.equal(out.compactText,true);
     rows.push(...out.data.tasks);cursor=out.data.next_cursor??undefined;
   } while(cursor);
   assert.equal(rows.length,250);
@@ -56,6 +56,18 @@ test('paged summary enumerates 251 synthetic tasks with real privacy checks',asy
   assert.equal(rows.some(t=>t.notes!==undefined),false);
   assert.doesNotMatch(JSON.stringify(rows),/hidden-synthetic|restricted-synthetic/);
   assert.ok(f.seen.every(q=>q.includePersonal===false));
+});
+
+test('edited cursors may seek, and response discloses they do not prove coverage',async()=>{
+  const f=fixture([mk(1),mk(2),mk(3)]);
+  const first=await handleTaskList({paginate:true,view:'summary',limit:1},{callerAgent:'cto'},f.deps);
+  const raw=JSON.parse(Buffer.from(first.data.next_cursor,'base64url').toString());
+  raw.after='t_9999';
+  const cursor=Buffer.from(JSON.stringify(raw)).toString('base64url');
+  const skipped=await handleTaskList({paginate:true,view:'summary',limit:1,cursor},{callerAgent:'cto'},f.deps);
+  assert.equal(skipped.data.next_cursor,null);
+  assert.equal(skipped.data.cursor_integrity,'unsigned');
+  assert.equal(skipped.data.snapshot,false);
 });
 
 test('paged inputs fail closed on wrong view, limit, missing caller, backend, and cursor scope',async()=>{

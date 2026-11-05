@@ -24,7 +24,8 @@ function decode(scope: PageScope, cursor: string): string {
   return c.after;
 }
 
-/** Cursor is not an authorization token. Caller and filters must be enforced at every read. */
+/** Cursor is unsigned and client-editable. It is neither authorization nor proof of earlier coverage.
+ * Caller and filters must be enforced at every read; a null cursor only exhausts the supplied position. */
 export async function taskPage<T extends PageRow, P extends PageRow>(scope: PageScope, cursor: string | undefined,
   deps: PageDeps<T, P>): Promise<{tasks:P[]; next_cursor:string|null; snapshot:false; scan_incomplete:boolean}> {
   if (!scope.caller || !scope.board || !scope.backend || !Number.isInteger(scope.size) || scope.size < 1 || scope.size > 100)
