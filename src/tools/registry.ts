@@ -1534,7 +1534,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
 
       const ctx: ToolContext = { correlationId, callerHash, dryRun, acknowledgeWarning: acknowledged, callerAgent };
 
-      logToolStart({
+      (effects.logToolStart ?? logToolStart)({
         correlation_id: correlationId,
         tool: def.name,
         caller_hash: callerHash,
