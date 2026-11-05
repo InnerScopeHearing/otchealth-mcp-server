@@ -10,10 +10,25 @@
  */
 
 import { createDoc, readDoc, queryDocs, replaceDoc, newId } from './store.js';
-import { normalizeAgent, type MemoryKind } from './agents.js';
+import { normalizeAgent, MEMORY_KINDS, type MemoryKind } from './agents.js';
+import { z } from 'zod';
 import { persistMemoryOnce, type MemoryWriteIntent } from './memory-idempotency.js';
 
 const MEMORY = 'memory';
+
+// Validate at the storage boundary; never include a corrupt row in an error.
+const exactRecordSchema = z.object({
+  id: z.string().min(1), type: z.literal('memory'), agent: z.string().min(1),
+  kind: z.enum(MEMORY_KINDS), text: z.string(), tags: z.array(z.string()),
+  source: z.string().nullable(), created_at: z.string(),
+  supersedes: z.string().nullable().optional(),
+  idempotency: z.object({ payloadSha256: z.string(), requestedSupersedes: z.string().nullable().optional() }).passthrough().optional(),
+  indexing: z.object({ state: z.enum(['pending', 'indexed']), attempts: z.number(), updated_at: z.string() }).passthrough().optional(),
+}).passthrough();
+
+export class CorruptMemoryRecordError extends Error {
+  constructor() { super('memory_record_corrupt'); this.name = 'CorruptMemoryRecordError'; }
+}
 
 export interface MemoryRecord {
   id: string;
