@@ -26,8 +26,9 @@ import {
 
 // Checkpoint persists to company agent-state and the shared search index. These are the
 // current company seats, not the narrower Chat-action bridge or GitHub-specific policy.
+// agents-shared is a single shared identity: it cannot distinguish its individual holders.
 const CHECKPOINT_COMPANY_LANES = new Set([
-  'cto', 'developer', 'cfo', 'clo', 'coo', 'cro', 'cpo', 'cco', 'exec', 'wefunder-campaign-director',
+  'cto', 'developer', 'cfo', 'clo', 'coo', 'cro', 'cpo', 'cco', 'exec', 'wefunder-campaign-director', 'agents-shared',
 ]);
 
 function checkpointCallerAgent(caller: unknown, input: unknown): string | null {
