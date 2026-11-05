@@ -246,11 +246,11 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
               written: [],
               distilled: 0,
               checkpoint: false,
-              preview: { agent: input.agent, summary: input.summary, memories: memoriesIn },
+              preview: { agent: agent, summary: input.summary, memories: memoriesIn },
               note: 'dry_run: nothing written. Pass dry_run=false to persist.',
             },
             summary:
-              `DRY RUN: would checkpoint ${input.agent} (${memoriesIn.length} explicit ` +
+              `DRY RUN: would checkpoint ${agent} (${memoriesIn.length} explicit ` +
               `memor${memoriesIn.length === 1 ? 'y' : 'ies'}${input.summary ? ' + a summary distillation' : ''}) ` +
               `and reset capture pressure.`,
           };
