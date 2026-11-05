@@ -13,7 +13,7 @@ async function invoke(caller:string,agent:string,dry_run=false){const f=fixture(
 
 test('real registry rejects foreign or personal checkpoint before shield, logs, providers, stores or journal',async()=>{
  for(const [caller,target,dry] of [['coo','cto',false],['coo','clo-personal',false],['clo-personal','clo-personal',false],['coo','cto',true],['agents-shared','cto',false],['coo','agents-shared',false],['agents-shared','clo-personal',false],['clo-personal','agents-shared',false]] as const){
-  const {f,result}=await invoke(caller,target,dry);assert.equal(result.isError,true);assert.equal(result.structuredContent.error.code,'checkpoint_scope_forbidden');assert.deepEqual(f.counts,{shield:0,journal:0,log:0,configured:0,deliver:0,reset:0,callerHash:0});assert.doesNotMatch(JSON.stringify(result),/SYNTHETIC_PRIVATE_SENTINEL/);
+  const {f,result}=await invoke(caller,target,dry);assert.equal(result.isError,true);assert.equal(result.structuredContent.error.code,'checkpoint_scope_forbidden');assert.equal(result.structuredContent.dry_run,dry);assert.deepEqual(f.counts,{shield:0,journal:0,log:0,configured:0,deliver:0,reset:0,callerHash:0});assert.doesNotMatch(JSON.stringify(result),/SYNTHETIC_PRIVATE_SENTINEL/);
  }
 });
 
