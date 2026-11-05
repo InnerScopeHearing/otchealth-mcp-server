@@ -24,7 +24,7 @@ test('an exact ID cannot become an unscoped search', async () => {
 });
 
 test('an absent, wrong-ID or wrong-agent record is never substituted', async () => {
-  for (const candidate of [null, { ...record, id: 'm_other' }, { ...record, agent: 'developer' }]) {
+  for (const candidate of [null, { ...record, id: 'm_other' }, { ...record, agent: 'developer' }, { ...record, type: 'other' as 'memory' }]) {
     assert.deepEqual(await searchMemory({ agent: 'cto', id: record.id }, async () => candidate), []);
   }
 });
