@@ -35,9 +35,18 @@ test('an exact ID cannot become an unscoped search', async () => {
   assert.equal(called, false);
 });
 
-test('an absent, wrong-ID or wrong-agent record is never substituted', async () => {
-  for (const candidate of [null, { ...record, id: 'm_other' }, { ...record, agent: 'developer' }, { ...record, type: 'other' as 'memory' }]) {
-    assert.deepEqual(await searchMemory({ agent: 'cto', id: record.id }, async () => candidate), []);
+test('an absent row is a miss; wrong-identity and malformed rows are corrupt', async () => {
+  assert.deepEqual(await searchMemory({ agent: 'cto', id: record.id }, async () => null), []);
+  const badRows: unknown[] = [
+    { ...record, id: 'm_other' }, { ...record, agent: 'developer' }, { ...record, type: 'other' },
+    { ...record, agent: undefined }, { ...record, text: undefined }, { ...record, tags: [42] },
+    { ...record, source: undefined }, { ...record, created_at: 42 }, { ...record, kind: 'other' },
+    { ...record, indexing: { state: 'bad', attempts: 1, updated_at: 'x' } },
+  ];
+  for (const candidate of badRows) {
+    for (const contains of [undefined, 'secret']) {
+      await assert.rejects(searchMemory({ agent: 'cto', id: record.id, contains }, async () => candidate as MemoryRecord), { message: 'memory_record_corrupt' });
+    }
   }
 });
 
