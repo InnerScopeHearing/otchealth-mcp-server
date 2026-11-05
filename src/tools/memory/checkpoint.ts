@@ -277,7 +277,7 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
           try {
             const items = await distillSummary(input.summary);
             for (const dm of items) {
-              const delivery = await deps.deliver(input.agent, dm.kind, dm.text, { tags: ['checkpoint-distilled'], source: 'checkpoint distillation' });
+              const delivery = await deps.deliver(agent, dm.kind, dm.text, { tags: ['checkpoint-distilled'], source: 'checkpoint distillation' });
               deliveries.push(delivery);
               if (delivery.stored) {
                 distilled += 1;
