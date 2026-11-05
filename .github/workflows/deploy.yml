@@ -189,6 +189,8 @@ jobs:
             if (hg.cro_direct_enabled !== true || JSON.stringify(hg.cro_direct_tools) !== JSON.stringify(expectedCroDirect)) {
               console.error("REGRESSION: exact CRO direct-video/QA surface is not enabled"); process.exit(1);
             }
+            // Historical Azure comparator: secret hashes were removed from public health.
+            // If this retired path is ever rebuilt, replace it with an authenticated compatibility check.
             const broker = require("/tmp/approval-health.json");
             const bc = broker.approval_compatibility || {}, gc = hg.owner_approval_compatibility || {};
             const compatibilityKeys = ["public_jwk_sha256", "context_secret_sha256", "handle_secret_sha256", "callback_secret_sha256"];

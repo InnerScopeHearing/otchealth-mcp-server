@@ -1,5 +1,4 @@
 import type { FastifyInstance } from 'fastify';
-import { createHash } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
 import { revisionInfo } from './revision.js';
 import { getRevocationState, getRevocationStoreStatus } from '../auth/revocation-store.js';
@@ -7,7 +6,7 @@ import { toolCount } from '../catalog/catalog.js';
 import { validateAdminToken } from '../auth/bearer.js';
 import { probeDependencies } from './deep-health.js';
 import { cachedIntercomOperationsProbe } from '../intercom/operations-readiness.js';
-import { heyGenApprovalCompatibilityFingerprints } from '../tools/heygen/approval-fingerprint.js';
+import { heyGenPublicJwkFingerprint } from '../tools/heygen/approval-fingerprint.js';
 import { HEYGEN_CRO_DIRECT_TOOLS } from '../tools/heygen/access.js';
 
 const env = loadEnv();
@@ -48,15 +47,10 @@ export function buildHealthPayload(revocationStore = getRevocationStoreStatus())
       owner_approval_broker_configured: Boolean(env.HEYGEN_APPROVAL_BROKER_URL),
       owner_approval_issuer: env.HEYGEN_OWNER_APPROVAL_ISSUER,
       owner_approval_audience: env.HEYGEN_OWNER_APPROVAL_AUDIENCE,
-      owner_approval_subject_sha256: env.HEYGEN_OWNER_APPROVAL_SUBJECT
-        ? createHash('sha256').update(env.HEYGEN_OWNER_APPROVAL_SUBJECT, 'utf8').digest('hex')
-        : undefined,
-      owner_approval_compatibility: heyGenApprovalCompatibilityFingerprints({
-        publicJwk: env.HEYGEN_OWNER_APPROVAL_PUBLIC_JWK,
-        contextSecret: env.HEYGEN_APPROVAL_CONTEXT_SECRET,
-        handleSecret: env.HEYGEN_APPROVAL_HANDLE_SECRET,
-        callbackSecret: env.HEYGEN_APPROVAL_CALLBACK_SECRET,
-      }),
+      // Public health may identify the public verifier key, never fingerprints of shared secrets.
+      owner_approval_compatibility: {
+        public_jwk_sha256: heyGenPublicJwkFingerprint(env.HEYGEN_OWNER_APPROVAL_PUBLIC_JWK),
+      },
     },
     cio_workspace_id: env.CIO_WORKSPACE_ID,
     connector_token_revoked: rev.revoked_token_hash !== null,
