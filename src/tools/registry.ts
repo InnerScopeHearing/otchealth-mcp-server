@@ -39,7 +39,7 @@ import { recordTool, deriveService } from '../catalog/catalog.js';
 import { lazyCallerSurfaceEntry, type CallerSurfaceTool } from './catalog/caller-surface-fingerprint.js';
 import { hideDeniedWefunderChatActions } from './catalog/wefunder-visibility.js';
 import { requiredRoleFor, roleAllows } from '../catalog/governance.js';
-import { currentAuthKind, currentCallerAgent, isConnectorSurface, isM365StaticAuth } from '../server/request-context.js';
+import { currentCallerAgent, isConnectorSurface, isM365StaticAuth } from '../server/request-context.js';
 import { shouldOffload, offloadResult, extractResultSummary, mayOffloadToolResult, recordInlineResultProjection, buildOffloadedResultReference } from './result-store.js';
 import { WEFUNDER_CAMPAIGN_DIRECTOR_LANE } from './hyperagent/ring.js';
 import { HEYGEN_DATA_TOOLS, HEYGEN_PREFLIGHT_TOOLS } from './heygen/access.js';
