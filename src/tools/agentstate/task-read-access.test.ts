@@ -225,3 +225,14 @@ test('task_list summary preserves caller permissions while omitting large detail
   assert.equal((full.data as any).tasks[0].notes[0].length, 30000);
   assert.ok(JSON.stringify(summary.data).length < JSON.stringify(full.data).length / 10);
 });
+test('task_list summary does not grant details to a reassigned owner', async () => {
+  const reassigned = task({ owner_agent: 'cto', created_by: 'cfo', detail_readers: ['cfo'] });
+  const result = await handleTaskList(
+    { view: 'summary' }, { callerAgent: 'cto' },
+    { isConfigured: () => true, listTasks: async () => [reassigned] },
+  );
+  const row = (result.data as any).tasks[0];
+  assert.equal(row.title, undefined);
+  assert.equal(row.description, undefined);
+  assert.equal(row.notes, undefined);
+});
