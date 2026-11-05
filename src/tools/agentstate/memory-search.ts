@@ -116,27 +116,29 @@ export function registerMemorySearch(server: McpServer, callerHash: CallerHashPr
       handler: async (input, ctx) => {
         if (!isConfigured()) return { data: { count: 0, records: [], note: 'agent-state Cosmos not configured.' }, summary: 'Memory store not configured.' };
 
-        const decision = evaluateMemorySearchAccess(ctx.callerAgent, input.agent);
-        if (!decision.allowed) {
-          return {
-            data: { count: 0, records: [], blocked: true, reason: decision.reason },
-            summary: `Refused: ${decision.reason}`,
-          };
-        }
-
-        const effectiveInput = decision.forcedAgent ? { ...input, agent: decision.forcedAgent } : input;
-        // Exact IDs require a partition. An omitted agent means the caller's own lane,
-        // even for an executive caller who may otherwise run a cross-agent search.
-        const searchInput = input.id && !effectiveInput.agent
-          ? { ...effectiveInput, agent: ctx.callerAgent }
-          : effectiveInput;
-        let records: MemoryRecord[] = await searchMemory(searchInput);
-        if (decision.excludeClopersonalFromGlobal) {
-          records = records.filter((r) => r.agent !== 'clo-personal');
-        }
-        return { data: { count: records.length, records }, summary: `${records.length} memory record(s).` };
+        const data = await searchAuthorizedMemory(input, ctx.callerAgent);
+        return { data, summary: data.blocked ? `Refused: ${data.reason}` : `${data.count} memory record(s).` };
       },
     },
     callerHash,
   );
+}
+
+/** Apply the existing ring gate before reading any exact or filtered record. */
+export async function searchAuthorizedMemory(
+  input: Parameters<typeof searchMemory>[0],
+  callerAgent: string | null | undefined,
+  search: typeof searchMemory = searchMemory,
+): Promise<{ count: number; records: MemoryRecord[]; blocked?: boolean; reason?: string }> {
+  const decision = evaluateMemorySearchAccess(callerAgent, input.agent);
+  if (!decision.allowed) return { count: 0, records: [], blocked: true, reason: decision.reason };
+
+  const effectiveInput = decision.forcedAgent ? { ...input, agent: decision.forcedAgent } : input;
+  // An exact ID always uses a single partition, including for executive callers.
+  const searchInput = input.id && !effectiveInput.agent
+    ? { ...effectiveInput, agent: callerAgent ?? undefined }
+    : effectiveInput;
+  let records = await search(searchInput);
+  if (decision.excludeClopersonalFromGlobal) records = records.filter((r) => r.agent !== 'clo-personal');
+  return { count: records.length, records };
 }
