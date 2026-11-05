@@ -29,3 +29,7 @@ test('authorized same-seat invocation still reaches the real registry shield and
  assert.equal(f.counts.shield,1);assert.equal(f.counts.configured,1);assert.ok(f.counts.deliver>=1);assert.equal(f.counts.reset,1);assert.equal(f.counts.journal,1);
  assert.doesNotMatch(JSON.stringify(f.captured),/SYNTHETIC_PRIVATE_SENTINEL/);
  });
+
+test('shared company identity can checkpoint only its own lane through the real registry',async()=>{
+ const {f,result}=await invoke('agents-shared','agents-shared',true);assert.notEqual(result.isError,true);assert.equal(f.counts.shield,1);assert.equal(f.counts.configured,1);
+});
