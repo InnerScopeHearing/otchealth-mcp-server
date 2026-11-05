@@ -29,6 +29,7 @@
 import crypto from 'node:crypto';
 import pg from 'pg';
 import { translate } from './pg-sql.js';
+import { COMPANY_CHAT_ACTION_LANES } from './chat-action-metadata.js';
 import { loadAgentStatePostgresConfig } from './runtime-config.js';
 
 /** Same allow-list as the Cosmos client: a caller-supplied container must never reach SQL. */
@@ -231,6 +232,38 @@ export async function queryDocs(
   const { text, values } = translate({ table, query, parameters, pk: opts.pk, max: opts.max ?? 100 });
   const r = await q<{ doc: Record<string, unknown> }>(text, values);
   return r.rows.map((row) => row.doc);
+}
+
+/** Fixed read-only metadata query. The server timeout is transaction-local to this client. */
+export async function listChatActionInventory(input: { owner: string; after: string; limit: number }): Promise<Record<string, unknown>[]> {
+  if (!(COMPANY_CHAT_ACTION_LANES as readonly string[]).includes(input.owner) ||
+      (input.after !== '' && !/^caj_[a-f0-9]{64}$/.test(input.after)) ||
+      !Number.isInteger(input.limit) || input.limit < 1 || input.limit > 51) throw new Error('inventory_invalid_input');
+  const client = await getPool().connect();
+  let begun = false;
+  let discard = false;
+  try {
+    await client.query('BEGIN READ ONLY');
+    begun = true;
+    await client.query("SET LOCAL statement_timeout = '2500ms'");
+    const result = await client.query<{doc:Record<string,unknown>}>(
+      `SELECT jsonb_build_object('id', doc->'id', 'status', doc->'status', 'action', doc->'action',
+          'caller_agent', doc->'caller_agent', 'created_at', doc->'created_at', 'updated_at', doc->'updated_at') AS doc
+       FROM agentstate_events
+       WHERE doc->>'type' = $1 AND doc->>'caller_agent' = $2 AND (doc->>'id') COLLATE "C" > $3 COLLATE "C"
+       ORDER BY (doc->>'id') COLLATE "C" LIMIT $4`,
+      ['chat_action_job', input.owner, input.after, input.limit],
+    );
+    await client.query('COMMIT');
+    begun = false;
+    return result.rows.map(row => row.doc);
+  } catch (error) {
+    if (begun) { try { await client.query('ROLLBACK'); } catch { discard = true; } }
+    else discard = true;
+    throw error;
+  } finally {
+    client.release(discard);
+  }
 }
 
 /** A short unique id. Identical shape to the Cosmos client's, so ids stay comparable across a cutover. */

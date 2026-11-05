@@ -38,7 +38,7 @@ async function registeredToolCount(lane: string, isM365 = false): Promise<number
   return (await registeredToolNames(lane, isM365)).length;
 }
 
-async function registeredToolNames(lane: string, isM365 = false, connectorSurface = false): Promise<string[]> {
+async function registeredToolNames(lane: string, isM365 = false, connectorSurface = false, authKind?: 'codex' | 'oauth'): Promise<string[]> {
   const { registerAllTools } = await import('./index.js');
   const { currentCallerHash, requestContext } = await import('../server/request-context.js');
   const mcp = new McpServer(
@@ -52,6 +52,7 @@ async function registeredToolNames(lane: string, isM365 = false, connectorSurfac
       callerAgent: lane,
       connectorSurface,
       m365StaticAuth: isM365,
+      authKind,
     },
     async () => {
       registerAllTools(mcp, currentCallerHash);
@@ -95,19 +96,35 @@ test('native M365 registration adds the unambiguous public-web discovery compati
   }
 });
 
-test('DEFAULT (TOOL_CATALOG_CURATION_MODE unset) -- every known internal lane gets the FULL, uncurated catalog', async () => {
+test('DEFAULT keeps the full catalog with the single CTO-only inventory exception', async () => {
   delete process.env.TOOL_CATALOG_CURATION_MODE;
   const lanes = ['cto', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'developer', 'exec'];
-  const counts = await Promise.all(lanes.map((lane) => registeredToolCount(lane)));
-  const unscopedCount = await registeredToolCount('some-unscoped-lane');
+  const namesByLane = await Promise.all(lanes.map((lane) => registeredToolNames(lane)));
+  const unscoped = await registeredToolNames('some-unscoped-lane');
+  assert.equal(unscoped.includes('chat_action_inventory'), false, 'unscoped callers must not see the inventory');
   for (const [i, lane] of lanes.entries()) {
-    assert.equal(
-      counts[i],
-      unscopedCount,
-      `lane ${lane} should register the SAME tool count as an unscoped lane by default (got ${counts[i]} vs ${unscopedCount})`,
-    );
-    assert.ok(counts[i] >= 800, `lane ${lane} should see >= 800 tools by default, got ${counts[i]}`);
+    const names = namesByLane[i];
+    assert.equal(names.includes('chat_action_inventory'), lane === 'cto', `${lane} inventory visibility`);
+    assert.equal(names.length - (lane === 'cto' ? 1 : 0), unscoped.length, `${lane} retains the uncurated catalog aside from the CTO-only tool`);
+    assert.ok(names.length >= 800, `${lane} should retain the full catalog`);
   }
+});
+
+test('CTO Codex keeps inventory under curation while M365 and other lanes exclude it', async () => {
+  process.env.TOOL_CATALOG_CURATION_MODE = 'curate';
+  const ctoCodex = await registeredToolNames('cto', false, false, 'codex');
+  const ctoOAuth = await registeredToolNames('cto', false, false, 'oauth');
+  const ctoConnector = await registeredToolNames('cto', false, true, 'oauth');
+  const ctoM365 = await registeredToolNames('cto', true);
+  const otherCodex = await registeredToolNames('coo', false, false, 'codex');
+  assert.ok(ctoCodex.includes('chat_action_inventory'));
+  assert.ok(ctoOAuth.includes('chat_action_inventory'), 'non-connector CTO OAuth follows the same exact tool exception');
+  assert.ok(ctoConnector.includes('chat_action_inventory'), 'the CTO connector retains the normal ship allowlist');
+  const {connectorToolset}=await import('./registry.js');
+  assert.equal(connectorToolset({ CONNECTOR_TOOLSET:'brain_search' } as never,'cto').has('chat_action_inventory'),false, 'connector overrides continue to restrict the tool');
+  assert.equal(ctoM365.includes('chat_action_inventory'), false);
+  assert.equal(ctoM365.includes('action_inventory'), false);
+  assert.equal(otherCodex.includes('chat_action_inventory'), false);
 });
 
 test("explicit TOOL_CATALOG_CURATION_MODE=report -- identical to the default (never restricts)", async () => {

@@ -76,6 +76,13 @@ export async function queryDocs(
     : cosmos.queryDocs(coll, query, parameters, opts);
 }
 
+/** Metadata inventory requires global bytewise ordering and server-side query bounds. */
+export async function listChatActionInventory(input: { owner: string; after: string; limit: number }): Promise<Record<string, unknown>[]> {
+  if (activeBackend() !== 'postgres') throw new Error('inventory_backend_unsupported');
+  if (!postgres.isConfigured()) throw new Error('inventory_state_unavailable');
+  return postgres.listChatActionInventory(input);
+}
+
 export interface VectorMatch {
   doc: Record<string, unknown>;
   similarity: number;
