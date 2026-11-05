@@ -20,6 +20,8 @@ const row=i=>({id:`t_${String(i).padStart(4,'0')}`,board:'fleet',type:'task',own
 
 test('offloaded task page preserves cursor and caller binding in both storage formats',async()=>{
   const tasks=Array.from({length:150},(_,i)=>row(i));
+  tasks[2]={...tasks[2],created_by:'clo-personal',detail_readers:['clo-personal'],title:'hidden-synthetic'};
+  tasks[3]={...tasks[3],created_by:'cfo',detail_readers:['cfo'],title:'restricted-synthetic'};
   const deps={isConfigured:()=>true,activeBackend:()=> 'postgres',listTasks:async()=>[],
     listTaskPage:async q=>tasks.filter(t=>!q.after||t.id>q.after).slice(0,q.limit)};
   const first=await handleTaskList({view:'summary',paginate:true,limit:100},{callerAgent:'cto'},deps);
@@ -33,17 +35,18 @@ test('offloaded task page preserves cursor and caller binding in both storage fo
         readDoc:async (_c,id)=>docs.has(id)?{doc:structuredClone(docs.get(id))}:null};
       const off=await offloadResult(text,first.data,'corr-synthetic',caller,storage,'task_list');assert.ok(off);
       assert.equal((await fetchStoredResult(off.resultId,0,other,storage)).found,false);
+      assert.equal((await fetchStoredResult(off.resultId,0,caller,storage,undefined,'other_tool')).found,false);
       let chunks=[];
       for(let p=0;;p++){const part=await fetchStoredResult(off.resultId,p,caller,storage,undefined,'task_list');
         assert.equal(part.found,true);chunks.push(part.chunk);if(p+1>=part.pages)break;}
       const parsed=JSON.parse(chunks.join(''));
       assert.equal(parsed.next_cursor,first.data.next_cursor);
       assert.equal(parsed.tasks.length,100);
-      assert.doesNotMatch(JSON.stringify(parsed),/private-synthetic/);
+      assert.doesNotMatch(JSON.stringify(parsed),/private-synthetic|hidden-synthetic|restricted-synthetic/);
       const second=await handleTaskList({view:'summary',paginate:true,limit:100,cursor:parsed.next_cursor},{callerAgent:'cto'},deps);
-      assert.equal(second.data.tasks.length,50);
+      assert.equal(second.data.tasks.length,49);
       assert.equal(second.data.next_cursor,null);
-      assert.equal(new Set([...parsed.tasks,...second.data.tasks].map(t=>t.id)).size,150);
+      assert.equal(new Set([...parsed.tasks,...second.data.tasks].map(t=>t.id)).size,149);
     }
   } finally {if(previous===undefined)delete process.env[COMPACT_RESULT_JSON_MODE_ENV];else process.env[COMPACT_RESULT_JSON_MODE_ENV]=previous;}
 });
