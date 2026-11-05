@@ -69,3 +69,25 @@ test('semanticSearch reaches the OpenSearch domain, not Azure, when SEARCH_BACKE
     },
   );
 });
+
+test('semantic recall uses a legacy source owner when filtering a bare ID to one lane', async () => {
+  await withStubbedFetch(
+    (async (url: string | URL) => {
+      const u = String(url);
+      if (u.includes('/openai/deployments/') && u.includes('/embeddings')) {
+        return new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2] }] }), { status: 200 });
+      }
+      if (u.includes('/memory-exec/_search')) {
+        return new Response(JSON.stringify({ hits: { hits: [
+          { _id: 'legacy-1', _score: 2, _source: { id: '20261001-013', agent: 'cto', text: 'synthetic CTO record' } },
+          { _id: 'legacy-2', _score: 1, _source: { id: '20261001-014', agent: 'cro', text: 'synthetic CRO record' } },
+        ] } }), { status: 200 });
+      }
+      throw new Error(`unexpected synthetic fetch: ${u}`);
+    }) as typeof fetch,
+    async () => {
+      const hits = await semanticSearch('legacy owner metadata case', 'cto', 10);
+      assert.deepEqual(hits?.map((hit) => [hit.id, hit.agent]), [['20261001-013', 'cto']]);
+    },
+  );
+});
