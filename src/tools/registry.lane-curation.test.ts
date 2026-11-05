@@ -38,7 +38,7 @@ async function registeredToolCount(lane: string, isM365 = false): Promise<number
   return (await registeredToolNames(lane, isM365)).length;
 }
 
-async function registeredToolNames(lane: string, isM365 = false, connectorSurface = false, authKind?: 'codex'): Promise<string[]> {
+async function registeredToolNames(lane: string, isM365 = false, connectorSurface = false, authKind?: 'codex' | 'oauth'): Promise<string[]> {
   const { registerAllTools } = await import('./index.js');
   const { currentCallerHash, requestContext } = await import('../server/request-context.js');
   const mcp = new McpServer(
