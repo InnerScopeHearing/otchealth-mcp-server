@@ -52,6 +52,7 @@ async function registeredToolNames(lane: string, isM365 = false, connectorSurfac
       callerAgent: lane,
       connectorSurface,
       m365StaticAuth: isM365,
+      authKind,
     },
     async () => {
       registerAllTools(mcp, currentCallerHash);
