@@ -70,6 +70,18 @@ test('edited cursors may seek, and response discloses they do not prove coverage
   assert.equal(skipped.data.snapshot,false);
 });
 
+test('summary does not invent zero attempts for a legacy row missing the field',async()=>{
+  const unknown=mk(1,{created_by:'cfo',detail_readers:['cfo']});
+  delete unknown.attempt_count;
+  const known=mk(2,{created_by:'cfo',detail_readers:['cfo'],attempt_count:0});
+  const f=fixture([unknown,known]);
+  const paged=await handleTaskList({paginate:true,view:'summary',limit:10},{callerAgent:'cto'},f.deps);
+  assert.equal(Object.hasOwn(paged.data.tasks[0],'attempt_count'),false);
+  assert.equal(paged.data.tasks[1].attempt_count,0);
+  const unpaged=await handleTaskList({view:'summary',limit:10},{callerAgent:'cto'},f.deps);
+  assert.equal(Object.hasOwn(unpaged.data.tasks[0],'attempt_count'),false);
+});
+
 test('paged inputs fail closed on wrong view, limit, missing caller, backend, and cursor scope',async()=>{
   const f=fixture([mk(1),mk(2)]);
   await assert.rejects(handleTaskList({paginate:true},{callerAgent:'cto'},f.deps),/invalid_pagination_input/);

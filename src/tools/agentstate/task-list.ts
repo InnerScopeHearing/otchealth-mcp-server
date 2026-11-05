@@ -27,11 +27,12 @@ export interface TaskListDeps {
 
 const DEFAULT_DEPS: TaskListDeps = { isConfigured, listTasks, listTaskPage, activeBackend };
 
-function compactTask(task: ReturnType<typeof projectTaskForCaller>) {
+function compactTask(task: ReturnType<typeof projectTaskForCaller>, original?: Pick<Task, 'attempt_count'>) {
+  const attemptCount = original ? original.attempt_count : task.attempt_count;
   return { id: task.id, board: task.board, type: task.type, owner_agent: task.owner_agent,
     status: task.status, priority: task.priority, created_at: task.created_at, updated_at: task.updated_at,
     claim_ts: task.claim_ts, lease_until: task.lease_until, lease_version: task.lease_version,
-    done_ts: task.done_ts, attempt_count: task.attempt_count ?? 0,
+    done_ts: task.done_ts, ...(attemptCount === undefined ? {} : { attempt_count: attemptCount }),
     ...('title' in task ? { title: task.title } : {}) };
 }
 
@@ -68,7 +69,7 @@ export async function handleTaskList(
         ...(status ? {status} : {}), ...(after ? {after} : {}), limit,
         includePersonal: canReadPersonalTasks(caller) }) as unknown as Task[],
       visibleTo: taskVisibleToCaller,
-      project: (t: Task, c: string) => compactTask(projectTaskForCaller(t, c)),
+      project: (t: Task, c: string) => compactTask(projectTaskForCaller(t, c), t),
     });
     return { data: { count: result.tasks.length, ...result, cursor_integrity: 'unsigned' }, summary: `${result.tasks.length} task(s); paged, not a snapshot.`, compactText: true };
   }
@@ -77,7 +78,7 @@ export async function handleTaskList(
   // exclusion before its max limit, so this post-filter cannot starve an ordinary caller's page.
   const visible = tasks.filter((task) => taskVisibleToCaller(task, ctx.callerAgent));
   const projected = visible.map((task) => projectTaskForCaller(task, ctx.callerAgent));
-  const rows = view === 'summary' ? projected.map(compactTask) : projected;
+  const rows = view === 'summary' ? projected.map((task, index) => compactTask(task, visible[index])) : projected;
   return {
     data: { count: visible.length, tasks: rows },
     summary: String(visible.length) + ' task(s)' +
