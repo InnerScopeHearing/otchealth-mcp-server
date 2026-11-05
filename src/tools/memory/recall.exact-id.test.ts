@@ -31,10 +31,84 @@ test('recognizes current and legacy bare ID forms', () => {
   });
 });
 
+test('recognizes a lane-qualified legacy ID with its stored hash suffix', () => {
+  assert.deepEqual(parseExactSharedIdQuery('cto__20261001-013-a1b2'), {
+    agent: 'cto',
+    id: '20261001-013-a1b2',
+    marker: null,
+  });
+  assert.deepEqual(parseExactSharedIdQuery('20261001-013-A1B2'), {
+    agent: null,
+    id: '20261001-013-a1b2',
+    marker: null,
+  });
+});
+
+test('a bare suffixed ID respects the requested lane and rejects conflicting filters', async () => {
+  const rows = [
+    { id: '20261001-013-a1b2', agent: 'cto' },
+    { id: '20261001-013-a1b2', agent: 'cro' },
+  ];
+  const read = async (agent: string | null) => rows.filter((row) => row.agent === agent);
+  const bare = parseExactSharedIdQuery('20261001-013-a1b2')!;
+  const qualified = parseExactSharedIdQuery('cto__20261001-013-a1b2')!;
+  assert.deepEqual((await resolveExactSharedId(bare, 'cto', read)).matches, [rows[0]]);
+  assert.deepEqual((await resolveExactSharedId(qualified, 'cro', read)).matches, []);
+});
+
+test('a suffixed legacy ID uses exact recall without semantic fallback', async () => {
+  const row = { id: '20261001-013-a1b2', agent: 'cto', text: 'requested record' };
+  let otherReads = 0;
+  const result = await recallHandler(
+    { query: 'cto__20261001-013-a1b2' },
+    { correlationId: 'test', callerHash: 'test', dryRun: false, acknowledgeWarning: false, callerAgent: 'cto' },
+    {
+      isConfigured: () => true,
+      semanticConfigured: () => false,
+      getRetractionSnapshot: async () => ({ byAgent: new Map(), verified: true }),
+      readSharedAgent: async () => [row, { id: '20261001-013-ffff', agent: 'cto', text: 'related record' }],
+      readSharedAll: async () => { otherReads++; return []; },
+    },
+  );
+  assert.equal((result.data as { mode: string }).mode, 'exact-id');
+  assert.deepEqual((result.data as { matches: unknown[] }).matches, [row]);
+  assert.equal(otherReads, 0);
+});
+
+test('a suffixed legacy ID still respects lane-scoped retractions', async () => {
+  const result = await recallHandler(
+    { query: 'cto__20261001-013-a1b2' },
+    { correlationId: 'test', callerHash: 'test', dryRun: false, acknowledgeWarning: false, callerAgent: 'cto' },
+    {
+      isConfigured: () => true,
+      getRetractionSnapshot: async () => ({ byAgent: new Map([['cto', new Set(['20261001-013-a1b2'])]]), verified: true }),
+      readSharedAgent: async () => [{ id: '20261001-013-a1b2', agent: 'cto', text: 'retired' }],
+    },
+  );
+  assert.equal((result.data as { mode: string }).mode, 'exact-id');
+  assert.deepEqual((result.data as { matches: unknown[] }).matches, []);
+});
+
+test('a suffixed legacy ID fails closed when retraction authority is unavailable, with explicit audit access', async () => {
+  const row = { id: '20261001-013-a1b2', agent: 'cto', text: 'historical record' };
+  const context = { correlationId: 'test', callerHash: 'test', dryRun: false, acknowledgeWarning: false, callerAgent: 'cto' };
+  const dependencies = {
+    isConfigured: () => true,
+    getRetractionSnapshot: async () => ({ byAgent: new Map<string, Set<string>>(), verified: false }),
+    readSharedAgent: async () => [row],
+  };
+  const current = await recallHandler({ query: 'cto__20261001-013-a1b2' }, context, dependencies);
+  const audit = await recallHandler({ query: 'cto__20261001-013-a1b2', include_superseded: true }, context, dependencies);
+  assert.equal((current.data as { mode: string }).mode, 'degraded-retraction-authority');
+  assert.deepEqual((audit.data as { matches: unknown[] }).matches, [row]);
+  assert.equal((audit.data as { mode: string }).mode, 'exact-id-audit-history');
+});
+
 test('keeps natural-language phrases containing a stored ID on ranked recall', () => {
   assert.equal(parseExactSharedIdQuery('Find 20260929-b7db22bc47ea COO-CHAT-20260929-01'), null);
   assert.equal(parseExactSharedIdQuery('20260929-b7db22bc47ea what happened?'), null);
   assert.equal(parseExactSharedIdQuery('20260929-b7db22bc47ea details'), null);
+  assert.equal(parseExactSharedIdQuery('20261001-013-a1b2 details'), null);
   assert.equal(parseExactSharedIdQuery('what changed in CFO notes?'), null);
 });
 
@@ -80,6 +154,17 @@ test('recall handler rejects an embedded restricted agent before reading its fee
         return [];
       },
     },
+  );
+  assert.equal((result.data as { mode: string }).mode, 'ring-forbidden');
+  assert.equal(feedReads, 0);
+});
+
+test('a suffixed legacy ID cannot bypass the restricted-agent gate', async () => {
+  let feedReads = 0;
+  const result = await recallHandler(
+    { query: 'clo-personal__20261001-013-a1b2' },
+    { correlationId: 'test', callerHash: 'test', dryRun: false, acknowledgeWarning: false, callerAgent: 'cto' },
+    { readSharedAgent: async () => { feedReads++; return []; } },
   );
   assert.equal((result.data as { mode: string }).mode, 'ring-forbidden');
   assert.equal(feedReads, 0);
