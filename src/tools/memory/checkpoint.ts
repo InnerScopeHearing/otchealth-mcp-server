@@ -211,6 +211,15 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         distillation_complete: z.boolean().optional(),
       },
       handler: async (input, ctx) => {
+        // Checkpoint writes to agent state and the shared search index. Unlike the explicitly
+        // attributed memory_remember handoff, this is a self-lane capture, never a delegation.
+        const agent = checkpointCallerAgent(ctx.callerAgent, input);
+        if (!agent) {
+          return {
+            data: { written: [], distilled: 0, checkpoint: false, note: 'checkpoint_scope_forbidden' },
+            summary: 'Refused: checkpoint_scope_forbidden. Checkpoints are restricted to the authenticated company lane.',
+          };
+        }
         // MNPI DETERMINISTIC PRE-SHARE GATE (Wave 3 item 3.5, safety/mnpi-gate.ts). Runs BEFORE any
         // write, over the summary AND every explicit memory's text. Unlike the rest of this handler
         // (deliberately fail-open per its own doc comment), this check is a HARD BLOCK for every
