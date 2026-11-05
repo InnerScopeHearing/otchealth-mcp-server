@@ -112,12 +112,13 @@ export function registerMemorySearch(server: McpServer, callerHash: CallerHashPr
         contains: z.string().optional().describe('Case-insensitive substring match on the text.'),
         limit: z.number().int().min(1).max(100).optional().describe('Max results (default 25).'),
       },
-      outputShape: { count: z.number(), records: z.unknown(), blocked: z.boolean().optional(), reason: z.string().optional(), note: z.string().optional(), status: z.enum(['unconfigured', 'denied', 'success']), lookup_performed: z.boolean() },
+      outputShape: { count: z.number(), records: z.unknown(), blocked: z.boolean().optional(), reason: z.string().optional(), note: z.string().optional(), status: z.enum(['unconfigured', 'denied', 'success']).optional(), lookup_performed: z.boolean().optional() },
       handler: async (input, ctx) => {
-        if (!(dependencies.isConfigured ?? isConfigured)()) return { data: { count: 0, records: [], note: 'agent-state Cosmos not configured.', status: 'unconfigured', lookup_performed: false }, summary: 'Memory store not configured.' };
+        const exact = input.id !== undefined;
+        if (!(dependencies.isConfigured ?? isConfigured)()) return { data: { count: 0, records: [], note: 'agent-state Cosmos not configured.', ...(exact ? { status: 'unconfigured', lookup_performed: false } : {}) }, summary: 'Memory store not configured.' };
 
         const data = await searchAuthorizedMemory(input, ctx.callerAgent, dependencies.search);
-        return { data: { ...data, status: data.blocked ? 'denied' : 'success', lookup_performed: !data.blocked }, summary: data.blocked ? `Refused: ${data.reason}` : `${data.count} memory record(s).` };
+        return { data: exact ? { ...data, status: data.blocked ? 'denied' : 'success', lookup_performed: !data.blocked } : data, summary: data.blocked ? `Refused: ${data.reason}` : `${data.count} memory record(s).` };
       },
     },
     callerHash,
