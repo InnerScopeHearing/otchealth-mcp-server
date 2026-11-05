@@ -343,6 +343,12 @@ function addFormUrlEncodedParser(app: import('fastify').FastifyInstance): void {
   });
 }
 
+function browserConsent(page: { payload: string; headers: Record<string, unknown> }): { headers: Record<string, string>; csrf: string } {
+  const cookie = String(page.headers['set-cookie']).split(';')[0]!;
+  const csrf = page.payload.match(/name="csrf_token" value="([a-f0-9]{64})"/)![1]!;
+  return { headers: { 'content-type': 'application/x-www-form-urlencoded', origin: 'http://localhost', cookie }, csrf };
+}
+
 async function registerDcrClient(app: import('fastify').FastifyInstance): Promise<string> {
   const res = await app.inject({
     method: 'POST',
@@ -435,8 +441,8 @@ test('E2E: a DCR client choosing "connect read-only" reaches the token endpoint 
   const consentRes = await app.inject({
     method: 'POST',
     url: '/oauth/authorize/consent',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    payload: `pending_id=${pendingId}&action=readonly`,
+    headers: browserConsent(authRes).headers,
+    payload: `csrf_token=${browserConsent(authRes).csrf}&pending_id=${pendingId}&action=readonly`,
   });
   assert.equal(consentRes.statusCode, 302);
   const code = new URL(String(consentRes.headers.location)).searchParams.get('code');
@@ -493,8 +499,8 @@ test('E2E: a DCR client redeeming a genuine cfo setup code reaches the token end
   const consentRes = await app.inject({
     method: 'POST',
     url: '/oauth/authorize/consent',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    payload: `pending_id=${pendingId}&action=elevate&code=${encodeURIComponent(minted.code)}`,
+    headers: browserConsent(authRes).headers,
+    payload: `csrf_token=${browserConsent(authRes).csrf}&pending_id=${pendingId}&action=elevate&code=${encodeURIComponent(minted.code)}`,
   });
   assert.equal(consentRes.statusCode, 302, JSON.stringify(consentRes.payload));
   const code = new URL(String(consentRes.headers.location)).searchParams.get('code');
@@ -563,8 +569,8 @@ test('E2E: a DCR client redeeming a WeFunder setup code reaches only the dedicat
   const consentRes = await app.inject({
     method: 'POST',
     url: '/oauth/authorize/consent',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    payload: `pending_id=${pendingId}&action=elevate&code=${encodeURIComponent(minted.code)}`,
+    headers: browserConsent(authRes).headers,
+    payload: `csrf_token=${browserConsent(authRes).csrf}&pending_id=${pendingId}&action=elevate&code=${encodeURIComponent(minted.code)}`,
   });
   assert.equal(consentRes.statusCode, 302, JSON.stringify(consentRes.payload));
   const code = new URL(String(consentRes.headers.location)).searchParams.get('code');
@@ -615,8 +621,8 @@ test('E2E: the isolated Make pilot setup code issues a pilot-only token and pres
   const consentRes = await app.inject({
     method: 'POST',
     url: '/oauth/authorize/consent',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    payload: `pending_id=${pendingId}&action=elevate&code=${encodeURIComponent(minted.code)}`,
+    headers: browserConsent(authRes).headers,
+    payload: `csrf_token=${browserConsent(authRes).csrf}&pending_id=${pendingId}&action=elevate&code=${encodeURIComponent(minted.code)}`,
   });
   assert.equal(consentRes.statusCode, 302, JSON.stringify(consentRes.payload));
   const code = new URL(String(consentRes.headers.location)).searchParams.get('code');
@@ -672,8 +678,8 @@ test('A wrong code never elevates: the connector still ends up external-read aft
   const wrongRes = await app.inject({
     method: 'POST',
     url: '/oauth/authorize/consent',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    payload: `pending_id=${pendingId}&action=elevate&code=TOTALLY-WRONG-0000`,
+    headers: browserConsent(authRes).headers,
+    payload: `csrf_token=${browserConsent(authRes).csrf}&pending_id=${pendingId}&action=elevate&code=TOTALLY-WRONG-0000`,
   });
   assert.equal(wrongRes.statusCode, 200, 'a wrong guess re-renders the form, it does not redirect');
   assert.match(wrongRes.payload, /invalid or has expired/);
@@ -681,8 +687,8 @@ test('A wrong code never elevates: the connector still ends up external-read aft
   const readOnlyRes = await app.inject({
     method: 'POST',
     url: '/oauth/authorize/consent',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    payload: `pending_id=${pendingId}&action=readonly`,
+    headers: browserConsent(authRes).headers,
+    payload: `csrf_token=${browserConsent(authRes).csrf}&pending_id=${pendingId}&action=readonly`,
   });
   assert.equal(readOnlyRes.statusCode, 302);
   const code = new URL(String(readOnlyRes.headers.location)).searchParams.get('code');
@@ -724,7 +730,7 @@ test('TAMPERED/UNKNOWN/EXPIRED pending_id -> clean 400, no redirect, for both a 
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     payload: `pending_id=${'a'.repeat(32)}&action=elevate&code=WHATEVER-0000-0000`,
   });
-  assert.equal(neverExisted.statusCode, 400);
+  assert.equal(neverExisted.statusCode, 403);
   assert.equal(neverExisted.headers.location, undefined);
 
   // Missing action entirely.
@@ -734,7 +740,7 @@ test('TAMPERED/UNKNOWN/EXPIRED pending_id -> clean 400, no redirect, for both a 
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     payload: `pending_id=${'b'.repeat(32)}`,
   });
-  assert.equal(noAction.statusCode, 400);
+  assert.equal(noAction.statusCode, 403);
   assert.equal(noAction.headers.location, undefined);
 
   await app.close();
@@ -783,5 +789,140 @@ test('clo-personal can never be redeemed via the consent flow, even if somehow m
     'an out-of-allowlist elevatedAgent must fall back to the client\'s real (external-read) lane, never be honored',
   );
 
+  await app.close();
+});
+
+test('consent rejects forged sessions and origins without consuming pending request', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { registerOAuthRoutes } = await import('./oauth.js');
+  const app = Fastify();
+  addFormUrlEncodedParser(app);
+  const { consent, setupCode } = fakeConsentStack();
+  registerOAuthRoutes(app, { consent, setupCode });
+  const clientId = await registerDcrClient(app);
+  const { challenge } = pkcePair();
+  const url = `/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CLAUDE_CALLBACK)}&response_type=code&code_challenge=${challenge}&code_challenge_method=S256`;
+  const page = await app.inject({ method: 'GET', url });
+  const other = await app.inject({ method: 'GET', url });
+  const pending = page.payload.match(/name="pending_id" value="([a-f0-9]{32})"/)![1];
+  const browser = browserConsent(page);
+  assert.match(String(page.headers['set-cookie']), /^__Host-consent-session=[a-f0-9]{64}; Path=\/; Secure; HttpOnly; SameSite=Lax; Max-Age=1800$/);
+  const cases = [
+    { headers: { ...browser.headers, origin: 'https://attacker.invalid' }, csrf: browser.csrf },
+    { headers: { ...browser.headers, origin: 'null' }, csrf: browser.csrf },
+    { headers: { ...browser.headers, origin: '' }, csrf: browser.csrf },
+    { headers: { ...browser.headers, cookie: '' }, csrf: browser.csrf },
+    { headers: { ...browser.headers, cookie: browserConsent(other).headers.cookie! }, csrf: browser.csrf },
+    { headers: browser.headers, csrf: '0'.repeat(64) },
+    { headers: browser.headers, csrf: '' },
+    { headers: { ...browser.headers, cookie: `${browser.headers.cookie}; ${browser.headers.cookie}` }, csrf: browser.csrf },
+  ];
+  for (const attempt of cases) {
+    const response = await app.inject({ method:'POST',url:'/oauth/authorize/consent',headers:attempt.headers,payload:`pending_id=${pending}&action=readonly&csrf_token=${attempt.csrf}` });
+    assert.equal(response.statusCode,403);
+    assert.equal(response.headers.location, undefined);
+  }
+  const legitimate = await app.inject({ method:'POST',url:'/oauth/authorize/consent',headers:browser.headers,payload:`pending_id=${pending}&action=readonly&csrf_token=${browser.csrf}` });
+  assert.equal(legitimate.statusCode,302, 'invalid submissions must not consume pending auth');
+  assert.equal(legitimate.headers['set-cookie'], undefined, 'success keeps the shared session for other pages');
+  const otherPending = other.payload.match(/name="pending_id" value="([a-f0-9]{32})"/)![1];
+  const otherBrowser = browserConsent(other);
+  const otherLegitimate = await app.inject({ method:'POST',url:'/oauth/authorize/consent',headers:otherBrowser.headers,payload:`pending_id=${otherPending}&action=readonly&csrf_token=${otherBrowser.csrf}` });
+  assert.equal(otherLegitimate.statusCode,302, 'concurrent consent tabs must not invalidate each other');
+  await app.close();
+});
+
+test('abandoned consent pages keep the browser cookie header bounded', async () => {
+  const { default: Fastify } = await import('fastify'); const { registerOAuthRoutes } = await import('./oauth.js');
+  const app = Fastify(); addFormUrlEncodedParser(app); const stack = fakeConsentStack(); registerOAuthRoutes(app, stack);
+  const clientId = await registerDcrClient(app); const { challenge } = pkcePair();
+  const url = `/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CLAUDE_CALLBACK)}&response_type=code&code_challenge=${challenge}&code_challenge_method=S256`;
+  const jar = new Map<string,string>();
+  for (let i=0;i<80;i++) {
+    const cookie = [...jar].map(([name,value])=>`${name}=${value}`).join('; ');
+    const page = await app.inject({method:'GET',url,headers:cookie ? {cookie} : {}});
+    assert.equal(page.statusCode,200);
+    const pair=String(page.headers['set-cookie']).split(';')[0]!;
+    const idx=pair.indexOf('='); jar.set(pair.slice(0,idx),pair.slice(idx+1));
+  }
+  assert.equal(jar.size,1,'80 abandoned pages must not create 80 cookies');
+  assert.ok([...jar].map(([name,value])=>`${name}=${value}`).join('; ').length < 128);
+  await app.close();
+});
+
+test('shared consent cookie preserves concurrent pending forms and binds tokens to each form', async () => {
+  const { default: Fastify } = await import('fastify'); const { registerOAuthRoutes } = await import('./oauth.js');
+  const app=Fastify(); addFormUrlEncodedParser(app); const stack=fakeConsentStack(); registerOAuthRoutes(app,stack);
+  const clientId=await registerDcrClient(app); const {challenge}=pkcePair();
+  const url=`/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CLAUDE_CALLBACK)}&response_type=code&code_challenge=${challenge}&code_challenge_method=S256`;
+  const first=await app.inject({method:'GET',url});const a=browserConsent(first);
+  const second=await app.inject({method:'GET',url,headers:{cookie:a.headers.cookie!}});const b=browserConsent(second);
+  assert.equal(a.headers.cookie,b.headers.cookie); assert.notEqual(a.csrf,b.csrf);
+  const id=(page:{payload:string})=>page.payload.match(/name="pending_id" value="([a-f0-9]{32})"/)![1]!;
+  const post=(pending:string,csrf:string,cookie:string)=>app.inject({method:'POST',url:'/oauth/authorize/consent',headers:{...a.headers,cookie},payload:`pending_id=${pending}&action=readonly&csrf_token=${csrf}`});
+  assert.equal((await post(id(first),b.csrf,a.headers.cookie!)).statusCode,403,'another pending form cannot authorize this one');
+  assert.equal((await post(id(first),a.csrf,a.headers.cookie!)).statusCode,302);
+  assert.equal((await post(id(second),b.csrf,a.headers.cookie!)).statusCode,302,'the first result does not clear the other tab');
+  await app.close();
+});
+
+test('simultaneous first pages fail closed for the displaced session, and cookie eviction requires restart', async () => {
+  const { default: Fastify }=await import('fastify');const {registerOAuthRoutes}=await import('./oauth.js');
+  const app=Fastify();addFormUrlEncodedParser(app);const stack=fakeConsentStack();registerOAuthRoutes(app,stack);
+  const clientId=await registerDcrClient(app);const {challenge}=pkcePair();
+  const url=`/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CLAUDE_CALLBACK)}&response_type=code&code_challenge=${challenge}&code_challenge_method=S256`;
+  const [first,second]=await Promise.all([app.inject({method:'GET',url}),app.inject({method:'GET',url})]);
+  const a=browserConsent(first),b=browserConsent(second);assert.notEqual(a.headers.cookie,b.headers.cookie);
+  const id=(page:{payload:string})=>page.payload.match(/name="pending_id" value="([a-f0-9]{32})"/)![1]!;
+  const post=(pending:string,csrf:string,cookie:string)=>app.inject({method:'POST',url:'/oauth/authorize/consent',headers:{...a.headers,cookie},payload:`pending_id=${pending}&action=readonly&csrf_token=${csrf}`});
+  assert.equal((await post(id(first),a.csrf,b.headers.cookie!)).statusCode,403,'last arriving first-session cookie displaces the other form');
+  assert.equal((await post(id(first),a.csrf,'')).statusCode,403,'an expired or evicted session cannot authorize');
+  assert.equal((await post(id(second),b.csrf,b.headers.cookie!)).statusCode,302);
+  await app.close();
+});
+
+test('consent accepts the exact forwarded HTTPS origin including a non-default port', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { registerOAuthRoutes } = await import('./oauth.js');
+  const app = Fastify({ trustProxy: true }); addFormUrlEncodedParser(app);
+  const stack = fakeConsentStack(); registerOAuthRoutes(app, stack);
+  const clientId = await registerDcrClient(app); const { challenge } = pkcePair();
+  const url = `/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CLAUDE_CALLBACK)}&response_type=code&code_challenge=${challenge}&code_challenge_method=S256`;
+  const forwarded = { host: 'internal.invalid:8080', 'x-forwarded-host': 'gateway.example:8443', 'x-forwarded-proto': 'https' };
+  const page = await app.inject({method:'GET',url,headers:forwarded});
+  const browser = browserConsent(page);
+  const pending = page.payload.match(/name="pending_id" value="([a-f0-9]{32})"/)![1]!;
+  const payload = `pending_id=${pending}&action=readonly&csrf_token=${browser.csrf}`;
+  const wrong = await app.inject({method:'POST',url:'/oauth/authorize/consent',headers:{...browser.headers,...forwarded,origin:'https://gateway.example'},payload});
+  assert.equal(wrong.statusCode,403,'the same hostname without the non-default port is a different origin');
+  const valid = await app.inject({method:'POST',url:'/oauth/authorize/consent',headers:{...browser.headers,...forwarded,origin:'https://gateway.example:8443'},payload});
+  assert.equal(valid.statusCode,302,valid.payload);
+  await app.close();
+});
+
+test('retry, exhausted and expired consent preserve the shared session cookie', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { registerOAuthRoutes } = await import('./oauth.js');
+  const app = Fastify(); addFormUrlEncodedParser(app);
+  const stack = fakeConsentStack(); registerOAuthRoutes(app, stack);
+  const clientId = await registerDcrClient(app); const { challenge } = pkcePair();
+  const url = `/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CLAUDE_CALLBACK)}&response_type=code&code_challenge=${challenge}&code_challenge_method=S256`;
+  const page = await app.inject({method:'GET',url}); const browser = browserConsent(page);
+  const pending = page.payload.match(/name="pending_id" value="([a-f0-9]{32})"/)![1]!;
+  let csrf = browser.csrf;
+  const send = () => app.inject({method:'POST',url:'/oauth/authorize/consent',headers:browser.headers,payload:`pending_id=${pending}&action=elevate&code=wrong&csrf_token=${csrf}`});
+  for (let n = 0; n < 4; n++) {
+    const retry = await send(); assert.equal(retry.statusCode,200); assert.equal(retry.headers['set-cookie'],undefined);
+    const rendered = retry.payload.match(/name="csrf_token" value="([a-f0-9]{64})"/);
+    assert.ok(rendered, 'retry must render a usable CSRF token'); csrf = rendered[1]!;
+  }
+  const burned = await send(); assert.equal(burned.statusCode,400);
+  assert.equal(burned.headers['set-cookie'],undefined);
+  const expiredPage = await app.inject({method:'GET',url}); const expiredBrowser = browserConsent(expiredPage);
+  const expiredId = expiredPage.payload.match(/name="pending_id" value="([a-f0-9]{32})"/)![1]!;
+  stack.store.get(`connector-pending-auth_${expiredId}`)!.doc.expiresAt = new Date(0).toISOString();
+  const expired = await app.inject({method:'POST',url:'/oauth/authorize/consent',headers:expiredBrowser.headers,payload:`pending_id=${expiredId}&action=readonly&csrf_token=${expiredBrowser.csrf}`});
+  assert.equal(expired.statusCode,400);
+  assert.equal(expired.headers['set-cookie'],undefined);
   await app.close();
 });

@@ -24,7 +24,7 @@
  * WHAT THIS PROVES, AND WHAT IT DOES NOT. The check proves how the token was ISSUED. It does not prove
  * that a person is present. A holder of a static approved-lane credential can still reach the bridge through
  * an authorization_code session: connector_setup_code_create mints a setup code, a DCR client registers
- * anonymously, and the consent endpoint redeems the code with plain HTTP and no browser; and a
+ * anonymously, and redeem the code after creating its own consent session; and a
  * confidential client's authorization code is issued with no consent screen at all. Those paths belong
  * to the setup-code tool and the OAuth endpoints, not to this check, and hardening them is tracked as a
  * separate follow-up. What bounds that path is the read-only reader role (ViewOnlyAccess plus explicit

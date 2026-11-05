@@ -17,8 +17,8 @@
  * person was at a keyboard, and two routes still reach an authorization_code session without one:
  *  1. A holder of a static CTO-lane credential (the connector token, a Codex seat, the M365 CTO token) can
  *     call connector_setup_code_create, register a DCR client at POST /register, and redeem the setup code
- *     at POST /oauth/authorize/consent with plain HTTP. The consent endpoint takes a code, not a browser,
- *     so signInThroughConsentScreen below is exactly what that headless caller would send.
+ *     at POST /oauth/authorize/consent after obtaining a session cookie and CSRF token. That
+ *     browser binding is not owner authentication; a headless caller can create its own session.
  *  2. GET /oauth/authorize issues a confidential client's code with no consent screen, so the holder of
  *     such a client's secret can run the authorization_code grant without a browser.
  * The grant check closes the direct machine path (client_credentials) and untracked tokens. Hardening the
@@ -319,11 +319,14 @@ async function signInThroughConsentScreen(): Promise<Session> {
   const pendingId = /name="pending_id" value="([a-f0-9]{32})"/.exec(authorize.payload)?.[1];
   assert.ok(pendingId, 'the consent screen carries a pending id');
 
+  const csrf = /name="csrf_token" value="([a-f0-9]{64})"/.exec(authorize.payload)?.[1];
+  assert.ok(csrf, 'the consent screen carries its browser-bound CSRF token');
+  const cookie = String(authorize.headers['set-cookie']).split(';')[0];
   const consent = await app.inject({
     method: 'POST',
     url: '/oauth/authorize/consent',
-    headers: FORM,
-    payload: new URLSearchParams({ pending_id: pendingId, action: 'elevate', code: minted.code }).toString(),
+    headers: { ...FORM, origin: 'http://localhost', cookie },
+    payload: new URLSearchParams({ pending_id: pendingId, csrf_token: csrf, action: 'elevate', code: minted.code }).toString(),
   });
   assert.equal(consent.statusCode, 302, consent.payload.slice(0, 200));
   const code = new URL(String(consent.headers.location)).searchParams.get('code');

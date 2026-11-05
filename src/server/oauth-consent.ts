@@ -416,10 +416,11 @@ export function renderConsentPage(
   errorMessage: string | undefined,
   expiresAt: string,
   now: number = Date.now(),
+  csrfToken = '',
 ): string {
   const errorBlock = errorMessage ? `<p class="err">${escapeHtml(errorMessage)}</p>` : '';
   const validUntilBlock = `<p class="hint">${escapeHtml(formatValidityLine(expiresAt, now))}</p>`;
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OTCHealth Gateway Connection</title><style>${PAGE_STYLE}</style></head><body><main><h1>Connect to the OTCHealth gateway</h1><p>A connector is requesting access to the OTCHealth gateway.</p>${errorBlock}<form method="post" action="/oauth/authorize/consent"><input type="hidden" name="pending_id" value="${escapeHtml(pendingId)}"><label for="code">Owner setup code (optional)</label><input id="code" name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX" maxlength="64"><p class="hint">Have a setup code from the OTCHealth CTO? Enter it to connect with an elevated role. Otherwise, connect read-only.</p>${validUntilBlock}<div class="row"><button type="submit" name="action" value="readonly" class="secondary">Connect read-only instead</button><button type="submit" name="action" value="elevate" class="primary">Elevate with owner code</button></div></form></main></body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OTCHealth Gateway Connection</title><style>${PAGE_STYLE}</style></head><body><main><h1>Connect to the OTCHealth gateway</h1><p>A connector is requesting access to the OTCHealth gateway.</p>${errorBlock}<form method="post" action="/oauth/authorize/consent"><input type="hidden" name="pending_id" value="${escapeHtml(pendingId)}"><input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}"><label for="code">Owner setup code (optional)</label><input id="code" name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX" maxlength="64"><p class="hint">Have a setup code from the OTCHealth CTO? Enter it to connect with an elevated role. Otherwise, connect read-only.</p>${validUntilBlock}<div class="row"><button type="submit" name="action" value="readonly" class="secondary">Connect read-only instead</button><button type="submit" name="action" value="elevate" class="primary">Elevate with owner code</button></div></form></main></body></html>`;
 }
 
 /** A dead-end page: no form, nothing left to submit. `kind` distinguishes a clean expiry/tamper
@@ -454,7 +455,8 @@ export function applyConsentPageHeaders(reply: FastifyReply, redirectUri?: strin
     `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'${redirectOrigin}; frame-ancestors 'none'; base-uri 'none'`,
   );
   reply.header('cache-control', 'no-store');
-  reply.header('referrer-policy', 'no-referrer');
+  // Preserve Origin on form POSTs without sending the authorization URL in Referer.
+  reply.header('referrer-policy', 'strict-origin');
   reply.header('x-content-type-options', 'nosniff');
   reply.header('x-frame-options', 'DENY');
   reply.type('text/html; charset=utf-8');
