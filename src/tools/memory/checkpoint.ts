@@ -161,6 +161,11 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
     {
       name: 'checkpoint',
       category: 'write_simple',
+      authorizeBeforeInput: (input, caller) => checkpointCallerAgent(caller, input) ? null : ({
+        code: 'checkpoint_scope_forbidden',
+        message: 'Checkpoints are restricted to the authenticated company lane.',
+      }),
+      redactInputForLog: () => ({ redacted: true }),
       annotations: {
         title: 'Checkpoint: distill and persist session memory',
         description:
