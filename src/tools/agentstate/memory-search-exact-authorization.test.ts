@@ -4,14 +4,14 @@ import { searchAuthorizedMemory } from './memory-search.js';
 
 test('an exact ID with no agent reads only the caller partition', async () => {
   for (const caller of ['cto', 'cfo']) {
-    let observed: { agent?: string; id?: string } | undefined;
+    const observed: Array<{ agent?: string; id?: string }> = [];
     const result = await searchAuthorizedMemory({ id: 'm_test_12345678' }, caller, async (filter) => {
-      observed = filter;
+      observed.push(filter);
       return [];
     });
     assert.equal(result.count, 0);
-    assert.equal(observed?.agent, caller);
-    assert.equal(observed?.id, 'm_test_12345678');
+    assert.equal(observed[0]?.agent, caller);
+    assert.equal(observed[0]?.id, 'm_test_12345678');
   }
 });
 
