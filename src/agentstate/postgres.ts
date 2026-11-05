@@ -29,6 +29,7 @@
 import crypto from 'node:crypto';
 import pg from 'pg';
 import { translate } from './pg-sql.js';
+import { COMPANY_CHAT_ACTION_LANES } from './chat-action-metadata.js';
 import { loadAgentStatePostgresConfig } from './runtime-config.js';
 
 /** Same allow-list as the Cosmos client: a caller-supplied container must never reach SQL. */
