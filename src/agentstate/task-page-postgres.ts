@@ -8,7 +8,13 @@ const AGENT = /^[a-z0-9][a-z0-9_-]{0,40}$/;
 const STATUS = new Set(['open','claimed','in_progress','blocked','done','cancelled','dead_letter']);
 const PRIORITY = new Set(['low','normal','high','urgent']);
 const validId = (v: unknown): v is string => typeof v === 'string' && ID.test(v) && !/^\.+$/.test(v);
-const validDate = (v: unknown): boolean => typeof v === 'string' && v.trim().length > 0 && Number.isFinite(Date.parse(v));
+const validDate = (v: unknown): boolean => {
+  if (typeof v !== 'string') return false;
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?Z$/.exec(v);
+  if (!match) return false;
+  const date = new Date(v);
+  return Number.isFinite(date.getTime()) && date.toISOString() === `${match[1]}.${(match[2] ?? '').padEnd(3,'0')}Z`;
+};
 const optionalDate = (v: unknown): boolean => v === undefined || v === null || validDate(v);
 const optionalCount = (v: unknown): boolean => v === undefined || (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0);
 

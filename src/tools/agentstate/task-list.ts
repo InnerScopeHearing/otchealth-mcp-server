@@ -108,7 +108,7 @@ export function registerTaskList(server: McpServer, callerHash: CallerHashProvid
         board: z.string().optional().describe('Board partition (default "fleet").'),
         limit: z.number().int().min(1).max(200).optional().describe('Max results (default 50).'),
         view: z.enum(['full', 'summary']).optional().describe('Summary omits notes, descriptions and other details; cross-seat visibility remains unchanged. Default full.'),
-        paginate: z.boolean().optional().describe('Opt into ID-ordered, non-snapshot pages on PostgreSQL; requires summary view and limit at most 100.'),
+        paginate: z.boolean().optional().describe('Opt into ID-ordered, non-snapshot pages on PostgreSQL; requires summary view, limit at most 100, and UTC ISO timestamps with at most three fractional digits.'),
         cursor: z.string().max(2048).optional().describe('Unsigned, client-editable continuation. Pass the exact returned value unchanged with the same caller, board, filters and limit. A null next_cursor does not prove prior coverage or snapshot completeness.'),
       },
       outputShape: { count: z.number(), tasks: z.unknown(), next_cursor: z.string().nullable().optional(), snapshot: z.boolean().optional(), scan_incomplete: z.boolean().optional(), cursor_integrity: z.enum(['unsigned']).optional() },

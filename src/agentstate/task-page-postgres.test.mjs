@@ -28,7 +28,7 @@ test('keyset query binds inputs, applies both personal exclusions, and uses bina
 });
 
 test('successful reads use a bounded read-only transaction and release the client', async () => {
-  const fake = fakePool([{id:'t_0001',doc:doc('t_0001')},{id:'t_0002',doc:doc('t_0002')}]);
+  const fake = fakePool([{id:'t_0001',doc:doc('t_0001',{created_at:'2026-01-01T00:00:00Z'})},{id:'t_0002',doc:doc('t_0002',{updated_at:'2026-01-01T00:00:00.1Z'})}]);
   const result = await queryTaskPage(fake.pool, input);
   assert.deepEqual(result.map(t => t.id), ['t_0001','t_0002']);
   assert.equal(fake.calls[0].text, 'BEGIN READ ONLY');
@@ -65,7 +65,9 @@ test('provider errors are sanitized and rollback failures discard the connection
 test('missing or invalid task metadata never forms a successful page', async () => {
   const unfiltered = {...input, status:undefined};
   for (const extra of [{status:undefined},{status:'invented'},{priority:undefined},{priority:'invented'},
-    {created_at:undefined},{updated_at:'invalid-date'},{claim_ts:'invalid-date'},
+    {created_at:undefined},{created_at:'1'},{created_at:'2026-02-30T00:00:00Z'},
+    {updated_at:'invalid-date'},{claim_ts:'2026-02-30T00:00:00Z'},
+    {created_at:'2026-01-01T00:00:00+00:00'},
     {lease_version:-1},{attempt_count:'unknown'}]) {
     const fake = fakePool([{id:'t_0001',doc:doc('t_0001',extra)}]);
     await assert.rejects(queryTaskPage(fake.pool,unfiltered), /^Error: task_page_unavailable$/);
