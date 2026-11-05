@@ -6,6 +6,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { isConfigured } from '../../agentstate/store.js';
+import { normalizeAgent } from '../../agentstate/agents.js';
+import { PERSONAL_SHARED_MEMORY_AGENT } from './shared-memory-access.js';
 import { writeMemory, recordMemoryIndexOutcome } from '../../agentstate/memory.js';
 import { MEMORY_KINDS } from '../../agentstate/agents.js';
 import { indexMemory as indexMemoryNow } from '../../search/index.js';
