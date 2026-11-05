@@ -1560,7 +1560,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       const shieldInput = def.shieldInputForScan
         ? def.shieldInputForScan(handlerInput)
         : handlerInput;
-      const shield = await inboundShield(canonicalName, shieldInput);
+      const shield = await (effects.inboundShield ?? inboundShield)(canonicalName, shieldInput);
       if (shield.blocked) {
         const smsg =
           `Tool "${def.name}" blocked by Prompt Shields (SHIELD_MODE=enforce): a prompt-injection / ` +
