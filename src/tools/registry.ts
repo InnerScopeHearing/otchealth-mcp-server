@@ -1096,11 +1096,11 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // internal tools. Keep the M365 path stricter than that broad allowlist, and
   // apply the same exclusion to canonical and generated alias registrations.
   if (isM365StaticAuth() && laneForThisTool !== 'cto' && CTO_ONLY_M365_TOOLS.has(canonicalName)) return;
-  // This metadata reader is needed by the authenticated CTO Codex seat even when its catalog is
-  // curated. Keep the M365 seed unchanged and retain the tool's own CTO authorization checks.
-  const ctoCodexInventory = laneForThisTool === 'cto' && canonicalName === 'chat_action_inventory' &&
-    def.name === 'chat_action_inventory' && currentAuthKind() === 'codex' && !isM365StaticAuth();
-  if (catalogCuration && !catalogCuration.advertise && !ctoCodexInventory) return;
+  // Keep this exact CTO-only reader visible to non-M365 CTO clients under catalog curation.
+  // Its own authorization checks remain in force; the M365 seed is unchanged.
+  const ctoInventory = laneForThisTool === 'cto' && canonicalName === 'chat_action_inventory' &&
+    def.name === 'chat_action_inventory' && !isM365StaticAuth();
+  if (catalogCuration && !catalogCuration.advertise && !ctoInventory) return;
   // Only an explicitly opted-in tool receives a connector projection. A lane-specific projection
   // takes precedence over the neutral projection; strict validation uses the selected public schema,
   // while handler authorization and the internal Work/Codex input shape remain unchanged.
