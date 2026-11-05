@@ -99,10 +99,21 @@ export async function getMemory(id: string, agent: string): Promise<MemoryRecord
 
 export async function searchMemory(filter: {
   agent?: string;
+  id?: string;
   kind?: MemoryKind;
   contains?: string;
   limit?: number;
-}): Promise<MemoryRecord[]> {
+}, readExact: typeof getMemory = getMemory): Promise<MemoryRecord[]> {
+  // IDs are partitioned by agent. Never turn an exact lookup into an unscoped scan.
+  if (filter.id !== undefined) {
+    if (!filter.agent) throw new Error('An agent is required for an exact memory ID lookup');
+    const agent = normalizeAgent(filter.agent);
+    const record = await readExact(filter.id, agent);
+    if (!record || record.id !== filter.id || normalizeAgent(record.agent) !== agent ||
+        (filter.kind && record.kind !== filter.kind) ||
+        (filter.contains && !record.text.toLowerCase().includes(filter.contains.toLowerCase()))) return [];
+    return [record];
+  }
   const conds: string[] = ["c.type = 'memory'"];
   const params: { name: string; value: unknown }[] = [];
   let pk: string | undefined;
