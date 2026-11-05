@@ -29,7 +29,7 @@ export type AuthKind = 'oauth' | 'descope' | 'connector' | 'copilot' | 'copilot-
  *   client_credentials  a machine credential (client id plus secret): no code exchange, no refresh token
  *
  * The grant records how the token was ISSUED. It is not proof that a person is present: a holder of a
- * static credential for a lane can mint a setup code and redeem it over plain HTTP. A token minted
+ * static credential for a lane can mint a setup code and redeem it using a self-created browser session. A token minted
  * before grant tracking existed carries no grant. A tool that serves OAuth-issued sessions only (the AWS
  * MCP bridge) accepts the first two grants and refuses a client_credentials token and a token that
  * records no grant.

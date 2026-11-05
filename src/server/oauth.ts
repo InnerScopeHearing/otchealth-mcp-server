@@ -21,7 +21,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
 import {
@@ -51,6 +51,24 @@ import { EXEC_RING } from '../tools/kb/search-privileged.js';
 import { isOAuthGrantType, type OAuthGrantType } from './request-context.js';
 
 const env = loadEnv();
+
+// Browser binding is a CSRF defense, not evidence of owner identity. The cookie is
+// unique per pending request so concurrent connector tabs do not invalidate each other.
+function consentCookieName(pendingId: string): string { return `__Host-consent-${pendingId}`; }
+function consentCsrf(pendingId: string, nonce: string): string {
+  return createHmac('sha256', env.OAUTH_TOKEN_SIGNING_SECRET)
+    .update(`oauth-consent-csrf-v1\0${pendingId}\0${nonce}`).digest('hex');
+}
+function validConsentBrowser(req: { headers: Record<string, unknown>; protocol: string; hostname: string }, pendingId: string, csrf: unknown): boolean {
+  if (typeof req.headers.origin !== 'string' || req.headers.origin !== new URL(baseUrlOf(req)).origin) return false;
+  if (typeof req.headers.cookie !== 'string' || typeof csrf !== 'string' || !/^[a-f0-9]{64}$/.test(csrf)) return false;
+  const name = consentCookieName(pendingId);
+  const values = req.headers.cookie.split(';').map((v) => v.trim()).filter((v) => v.startsWith(`${name}=`));
+  if (values.length !== 1) return false;
+  const nonce = values[0]!.slice(name.length + 1);
+  if (!/^[a-f0-9]{64}$/.test(nonce)) return false;
+  return timingSafeEqual(Buffer.from(csrf, 'hex'), Buffer.from(consentCsrf(pendingId, nonce), 'hex'));
+}
 
 /** OAuth 2.1 is "armed" only when a client id + signing secret are configured. */
 function oauthConfigured(): boolean {
@@ -427,8 +445,10 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
         applyConsentPageHeaders(reply);
         return reply.status(500).send(renderDeadEndPage('server_error'));
       }
+      const nonce = randomBytes(32).toString('hex');
+      reply.header('set-cookie', `${consentCookieName(pending.id)}=${nonce}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=1800`);
       applyConsentPageHeaders(reply, redirect_uri);
-      return reply.status(200).send(renderConsentPage(pending.id, undefined, pending.expiresAt));
+      return reply.status(200).send(renderConsentPage(pending.id, undefined, pending.expiresAt, Date.now(), consentCsrf(pending.id, nonce)));
     }
 
     const code = await createAuthCode({
@@ -460,6 +480,10 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
           : ((req.body ?? {}) as Record<string, string>);
       const pendingId = typeof body.pending_id === 'string' ? body.pending_id : '';
       const action = body.action === 'elevate' ? 'elevate' : body.action === 'readonly' ? 'readonly' : '';
+      if (isValidPendingAuthId(pendingId) && !validConsentBrowser(req, pendingId, body.csrf_token)) {
+        applyConsentPageHeaders(reply);
+        return reply.status(403).send(renderDeadEndPage('expired'));
+      }
 
       if (!isValidPendingAuthId(pendingId) || !action) {
         applyConsentPageHeaders(reply);
@@ -476,12 +500,13 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
         return reply.status(500).send(renderDeadEndPage('server_error'));
       }
       if (resolved.outcome === 'burned') {
+        reply.header('set-cookie', `${consentCookieName(pendingId)}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0`);
         applyConsentPageHeaders(reply);
         return reply.status(400).send(renderDeadEndPage('expired'));
       }
       if (resolved.outcome === 'retry') {
         applyConsentPageHeaders(reply, resolved.redirectUri);
-        return reply.status(200).send(renderConsentPage(pendingId, resolved.message, resolved.expiresAt));
+        return reply.status(200).send(renderConsentPage(pendingId, resolved.message, resolved.expiresAt, Date.now(), body.csrf_token));
       }
 
       // resolved.outcome === 'issue'. SECURITY (hostile-reviewer check): agentOverride here is
@@ -502,6 +527,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
         { type: 'oauth_authorize_consent', elevated: Boolean(resolved.agentOverride) },
         'issued auth code via the consent interstitial',
       );
+      reply.header('set-cookie', `${consentCookieName(pendingId)}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0`);
       reply.header('cache-control', 'no-store');
       return reply.status(302).redirect(url);
     } catch (e) {
