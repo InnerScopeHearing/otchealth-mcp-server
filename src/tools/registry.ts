@@ -1670,7 +1670,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           if (def.name !== 'checkpoint') recordMutation(callerHash);
           const journaled = parseAutoJournalMode(process.env.AUTO_JOURNAL_MODE) === 'on';
           if (journaled) {
-            void journalMutation({
+            void (effects.journalMutation ?? journalMutation)({
               // Aliases retain `def.name` (for example `push_files`) but every safety boundary is
               // keyed to the canonical name. Journaling must do the same or alias calls can evade
               // GitHub mutation argument suppression and copy file/issue content into memory-exec.
