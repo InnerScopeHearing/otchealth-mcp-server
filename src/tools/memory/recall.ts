@@ -21,6 +21,7 @@ const RECALL_OUTPUT_SHAPE = {
   matches: z.array(z.unknown()),
   count: z.number(),
   mode: z.string(),
+  lookup_performed: z.boolean().optional(),
 };
 
 const EXACT_SHARED_ID = /^(?:([a-z0-9][a-z0-9_-]{0,40})__)?(\d{8}-(?:[a-fA-F0-9]{12}|\d{3}(?:-[a-fA-F0-9]{4})?))(?:\s+((?=[A-Z0-9-]*\d)[A-Z0-9]+(?:-[A-Z0-9]+){2,}))?$/;
@@ -142,6 +143,15 @@ async function recallHandlerImpl(
   const agentFilter = input.agent ? normalizeAgent(input.agent) : null;
   if (!sharedMemoryAgentAllowed(ctx.callerAgent, agentFilter)) {
     return { data: { matches: [], count: 0, mode: 'ring-forbidden' }, summary: 'Refused: personal-legal shared-memory rows are not available to this caller.' };
+  }
+
+  // A structured-memory ID is not a shared-feed ID. Never return unrelated semantic matches
+  // as if they identified that record; no structured-store lookup is performed here.
+  if (/^(?:[a-z0-9][a-z0-9_-]{0,40}__)?m_(?:[a-z0-9]+_[a-f0-9]{8}|idem_[a-f0-9]{64})$/i.test(input.query.trim())) {
+    return {
+      data: { matches: [], count: 0, mode: 'structured-id-unsupported', lookup_performed: false },
+      summary: 'This looks like a structured memory-record ID. Shared-memory recall did not look it up; use an authorized exact memory-search ID lookup when available.',
+    };
   }
 
   // Exact shared-feed identifiers must not be sent through semantic ranking: hybrid search can
