@@ -1223,6 +1223,19 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     toolConfig,
     async (rawArgs) => {
       const correlationId = newCorrelationId();
+      // Before parsing, logging, shield/provider calls or mutation accounting, let a tool
+      // reject unauthorized raw input using caller identity without exposing the payload.
+      const callerAgent = currentCallerAgent();
+      if (def.authorizeBeforeInput) {
+        let rejection: { code: string; message: string } | null;
+        try { rejection = def.authorizeBeforeInput(rawArgs, callerAgent); }
+        catch { rejection = { code: 'input_authorization_failed', message: 'Input authorization failed.' }; }
+        if (rejection) {
+          return { isError: true, content: [{ type: 'text', text: rejection.message }],
+            structuredContent: { result: null, compliance_warning: null, correlation_id: correlationId,
+              dry_run: false, error: rejection } };
+        }
+      }
       const callerHash = callerHashProvider();
       const started = Date.now();
       let callbackOutcome: ToolTimingOutcome = 'unknown';
