@@ -264,7 +264,7 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         // caller-specified supersession exists, preserve the original serial order for the batch.
         const explicitDeliveries = await deliverCheckpointBatch(
           memoriesIn,
-          m => deps.deliver(input.agent, m.kind, m.text, { tags: m.tags, supersedes: m.supersedes }),
+          m => deps.deliver(agent, m.kind, m.text, { tags: m.tags, supersedes: m.supersedes }),
           CHECKPOINT_DELIVERY_CONCURRENCY,
           memoriesIn.some(m => Boolean(m.supersedes)),
         );
