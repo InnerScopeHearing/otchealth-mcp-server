@@ -90,7 +90,7 @@ export function evaluateMemorySearchAccess(callerAgent: string | undefined | nul
   return { allowed: true, excludeClopersonalFromGlobal: !(PERSONAL_LEGAL_RING as readonly string[]).includes(caller) };
 }
 
-export function registerMemorySearch(server: McpServer, callerHash: CallerHashProvider): void {
+export function registerMemorySearch(server: McpServer, callerHash: CallerHashProvider, dependencies: { isConfigured?: typeof isConfigured; search?: typeof searchMemory } = {}): void {
   registerTool(
     server,
     {
@@ -107,30 +107,40 @@ export function registerMemorySearch(server: McpServer, callerHash: CallerHashPr
       },
       inputShape: {
         agent: z.string().optional().describe('Filter by agent lane.'),
+        id: z.string().min(1).max(200).optional().describe('Retrieve one exact raw memory record within the selected agent. Defaults to the caller agent. A returned record may have been superseded; its presence alone does not establish current truth.'),
         kind: z.enum(MEMORY_KINDS).optional().describe('Filter by kind.'),
         contains: z.string().optional().describe('Case-insensitive substring match on the text.'),
         limit: z.number().int().min(1).max(100).optional().describe('Max results (default 25).'),
       },
-      outputShape: { count: z.number(), records: z.unknown(), blocked: z.boolean().optional(), reason: z.string().optional() },
+      outputShape: { count: z.number(), records: z.unknown(), blocked: z.boolean().optional(), reason: z.string().optional(), note: z.string().optional(), status: z.enum(['unconfigured', 'denied', 'success']).optional(), lookup_performed: z.boolean().optional() },
       handler: async (input, ctx) => {
-        if (!isConfigured()) return { data: { count: 0, records: [], note: 'agent-state Cosmos not configured.' }, summary: 'Memory store not configured.' };
+        // Keep the existing response shape unless the caller requests an exact ID.
+        const exact = input.id !== undefined;
+        if (!(dependencies.isConfigured ?? isConfigured)()) return { data: { count: 0, records: [], note: 'agent-state Cosmos not configured.', ...(exact ? { status: 'unconfigured', lookup_performed: false } : {}) }, summary: 'Memory store not configured.' };
 
-        const decision = evaluateMemorySearchAccess(ctx.callerAgent, input.agent);
-        if (!decision.allowed) {
-          return {
-            data: { count: 0, records: [], blocked: true, reason: decision.reason },
-            summary: `Refused: ${decision.reason}`,
-          };
-        }
-
-        const effectiveInput = decision.forcedAgent ? { ...input, agent: decision.forcedAgent } : input;
-        let records: MemoryRecord[] = await searchMemory(effectiveInput);
-        if (decision.excludeClopersonalFromGlobal) {
-          records = records.filter((r) => r.agent !== 'clo-personal');
-        }
-        return { data: { count: records.length, records }, summary: `${records.length} memory record(s).` };
+        const data = await searchAuthorizedMemory(input, ctx.callerAgent, dependencies.search);
+        return { data: exact ? { ...data, status: data.blocked ? 'denied' : 'success', lookup_performed: !data.blocked } : data, summary: data.blocked ? `Refused: ${data.reason}` : `${data.count} memory record(s).` };
       },
     },
     callerHash,
   );
+}
+
+/** Apply the existing ring gate before reading any exact or filtered record. */
+export async function searchAuthorizedMemory(
+  input: Parameters<typeof searchMemory>[0],
+  callerAgent: string | null | undefined,
+  search: typeof searchMemory = searchMemory,
+): Promise<{ count: number; records: MemoryRecord[]; blocked?: boolean; reason?: string }> {
+  const decision = evaluateMemorySearchAccess(callerAgent, input.agent);
+  if (!decision.allowed) return { count: 0, records: [], blocked: true, reason: decision.reason };
+
+  const effectiveInput = decision.forcedAgent ? { ...input, agent: decision.forcedAgent } : input;
+  // An exact ID always uses a single partition, including for executive callers.
+  const searchInput = input.id && !effectiveInput.agent
+    ? { ...effectiveInput, agent: callerAgent ?? undefined }
+    : effectiveInput;
+  let records = await search(searchInput);
+  if (decision.excludeClopersonalFromGlobal) records = records.filter((r) => r.agent !== 'clo-personal');
+  return { count: records.length, records };
 }
