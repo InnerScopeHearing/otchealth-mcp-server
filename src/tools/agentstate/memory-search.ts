@@ -125,7 +125,12 @@ export function registerMemorySearch(server: McpServer, callerHash: CallerHashPr
         }
 
         const effectiveInput = decision.forcedAgent ? { ...input, agent: decision.forcedAgent } : input;
-        let records: MemoryRecord[] = await searchMemory(effectiveInput);
+        // Exact IDs require a partition. An omitted agent means the caller's own lane,
+        // even for an executive caller who may otherwise run a cross-agent search.
+        const searchInput = input.id && !effectiveInput.agent
+          ? { ...effectiveInput, agent: ctx.callerAgent }
+          : effectiveInput;
+        let records: MemoryRecord[] = await searchMemory(searchInput);
         if (decision.excludeClopersonalFromGlobal) {
           records = records.filter((r) => r.agent !== 'clo-personal');
         }
