@@ -1026,6 +1026,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // It can submit only an allowlisted Brain read or checkpoint and then retrieve
   // the durable job receipt. It is never an arbitrary n8n API proxy.
   registerN8nChatActions(server, callerHash);
+  registerChatActionInventory(server, callerHash);
 
   // ===== Phase 3: Cloudflare (fleet email routing + DNS) =====
   registerCloudflareListEmailDestinations(server, callerHash);
