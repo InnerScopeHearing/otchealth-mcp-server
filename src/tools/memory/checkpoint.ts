@@ -311,14 +311,14 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         // (non-dry-run) checkpoint -- the dry_run branch returns early above. captureGatewayEvent is
         // fire-and-forget, inert unless POSTHOG_GATEWAYOPS_KEY is set, and never throws, so it cannot
         // add latency or a new failure mode to this response.
-        if (checkpoint) captureGatewayEvent('gw_checkpoint', { agent: input.agent, written: written.length, distilled }, ctx.callerHash);
+        if (checkpoint) captureGatewayEvent('gw_checkpoint', { agent: agent, written: written.length, distilled }, ctx.callerHash);
 
         return {
           data: { ...deliveryStatus, distilled, checkpoint, distillation_complete: distillationComplete },
           summary:
-            `checkpoint(${input.agent}): wrote ${written.length} memor${written.length === 1 ? 'y' : 'ies'}` +
+            `checkpoint(${agent}): wrote ${written.length} memor${written.length === 1 ? 'y' : 'ies'}` +
             ` (${distilled} distilled from summary). ` + (checkpoint ? 'Capture pressure reset.' : 'Delivery incomplete; capture pressure retained. Preserve written IDs, do not blindly repeat stored memories.'),
-          audit: { after: { agent: input.agent, written, distilled } },
+          audit: { after: { agent: agent, written, distilled } },
         };
       },
     },
