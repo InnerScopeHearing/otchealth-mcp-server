@@ -1,10 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { JsonWebKey } from 'node:crypto';
 
-function sha256(value: string): string | undefined {
-  return value ? createHash('sha256').update(value, 'utf8').digest('hex') : undefined;
-}
-
 export function heyGenPublicJwkFingerprint(publicJwkText: string): string | undefined {
   if (!publicJwkText) return undefined;
   try {
@@ -16,23 +12,4 @@ export function heyGenPublicJwkFingerprint(publicJwkText: string): string | unde
   } catch {
     return undefined;
   }
-}
-
-export function heyGenApprovalCompatibilityFingerprints(input: {
-  publicJwk: string;
-  contextSecret: string;
-  handleSecret: string;
-  callbackSecret: string;
-}): {
-  public_jwk_sha256?: string;
-  context_secret_sha256?: string;
-  handle_secret_sha256?: string;
-  callback_secret_sha256?: string;
-} {
-  return {
-    public_jwk_sha256: heyGenPublicJwkFingerprint(input.publicJwk),
-    context_secret_sha256: sha256(input.contextSecret),
-    handle_secret_sha256: sha256(input.handleSecret),
-    callback_secret_sha256: sha256(input.callbackSecret),
-  };
 }

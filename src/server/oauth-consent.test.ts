@@ -519,7 +519,7 @@ test('applyConsentPageHeaders sets the expected no-store / CSP / frame headers',
   assert.equal(asMap['cache-control'], 'no-store');
   assert.equal(asMap['x-frame-options'], 'DENY');
   assert.equal(asMap['x-content-type-options'], 'nosniff');
-  assert.equal(asMap['referrer-policy'], 'no-referrer');
+  assert.equal(asMap['referrer-policy'], 'strict-origin');
   assert.match(asMap['content-security-policy'], /default-src 'none'/);
   assert.match(asMap['content-security-policy'], /form-action 'self'/);
   assert.equal(typeCall, 'text/html; charset=utf-8');

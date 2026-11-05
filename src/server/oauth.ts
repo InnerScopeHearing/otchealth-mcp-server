@@ -21,7 +21,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
 import {
@@ -51,6 +51,29 @@ import { EXEC_RING } from '../tools/kb/search-privileged.js';
 import { isOAuthGrantType, type OAuthGrantType } from './request-context.js';
 
 const env = loadEnv();
+
+// One browser session cookie bounds header growth; form tokens remain tied to each
+// pending request. This is a CSRF defense, not evidence of owner identity.
+const CONSENT_COOKIE_NAME = '__Host-consent-session';
+function consentNonce(cookie: unknown): string | null {
+  if (typeof cookie !== 'string') return null;
+  const prefix = `${CONSENT_COOKIE_NAME}=`;
+  const values = cookie.split(';').map(value => value.trim()).filter(value => value.startsWith(prefix));
+  if (values.length !== 1) return null;
+  const nonce = values[0]!.slice(prefix.length);
+  return /^[a-f0-9]{64}$/.test(nonce) ? nonce : null;
+}
+function consentCsrf(pendingId: string, nonce: string): string {
+  return createHmac('sha256', env.OAUTH_TOKEN_SIGNING_SECRET)
+    .update(`oauth-consent-csrf-v1\0${pendingId}\0${nonce}`).digest('hex');
+}
+function validConsentBrowser(req: { headers: Record<string, unknown>; protocol: string; host: string }, pendingId: string, csrf: unknown): boolean {
+  if (typeof req.headers.origin !== 'string' || req.headers.origin !== new URL(baseUrlOf(req)).origin) return false;
+  if (typeof csrf !== 'string' || !/^[a-f0-9]{64}$/.test(csrf)) return false;
+  const nonce = consentNonce(req.headers.cookie);
+  if (!nonce) return false;
+  return timingSafeEqual(Buffer.from(csrf, 'hex'), Buffer.from(consentCsrf(pendingId, nonce), 'hex'));
+}
 
 /** OAuth 2.1 is "armed" only when a client id + signing secret are configured. */
 function oauthConfigured(): boolean {
@@ -112,9 +135,9 @@ function connectorSurfaceFor(clientId: string, client: ResolvedAnyClient): boole
 
 /** Exported so auth/bearer.ts can point a 401's WWW-Authenticate header at the same base URL the
  * OAuth metadata endpoints use (RFC 9728 protected-resource discovery) without re-deriving it. */
-export function baseUrlOf(req: { protocol: string; hostname: string }): string {
+export function baseUrlOf(req: { protocol: string; host: string }): string {
   if (env.PUBLIC_BASE_URL) return env.PUBLIC_BASE_URL.replace(/\/$/, '');
-  return `${req.protocol}://${req.hostname}`;
+  return `${req.protocol}://${req.host}`;
 }
 
 /** True for an RFC 8252 loopback redirect: http://127.0.0.1:PORT/... or http://[::1]:PORT/...
@@ -427,8 +450,10 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
         applyConsentPageHeaders(reply);
         return reply.status(500).send(renderDeadEndPage('server_error'));
       }
+      const nonce = consentNonce(req.headers.cookie) ?? randomBytes(32).toString('hex');
+      reply.header('set-cookie', `${CONSENT_COOKIE_NAME}=${nonce}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=1800`);
       applyConsentPageHeaders(reply, redirect_uri);
-      return reply.status(200).send(renderConsentPage(pending.id, undefined, pending.expiresAt));
+      return reply.status(200).send(renderConsentPage(pending.id, undefined, pending.expiresAt, Date.now(), consentCsrf(pending.id, nonce)));
     }
 
     const code = await createAuthCode({
@@ -460,6 +485,10 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
           : ((req.body ?? {}) as Record<string, string>);
       const pendingId = typeof body.pending_id === 'string' ? body.pending_id : '';
       const action = body.action === 'elevate' ? 'elevate' : body.action === 'readonly' ? 'readonly' : '';
+      if (isValidPendingAuthId(pendingId) && !validConsentBrowser(req, pendingId, body.csrf_token)) {
+        applyConsentPageHeaders(reply);
+        return reply.status(403).send(renderDeadEndPage('expired'));
+      }
 
       if (!isValidPendingAuthId(pendingId) || !action) {
         applyConsentPageHeaders(reply);
@@ -481,7 +510,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
       }
       if (resolved.outcome === 'retry') {
         applyConsentPageHeaders(reply, resolved.redirectUri);
-        return reply.status(200).send(renderConsentPage(pendingId, resolved.message, resolved.expiresAt));
+        return reply.status(200).send(renderConsentPage(pendingId, resolved.message, resolved.expiresAt, Date.now(), body.csrf_token));
       }
 
       // resolved.outcome === 'issue'. SECURITY (hostile-reviewer check): agentOverride here is

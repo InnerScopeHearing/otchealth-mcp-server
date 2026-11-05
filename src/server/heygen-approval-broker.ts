@@ -1,10 +1,10 @@
-import { createHash, createHmac, createPrivateKey, createPublicKey, randomBytes, sign, timingSafeEqual, type JsonWebKey } from 'node:crypto';
+import { createHmac, createPrivateKey, createPublicKey, randomBytes, sign, timingSafeEqual, type JsonWebKey } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import descopeSdk from '@descope/node-sdk';
 import { z } from 'zod';
 import { createHeyGenApprovalContextToken, verifyHeyGenApprovalContextToken } from '../tools/heygen/approval-context.js';
 import { encryptHeyGenOwnerApprovalHandle } from '../tools/heygen/approval-handle.js';
-import { heyGenApprovalCompatibilityFingerprints, heyGenPublicJwkFingerprint } from '../tools/heygen/approval-fingerprint.js';
+import { heyGenPublicJwkFingerprint } from '../tools/heygen/approval-fingerprint.js';
 
 const StartSchema = z.object({
   context_token: z.string().min(100).max(32_768),
@@ -212,18 +212,13 @@ export function registerHeyGenApprovalBrokerRoutes(app: FastifyInstance, injecte
         env.HEYGEN_APPROVAL_CONTEXT_SECRET.length >= 32 && env.HEYGEN_APPROVAL_HANDLE_SECRET.length >= 32 &&
         env.HEYGEN_APPROVAL_CALLBACK_SECRET.length >= 32 && env.HEYGEN_APPROVAL_CALLBACK_URL,
       );
-      const compatibility = heyGenApprovalCompatibilityFingerprints({
-        publicJwk: env.HEYGEN_OWNER_APPROVAL_PUBLIC_JWK,
-        contextSecret: env.HEYGEN_APPROVAL_CONTEXT_SECRET,
-        handleSecret: env.HEYGEN_APPROVAL_HANDLE_SECRET,
-        callbackSecret: env.HEYGEN_APPROVAL_CALLBACK_SECRET,
-      });
+      // This endpoint is public: only the public verifier key may be fingerprinted here.
+      const compatibility = { public_jwk_sha256: heyGenPublicJwkFingerprint(env.HEYGEN_OWNER_APPROVAL_PUBLIC_JWK) };
       return reply.code(configured ? 200 : 503).send({
         status: configured ? 'ok' : 'unconfigured',
         service: 'otchealth-approval-broker',
         issuer: env.HEYGEN_OWNER_APPROVAL_ISSUER,
         audience: env.HEYGEN_OWNER_APPROVAL_AUDIENCE,
-        subject_sha256: createHash('sha256').update(env.HEYGEN_OWNER_APPROVAL_SUBJECT).digest('hex'),
         key_id: key.kid,
         public_jwk_fingerprint_sha256: key.publicFingerprint,
         approval_compatibility: compatibility,
