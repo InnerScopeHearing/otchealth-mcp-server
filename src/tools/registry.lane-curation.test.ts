@@ -118,6 +118,10 @@ test('CTO Codex keeps inventory under curation while M365 and other lanes exclud
   const ctoM365 = await registeredToolNames('cto', true);
   const otherCodex = await registeredToolNames('coo', false, false, 'codex');
   assert.ok(ctoCodex.includes('chat_action_inventory'));
+  assert.ok(ctoOAuth.includes('chat_action_inventory'), 'non-connector CTO OAuth follows the same exact tool exception');
+  assert.ok(ctoConnector.includes('chat_action_inventory'), 'the CTO connector retains the normal ship allowlist');
+  const {connectorToolset}=await import('./registry.js');
+  assert.equal(connectorToolset({ CONNECTOR_TOOLSET:'brain_search' } as never,'cto').has('chat_action_inventory'),false, 'connector overrides continue to restrict the tool');
   assert.equal(ctoM365.includes('chat_action_inventory'), false);
   assert.equal(ctoM365.includes('action_inventory'), false);
   assert.equal(otherCodex.includes('chat_action_inventory'), false);
