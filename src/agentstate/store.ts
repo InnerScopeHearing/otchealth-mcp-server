@@ -22,6 +22,7 @@
 
 import * as cosmos from './cosmos.js';
 import * as postgres from './postgres.js';
+import type { TaskPageQuery } from './task-page-postgres.js';
 import { loadAgentStateBackend, type AgentStateBackend } from './runtime-config.js';
 
 export type StateBackend = AgentStateBackend;
@@ -107,4 +108,10 @@ export async function vectorSearchDocs(
  */
 export function newId(prefix: string): string {
   return cosmos.newId(prefix);
+}
+
+/** Paged reads are currently available only on PostgreSQL; never silently fall back. */
+export async function listTaskPage(input: TaskPageQuery): Promise<Record<string, unknown>[]> {
+  if (activeBackend() !== 'postgres') throw new Error('task_page_backend_unsupported');
+  return postgres.listTaskPage(input);
 }
