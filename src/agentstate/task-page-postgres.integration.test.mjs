@@ -48,16 +48,25 @@ test('paged task SQL runs against isolated CI PostgreSQL and preserves the priva
 
       const deps={isConfigured:()=>true,activeBackend:()=> 'postgres',listTasks:async()=>[],
         listTaskPage:input=>queryTaskPage(wrapper,input)};
-      let cursor, visible=[];
+      let cursor, visible=[], inserted=false;
       do {
         const result=await handleTaskList({board:'fixture',status:'open',view:'summary',paginate:true,limit:100,
           ...(cursor?{cursor}:{})},{callerAgent:'cto'},deps);
         assert.equal(result.data.snapshot,false);
         visible.push(...result.data.tasks);
         cursor=result.data.next_cursor??undefined;
+        if(!inserted) {
+          assert.ok(cursor);
+          const late={...records[0].doc,id:'t_0000a'};
+          await client.query('INSERT INTO agentstate_tasks (pk,id,doc) VALUES ($1,$2,$3)',
+            ['fixture',late.id,JSON.stringify(late)]);
+          inserted=true;
+        }
       } while(cursor);
       assert.equal(visible.length,249);
       assert.equal(visible.some(row=>row.id==='t_0003'||row.id==='t_0004'),false);
+      // A row inserted before the first cursor is intentionally not a snapshot member.
+      assert.equal(visible.some(row=>row.id==='t_0000a'),false);
       assert.equal(visible.find(row=>row.id==='t_0005').title,undefined);
       assert.doesNotMatch(JSON.stringify(visible),/synthetic-restricted|synthetic-detail|synthetic-note/);
 
