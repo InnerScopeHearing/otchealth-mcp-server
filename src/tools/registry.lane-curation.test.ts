@@ -96,19 +96,29 @@ test('native M365 registration adds the unambiguous public-web discovery compati
   }
 });
 
-test('DEFAULT (TOOL_CATALOG_CURATION_MODE unset) -- every known internal lane gets the FULL, uncurated catalog', async () => {
+test('DEFAULT keeps the full catalog with the single CTO-only inventory exception', async () => {
   delete process.env.TOOL_CATALOG_CURATION_MODE;
   const lanes = ['cto', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'developer', 'exec'];
-  const counts = await Promise.all(lanes.map((lane) => registeredToolCount(lane)));
-  const unscopedCount = await registeredToolCount('some-unscoped-lane');
+  const namesByLane = await Promise.all(lanes.map((lane) => registeredToolNames(lane)));
+  const unscoped = await registeredToolNames('some-unscoped-lane');
+  assert.equal(unscoped.includes('chat_action_inventory'), false, 'unscoped callers must not see the inventory');
   for (const [i, lane] of lanes.entries()) {
-    assert.equal(
-      counts[i],
-      unscopedCount,
-      `lane ${lane} should register the SAME tool count as an unscoped lane by default (got ${counts[i]} vs ${unscopedCount})`,
-    );
-    assert.ok(counts[i] >= 800, `lane ${lane} should see >= 800 tools by default, got ${counts[i]}`);
+    const names = namesByLane[i];
+    assert.equal(names.includes('chat_action_inventory'), lane === 'cto', `${lane} inventory visibility`);
+    assert.equal(names.length - (lane === 'cto' ? 1 : 0), unscoped.length, `${lane} retains the uncurated catalog aside from the CTO-only tool`);
+    assert.ok(names.length >= 800, `${lane} should retain the full catalog`);
   }
+});
+
+test('CTO Codex keeps inventory under curation while M365 and other lanes exclude it', async () => {
+  process.env.TOOL_CATALOG_CURATION_MODE = 'curate';
+  const ctoCodex = await registeredToolNames('cto', false, false, 'codex');
+  const ctoM365 = await registeredToolNames('cto', true);
+  const otherCodex = await registeredToolNames('coo', false, false, 'codex');
+  assert.ok(ctoCodex.includes('chat_action_inventory'));
+  assert.equal(ctoM365.includes('chat_action_inventory'), false);
+  assert.equal(ctoM365.includes('action_inventory'), false);
+  assert.equal(otherCodex.includes('chat_action_inventory'), false);
 });
 
 test("explicit TOOL_CATALOG_CURATION_MODE=report -- identical to the default (never restricts)", async () => {
