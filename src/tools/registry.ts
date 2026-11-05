@@ -1231,9 +1231,13 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         try { rejection = def.authorizeBeforeInput(rawArgs, callerAgent); }
         catch { rejection = { code: 'input_authorization_failed', message: 'Input authorization failed.' }; }
         if (rejection) {
+          const rawDryRun = rawArgs && typeof rawArgs === 'object'
+            ? (rawArgs as Record<string, unknown>).dry_run : undefined;
+          const deniedDryRun = typeof rawDryRun === 'boolean'
+            ? rawDryRun : (def.category === 'read' ? false : env.DRY_RUN_DEFAULT);
           return { isError: true, content: [{ type: 'text', text: rejection.message }],
             structuredContent: { result: null, compliance_warning: null, correlation_id: correlationId,
-              dry_run: false, error: rejection } };
+              dry_run: deniedDryRun, error: rejection } };
         }
       }
       const callerHash = callerHashProvider();
