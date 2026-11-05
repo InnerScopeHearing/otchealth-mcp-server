@@ -23,7 +23,7 @@ test('same-seat checkpoint and same-seat dry run preserve behavior',async()=>{
 });
 
 test('each named company lane including the dedicated WeFunder lane can checkpoint itself',async()=>{
- for(const lane of ['cto','developer','cfo','clo','coo','cro','cpo','cco','exec','wefunder-campaign-director']){const {f}=await run(lane,lane,false);assert.deepEqual(f.writes.map(x=>x.agent),[lane,lane],lane);}
+ for(const lane of ['cto','developer','cfo','clo','coo','cro','cpo','cco','exec','wefunder-campaign-director','agents-shared']){const {f}=await run(lane,lane,false);assert.deepEqual(f.writes.map(x=>x.agent),[lane,lane],lane);}
 });
 
 test('direct worker adapter refuses foreign target before checking configured store',async()=>{
