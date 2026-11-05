@@ -175,7 +175,7 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'wake', 'checkpoint', 'memory_recall', 'memory_search', 'memory_write', 'memory_remember', 'memory_pack', 'memory_team', 'memory_inbound', 'memory_reconcile',
   // Narrow durable bridge for ordinary Chat: exactly the allowlisted Brain
   // search/checkpoint action contract, never direct n8n administration.
-  'chat_action_submit', 'chat_action_status', 'chat_action_result',
+  'chat_action_submit', 'chat_action_status', 'chat_action_result', 'chat_action_inventory',
   // Wave 7 item 7.1: opt-in feedback reporting on a brain_search/kb_search hit (see kb/search.ts,
   // kb/brain-search.ts, memory/retrieval-feedback.ts). Not added to EXTERNAL_READONLY_TOOLSET below,
   // which deliberately excludes every write tool by design; the ship lane is where this is needed.
