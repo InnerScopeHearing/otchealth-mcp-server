@@ -113,6 +113,8 @@ test('DEFAULT keeps the full catalog with the single CTO-only inventory exceptio
 test('CTO Codex keeps inventory under curation while M365 and other lanes exclude it', async () => {
   process.env.TOOL_CATALOG_CURATION_MODE = 'curate';
   const ctoCodex = await registeredToolNames('cto', false, false, 'codex');
+  const ctoOAuth = await registeredToolNames('cto', false, false, 'oauth');
+  const ctoConnector = await registeredToolNames('cto', false, true, 'oauth');
   const ctoM365 = await registeredToolNames('cto', true);
   const otherCodex = await registeredToolNames('coo', false, false, 'codex');
   assert.ok(ctoCodex.includes('chat_action_inventory'));
