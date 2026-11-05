@@ -1285,8 +1285,6 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       const acknowledged = args.acknowledge_warning === true;
 
       // Governance: every agent SEES every tool, but some actions are role-gated for EXECUTION.
-      const callerAgent = currentCallerAgent();
-
       // Curation is not authorization. Cached/internal/alias calls must respect the same bounded
       // Developer grant before previews, handlers or upstream requests. Never fall back to a
       // fleet-global credential for a Developer catalog write.
