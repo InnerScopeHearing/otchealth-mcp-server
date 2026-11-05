@@ -112,20 +112,39 @@ export async function getMemory(id: string, agent: string): Promise<MemoryRecord
   return hit ? (hit.doc as unknown as MemoryRecord) : null;
 }
 
+export async function getExactMemory(id: string, agent: string, read: typeof readDoc = readDoc): Promise<MemoryRecord | null> {
+  const partition = normalizeAgent(agent);
+  // Match the guards used by both backends before entering the provider error boundary.
+  if (typeof id !== 'string' || !/^[A-Za-z0-9_.\-]{1,255}$/.test(id) || /^\.+$/.test(id)) {
+    throw new Error('invalid id (must match the agent-state id charset)');
+  }
+  let hit: Awaited<ReturnType<typeof readDoc>>;
+  try {
+    hit = await read(MEMORY, partition, id);
+  } catch {
+    throw new Error('memory_search_provider_failure');
+  }
+  if (!hit) return null;
+  if (hit.doc == null) throw new CorruptMemoryRecordError();
+  return hit.doc as unknown as MemoryRecord;
+}
+
 export async function searchMemory(filter: {
   agent?: string;
   id?: string;
   kind?: MemoryKind;
   contains?: string;
   limit?: number;
-}, readExact: typeof getMemory = getMemory): Promise<MemoryRecord[]> {
+}, readExact: typeof getMemory = getExactMemory): Promise<MemoryRecord[]> {
   // IDs are partitioned by agent. Never turn an exact lookup into an unscoped scan.
   if (filter.id !== undefined) {
     if (!filter.agent) throw new Error('An agent is required for an exact memory ID lookup');
     const agent = normalizeAgent(filter.agent);
     const record = await readExact(filter.id, agent);
-    if (!record || record.type !== 'memory' || record.id !== filter.id || normalizeAgent(record.agent) !== agent ||
-        (filter.kind && record.kind !== filter.kind) ||
+    if (record === null) return [];
+    const parsed = exactRecordSchema.safeParse(record);
+    if (!parsed.success || parsed.data.id !== filter.id || parsed.data.agent !== agent) throw new CorruptMemoryRecordError();
+    if ((filter.kind && record.kind !== filter.kind) ||
         (filter.contains && !record.text.toLowerCase().includes(filter.contains.toLowerCase()))) return [];
     return [record];
   }
