@@ -144,6 +144,15 @@ async function recallHandlerImpl(
     return { data: { matches: [], count: 0, mode: 'ring-forbidden' }, summary: 'Refused: personal-legal shared-memory rows are not available to this caller.' };
   }
 
+  // A structured-memory ID is not a shared-feed ID. Never return unrelated semantic matches
+  // as if they identified that record; no structured-store lookup is performed here.
+  if (/^(?:[a-z0-9][a-z0-9_-]{0,40}__)?m_(?:[a-z0-9]+_[a-f0-9]{8}|idem_[a-f0-9]{64})$/i.test(input.query.trim())) {
+    return {
+      data: { matches: [], count: 0, mode: 'structured-id-unsupported' },
+      summary: 'This looks like a structured memory-record ID. Shared-memory recall did not look it up; use an authorized exact memory-search ID lookup when available.',
+    };
+  }
+
   // Exact shared-feed identifiers must not be sent through semantic ranking: hybrid search can
   // return a related row with a different ID. Agent-qualified IDs address the exact feed blob;
   // bare IDs with an explicit agent filter use the same single-feed read.

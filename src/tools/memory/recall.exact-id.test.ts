@@ -169,3 +169,22 @@ test('a suffixed legacy ID cannot bypass the restricted-agent gate', async () =>
   assert.equal((result.data as { mode: string }).mode, 'ring-forbidden');
   assert.equal(feedReads, 0);
 });
+
+test('structured record IDs never fall back to unrelated semantic matches', async () => {
+  let retrievals = 0;
+  const context = { correlationId: 'test', callerHash: 'test', dryRun: false, acknowledgeWarning: false, callerAgent: 'cto' };
+  const dependencies = {
+    getRetractionSnapshot: async () => { retrievals++; return { byAgent: new Map<string, Set<string>>(), verified: true }; },
+    cachedAgenticRecall: async () => { retrievals++; throw new Error('unexpected semantic call'); },
+    readSharedAll: async () => { retrievals++; return []; },
+  };
+  for (const query of ['m_mui95fb5_d4a94838', 'cto__m_mui95fb5_d4a94838', `m_idem_${'a'.repeat(64)}`]) {
+    for (const include_superseded of [false, true]) {
+      const result = await recallHandler({ query, include_superseded }, context, dependencies as any);
+      assert.equal((result.data as { mode: string }).mode, 'structured-id-unsupported');
+      assert.deepEqual((result.data as { matches: unknown[] }).matches, []);
+      assert.match(result.summary ?? '', /did not look it up/);
+    }
+  }
+  assert.equal(retrievals, 0);
+});
