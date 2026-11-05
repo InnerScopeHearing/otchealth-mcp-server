@@ -10,10 +10,25 @@
  */
 
 import { createDoc, readDoc, queryDocs, replaceDoc, newId } from './store.js';
-import { normalizeAgent, type MemoryKind } from './agents.js';
+import { normalizeAgent, MEMORY_KINDS, type MemoryKind } from './agents.js';
+import { z } from 'zod';
 import { persistMemoryOnce, type MemoryWriteIntent } from './memory-idempotency.js';
 
 const MEMORY = 'memory';
+
+// Validate at the storage boundary; never include a corrupt row in an error.
+const exactRecordSchema = z.object({
+  id: z.string().min(1), type: z.literal('memory'), agent: z.string().min(1),
+  kind: z.enum(MEMORY_KINDS), text: z.string(), tags: z.array(z.string()),
+  source: z.string().nullable(), created_at: z.string(),
+  supersedes: z.string().nullable().optional(),
+  idempotency: z.object({ payloadSha256: z.string(), requestedSupersedes: z.string().nullable().optional() }).passthrough().optional(),
+  indexing: z.object({ state: z.enum(['pending', 'indexed']), attempts: z.number(), updated_at: z.string() }).passthrough().optional(),
+}).passthrough();
+
+export class CorruptMemoryRecordError extends Error {
+  constructor() { super('memory_record_corrupt'); this.name = 'CorruptMemoryRecordError'; }
+}
 
 export interface MemoryRecord {
   id: string;
@@ -97,12 +112,42 @@ export async function getMemory(id: string, agent: string): Promise<MemoryRecord
   return hit ? (hit.doc as unknown as MemoryRecord) : null;
 }
 
+export async function getExactMemory(id: string, agent: string, read: typeof readDoc = readDoc): Promise<MemoryRecord | null> {
+  const partition = normalizeAgent(agent);
+  // Match the guards used by both backends before entering the provider error boundary.
+  if (typeof id !== 'string' || !/^[A-Za-z0-9_.\-]{1,255}$/.test(id) || /^\.+$/.test(id)) {
+    throw new Error('invalid id (must match the agent-state id charset)');
+  }
+  let hit: Awaited<ReturnType<typeof readDoc>>;
+  try {
+    hit = await read(MEMORY, partition, id);
+  } catch {
+    throw new Error('memory_search_provider_failure');
+  }
+  if (!hit) return null;
+  if (hit.doc == null) throw new CorruptMemoryRecordError();
+  return hit.doc as unknown as MemoryRecord;
+}
+
 export async function searchMemory(filter: {
   agent?: string;
+  id?: string;
   kind?: MemoryKind;
   contains?: string;
   limit?: number;
-}): Promise<MemoryRecord[]> {
+}, readExact: typeof getMemory = getExactMemory): Promise<MemoryRecord[]> {
+  // IDs are partitioned by agent. Never turn an exact lookup into an unscoped scan.
+  if (filter.id !== undefined) {
+    if (!filter.agent) throw new Error('An agent is required for an exact memory ID lookup');
+    const agent = normalizeAgent(filter.agent);
+    const record = await readExact(filter.id, agent);
+    if (record === null) return [];
+    const parsed = exactRecordSchema.safeParse(record);
+    if (!parsed.success || parsed.data.id !== filter.id || parsed.data.agent !== agent) throw new CorruptMemoryRecordError();
+    if ((filter.kind && record.kind !== filter.kind) ||
+        (filter.contains && !record.text.toLowerCase().includes(filter.contains.toLowerCase()))) return [];
+    return [record];
+  }
   const conds: string[] = ["c.type = 'memory'"];
   const params: { name: string; value: unknown }[] = [];
   let pk: string | undefined;
