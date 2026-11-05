@@ -23,7 +23,7 @@ const RECALL_OUTPUT_SHAPE = {
   mode: z.string(),
 };
 
-const EXACT_SHARED_ID = /^(?:([a-z0-9][a-z0-9_-]{0,40})__)?(\d{8}-(?:[a-fA-F0-9]{12}|\d{3}))(?:\s+((?=[A-Z0-9-]*\d)[A-Z0-9]+(?:-[A-Z0-9]+){2,}))?$/;
+const EXACT_SHARED_ID = /^(?:([a-z0-9][a-z0-9_-]{0,40})__)?(\d{8}-(?:[a-fA-F0-9]{12}|\d{3}(?:-[a-fA-F0-9]{4})?))(?:\s+((?=[A-Z0-9-]*\d)[A-Z0-9]+(?:-[A-Z0-9]+){2,}))?$/;
 
 /** Recognize a whole stored ID, optionally followed by one opaque uppercase test marker. */
 export function parseExactSharedIdQuery(query: string): { agent: string | null; id: string; marker: string | null } | null {
