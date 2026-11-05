@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, type JsonWebKey } from 'node:crypto';
+import { createHash, generateKeyPairSync, type JsonWebKey } from 'node:crypto';
 import Fastify from 'fastify';
 import { createHeyGenApprovalContextToken } from '../tools/heygen/approval-context.js';
 import { decryptHeyGenOwnerApprovalHandle } from '../tools/heygen/approval-handle.js';
@@ -140,7 +140,7 @@ test('approval broker rejects reserve drift and a non-owner OTP identity', async
   await app.close();
 });
 
-test('approval broker health proves matching key configuration without exposing private material', async () => {
+test('approval broker health exposes only the public key fingerprint', async () => {
   env();
   const app = Fastify({ logger: false });
   registerHeyGenApprovalBrokerRoutes(app, {
@@ -154,8 +154,11 @@ test('approval broker health proves matching key configuration without exposing 
   assert.equal(body.key_id, 'heygen-owner-2026-01');
   assert.match(body.public_jwk_fingerprint_sha256, /^[a-f0-9]{64}$/);
   assert.equal(body.approval_compatibility.public_jwk_sha256, body.public_jwk_fingerprint_sha256);
-  for (const key of ['context_secret_sha256', 'handle_secret_sha256', 'callback_secret_sha256']) {
-    assert.match(body.approval_compatibility[key], /^[a-f0-9]{64}$/);
+  assert.deepEqual(Object.keys(body.approval_compatibility), ['public_jwk_sha256']);
+  const serialized = JSON.stringify(body);
+  for (const secret of [CONTEXT, HANDLE, CALLBACK, process.env.HEYGEN_OWNER_APPROVAL_SUBJECT!]) {
+    assert.ok(!serialized.includes(secret));
+    assert.ok(!serialized.includes(createHash('sha256').update(secret, 'utf8').digest('hex')));
   }
   assert.ok(!JSON.stringify(body).includes(String(privateJwk.d)));
   await app.close();

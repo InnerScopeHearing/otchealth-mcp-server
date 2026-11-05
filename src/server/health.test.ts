@@ -1,5 +1,6 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 
 // Set required env vars before importing the module (loadEnv runs at import time).
 before(() => {
@@ -10,12 +11,23 @@ before(() => {
     PERPLEXITY_CONNECTOR_TOKEN: 'a'.repeat(32),
     ADMIN_REVOKE_TOKEN: 'b'.repeat(32),
     N8N_WEBHOOK_SECRET: 'c'.repeat(32),
+    HEYGEN_OWNER_APPROVAL_SUBJECT: 'synthetic-owner@example.invalid',
+    HEYGEN_APPROVAL_CONTEXT_SECRET: 'synthetic-context-approval-secret-0001',
+    HEYGEN_APPROVAL_HANDLE_SECRET: 'synthetic-handle-approval-secret-0002',
+    HEYGEN_APPROVAL_CALLBACK_SECRET: 'synthetic-callback-approval-secret-0003',
     NODE_ENV: 'test',
     REVOCATION_MEMORY_ONLY_MODE: 'development',
   };
-  for (const [k, v] of Object.entries(required)) {
-    process.env[k] ??= v;
-  }
+  // This test file owns its child-process configuration; never inherit real credentials or
+  // approval settings from the invoking environment.
+  for (const [k, v] of Object.entries(required)) process.env[k] = v;
+  for (const name of ['HEYGEN_OWNER_APPROVAL_PUBLIC_JWK', 'HEYGEN_APPROVAL_BROKER_URL',
+    'HEYGEN_OWNER_APPROVAL_ISSUER', 'HEYGEN_OWNER_APPROVAL_AUDIENCE']) delete process.env[name];
+  for (const name of ['ENABLE_HEYGEN_PROVIDER_WRITES', 'ENABLE_HEYGEN_PROMPT_AVATAR_WRITES',
+    'ENABLE_HEYGEN_AVATAR_VIDEO_WRITES', 'ENABLE_HEYGEN_REFERENCE_LOOK_WRITES',
+    'ENABLE_HEYGEN_VIDEO_AGENT_CHAT_WRITES', 'ENABLE_HEYGEN_VIDEO_AGENT_GENERATION',
+    'ENABLE_HEYGEN_ASSET_WRITES', 'ENABLE_HEYGEN_TRANSLATION_WRITES',
+    'ENABLE_HEYGEN_TTS_WRITES', 'ENABLE_HEYGEN_METADATA_WRITES']) process.env[name] = 'false';
 });
 
 test('buildHealthPayload returns expected shape with status ok', async () => {
@@ -48,20 +60,22 @@ test('buildHealthPayload returns expected shape with status ok', async () => {
       'heygen_video_wait_ingest_qa',
     ],
     owner_approval_verifier_configured: false,
-    owner_approval_context_configured: false,
-    owner_approval_handle_configured: false,
-    owner_approval_callback_configured: false,
+    owner_approval_context_configured: true,
+    owner_approval_handle_configured: true,
+    owner_approval_callback_configured: true,
     owner_approval_broker_configured: false,
     owner_approval_issuer: 'https://approval.otchealth.app',
     owner_approval_audience: 'otchealth-heygen',
-    owner_approval_subject_sha256: undefined,
     owner_approval_compatibility: {
       public_jwk_sha256: undefined,
-      context_secret_sha256: undefined,
-      handle_secret_sha256: undefined,
-      callback_secret_sha256: undefined,
     },
   });
+  const serialized = JSON.stringify(payload);
+  for (const name of ['HEYGEN_OWNER_APPROVAL_SUBJECT', 'HEYGEN_APPROVAL_CONTEXT_SECRET', 'HEYGEN_APPROVAL_HANDLE_SECRET', 'HEYGEN_APPROVAL_CALLBACK_SECRET']) {
+    const secret = process.env[name]!;
+    assert.ok(!serialized.includes(secret));
+    assert.ok(!serialized.includes(createHash('sha256').update(secret, 'utf8').digest('hex')));
+  }
 });
 
 test('buildHealthPayload reports degraded readiness while preserving liveness', async () => {
