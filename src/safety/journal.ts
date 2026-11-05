@@ -60,11 +60,12 @@ export function isPrivilegedOrLegalTool(toolName: string): boolean {
  * Tool calls whose arguments must never enter the shared auto-journal. Direct GitHub repository
  * writes can contain complete files, issue/PR prose, review comments, workflow inputs, or sensitive
  * ref names. Their successful execution is still journaled as {tool, actor, outcome}, but the
- * destination-specific payload remains only at GitHub.
+ * destination-specific payload remains only at GitHub. Checkpoint inputs and result artifacts
+ * may contain session memory, so those are excluded from the shared journal as well.
  */
 export function suppressJournalArgs(toolName: string): boolean {
   const canonicalGitHubName = toolName.startsWith('github_') ? toolName : `github_${toolName}`;
-  return isPrivilegedOrLegalTool(toolName) || isGitHubRepositoryWriteTool(canonicalGitHubName);
+  return toolName.toLowerCase() === 'checkpoint' || isPrivilegedOrLegalTool(toolName) || isGitHubRepositoryWriteTool(canonicalGitHubName);
 }
 
 const PEM_RE = /-----BEGIN [A-Z0-9 ]*(PRIVATE KEY|CERTIFICATE|RSA PRIVATE KEY|EC PRIVATE KEY)-----/;
