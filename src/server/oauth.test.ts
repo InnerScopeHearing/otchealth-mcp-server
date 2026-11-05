@@ -806,7 +806,7 @@ test('consent rejects forged sessions and origins without consuming pending requ
   const other = await app.inject({ method: 'GET', url });
   const pending = page.payload.match(/name="pending_id" value="([a-f0-9]{32})"/)![1];
   const browser = browserConsent(page);
-  assert.match(String(page.headers['set-cookie']), /^__Host-consent-[a-f0-9]{32}=[a-f0-9]{64}; Path=\/; Secure; HttpOnly; SameSite=Strict; Max-Age=1800$/);
+  assert.match(String(page.headers['set-cookie']), /^__Host-consent-session=[a-f0-9]{64}; Path=\/; Secure; HttpOnly; SameSite=Lax; Max-Age=1800$/);
   const cases = [
     { headers: { ...browser.headers, origin: 'https://attacker.invalid' }, csrf: browser.csrf },
     { headers: { ...browser.headers, origin: 'null' }, csrf: browser.csrf },
@@ -824,11 +824,60 @@ test('consent rejects forged sessions and origins without consuming pending requ
   }
   const legitimate = await app.inject({ method:'POST',url:'/oauth/authorize/consent',headers:browser.headers,payload:`pending_id=${pending}&action=readonly&csrf_token=${browser.csrf}` });
   assert.equal(legitimate.statusCode,302, 'invalid submissions must not consume pending auth');
-  assert.match(String(legitimate.headers['set-cookie']), new RegExp(`^__Host-consent-${pending}=;.*Max-Age=0`), 'successful consent clears its own cookie');
+  assert.equal(legitimate.headers['set-cookie'], undefined, 'success keeps the shared session for other pages');
   const otherPending = other.payload.match(/name="pending_id" value="([a-f0-9]{32})"/)![1];
   const otherBrowser = browserConsent(other);
   const otherLegitimate = await app.inject({ method:'POST',url:'/oauth/authorize/consent',headers:otherBrowser.headers,payload:`pending_id=${otherPending}&action=readonly&csrf_token=${otherBrowser.csrf}` });
   assert.equal(otherLegitimate.statusCode,302, 'concurrent consent tabs must not invalidate each other');
+  await app.close();
+});
+
+test('abandoned consent pages keep the browser cookie header bounded', async () => {
+  const { default: Fastify } = await import('fastify'); const { registerOAuthRoutes } = await import('./oauth.js');
+  const app = Fastify(); addFormUrlEncodedParser(app); const stack = fakeConsentStack(); registerOAuthRoutes(app, stack);
+  const clientId = await registerDcrClient(app); const { challenge } = pkcePair();
+  const url = `/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CLAUDE_CALLBACK)}&response_type=code&code_challenge=${challenge}&code_challenge_method=S256`;
+  const jar = new Map<string,string>();
+  for (let i=0;i<80;i++) {
+    const cookie = [...jar].map(([name,value])=>`${name}=${value}`).join('; ');
+    const page = await app.inject({method:'GET',url,headers:cookie ? {cookie} : {}});
+    assert.equal(page.statusCode,200);
+    const pair=String(page.headers['set-cookie']).split(';')[0]!;
+    const idx=pair.indexOf('='); jar.set(pair.slice(0,idx),pair.slice(idx+1));
+  }
+  assert.equal(jar.size,1,'80 abandoned pages must not create 80 cookies');
+  assert.ok([...jar].map(([name,value])=>`${name}=${value}`).join('; ').length < 128);
+  await app.close();
+});
+
+test('shared consent cookie preserves concurrent pending forms and binds tokens to each form', async () => {
+  const { default: Fastify } = await import('fastify'); const { registerOAuthRoutes } = await import('./oauth.js');
+  const app=Fastify(); addFormUrlEncodedParser(app); const stack=fakeConsentStack(); registerOAuthRoutes(app,stack);
+  const clientId=await registerDcrClient(app); const {challenge}=pkcePair();
+  const url=`/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CLAUDE_CALLBACK)}&response_type=code&code_challenge=${challenge}&code_challenge_method=S256`;
+  const first=await app.inject({method:'GET',url});const a=browserConsent(first);
+  const second=await app.inject({method:'GET',url,headers:{cookie:a.headers.cookie!}});const b=browserConsent(second);
+  assert.equal(a.headers.cookie,b.headers.cookie); assert.notEqual(a.csrf,b.csrf);
+  const id=(page:{payload:string})=>page.payload.match(/name="pending_id" value="([a-f0-9]{32})"/)![1]!;
+  const post=(pending:string,csrf:string,cookie:string)=>app.inject({method:'POST',url:'/oauth/authorize/consent',headers:{...a.headers,cookie},payload:`pending_id=${pending}&action=readonly&csrf_token=${csrf}`});
+  assert.equal((await post(id(first),b.csrf,a.headers.cookie!)).statusCode,403,'another pending form cannot authorize this one');
+  assert.equal((await post(id(first),a.csrf,a.headers.cookie!)).statusCode,302);
+  assert.equal((await post(id(second),b.csrf,a.headers.cookie!)).statusCode,302,'the first result does not clear the other tab');
+  await app.close();
+});
+
+test('simultaneous first pages fail closed for the displaced session, and cookie eviction requires restart', async () => {
+  const { default: Fastify }=await import('fastify');const {registerOAuthRoutes}=await import('./oauth.js');
+  const app=Fastify();addFormUrlEncodedParser(app);const stack=fakeConsentStack();registerOAuthRoutes(app,stack);
+  const clientId=await registerDcrClient(app);const {challenge}=pkcePair();
+  const url=`/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CLAUDE_CALLBACK)}&response_type=code&code_challenge=${challenge}&code_challenge_method=S256`;
+  const [first,second]=await Promise.all([app.inject({method:'GET',url}),app.inject({method:'GET',url})]);
+  const a=browserConsent(first),b=browserConsent(second);assert.notEqual(a.headers.cookie,b.headers.cookie);
+  const id=(page:{payload:string})=>page.payload.match(/name="pending_id" value="([a-f0-9]{32})"/)![1]!;
+  const post=(pending:string,csrf:string,cookie:string)=>app.inject({method:'POST',url:'/oauth/authorize/consent',headers:{...a.headers,cookie},payload:`pending_id=${pending}&action=readonly&csrf_token=${csrf}`});
+  assert.equal((await post(id(first),a.csrf,b.headers.cookie!)).statusCode,403,'last arriving first-session cookie displaces the other form');
+  assert.equal((await post(id(first),a.csrf,'')).statusCode,403,'an expired or evicted session cannot authorize');
+  assert.equal((await post(id(second),b.csrf,b.headers.cookie!)).statusCode,302);
   await app.close();
 });
 
@@ -851,7 +900,7 @@ test('consent accepts the exact forwarded HTTPS origin including a non-default p
   await app.close();
 });
 
-test('retry keeps the session, while exhausted or expired consent clears only that pending cookie', async () => {
+test('retry, exhausted and expired consent preserve the shared session cookie', async () => {
   const { default: Fastify } = await import('fastify');
   const { registerOAuthRoutes } = await import('./oauth.js');
   const app = Fastify(); addFormUrlEncodedParser(app);
@@ -868,12 +917,12 @@ test('retry keeps the session, while exhausted or expired consent clears only th
     assert.ok(rendered, 'retry must render a usable CSRF token'); csrf = rendered[1]!;
   }
   const burned = await send(); assert.equal(burned.statusCode,400);
-  assert.match(String(burned.headers['set-cookie']),new RegExp(`^__Host-consent-${pending}=;.*Max-Age=0`));
+  assert.equal(burned.headers['set-cookie'],undefined);
   const expiredPage = await app.inject({method:'GET',url}); const expiredBrowser = browserConsent(expiredPage);
   const expiredId = expiredPage.payload.match(/name="pending_id" value="([a-f0-9]{32})"/)![1]!;
   stack.store.get(`connector-pending-auth_${expiredId}`)!.doc.expiresAt = new Date(0).toISOString();
   const expired = await app.inject({method:'POST',url:'/oauth/authorize/consent',headers:expiredBrowser.headers,payload:`pending_id=${expiredId}&action=readonly&csrf_token=${expiredBrowser.csrf}`});
   assert.equal(expired.statusCode,400);
-  assert.match(String(expired.headers['set-cookie']),new RegExp(`^__Host-consent-${expiredId}=;.*Max-Age=0`));
+  assert.equal(expired.headers['set-cookie'],undefined);
   await app.close();
 });

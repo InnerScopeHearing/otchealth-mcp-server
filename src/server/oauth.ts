@@ -52,21 +52,26 @@ import { isOAuthGrantType, type OAuthGrantType } from './request-context.js';
 
 const env = loadEnv();
 
-// Browser binding is a CSRF defense, not evidence of owner identity. The cookie is
-// unique per pending request so concurrent connector tabs do not invalidate each other.
-function consentCookieName(pendingId: string): string { return `__Host-consent-${pendingId}`; }
+// One browser session cookie bounds header growth; form tokens remain tied to each
+// pending request. This is a CSRF defense, not evidence of owner identity.
+const CONSENT_COOKIE_NAME = '__Host-consent-session';
+function consentNonce(cookie: unknown): string | null {
+  if (typeof cookie !== 'string') return null;
+  const prefix = `${CONSENT_COOKIE_NAME}=`;
+  const values = cookie.split(';').map(value => value.trim()).filter(value => value.startsWith(prefix));
+  if (values.length !== 1) return null;
+  const nonce = values[0]!.slice(prefix.length);
+  return /^[a-f0-9]{64}$/.test(nonce) ? nonce : null;
+}
 function consentCsrf(pendingId: string, nonce: string): string {
   return createHmac('sha256', env.OAUTH_TOKEN_SIGNING_SECRET)
     .update(`oauth-consent-csrf-v1\0${pendingId}\0${nonce}`).digest('hex');
 }
 function validConsentBrowser(req: { headers: Record<string, unknown>; protocol: string; host: string }, pendingId: string, csrf: unknown): boolean {
   if (typeof req.headers.origin !== 'string' || req.headers.origin !== new URL(baseUrlOf(req)).origin) return false;
-  if (typeof req.headers.cookie !== 'string' || typeof csrf !== 'string' || !/^[a-f0-9]{64}$/.test(csrf)) return false;
-  const name = consentCookieName(pendingId);
-  const values = req.headers.cookie.split(';').map((v) => v.trim()).filter((v) => v.startsWith(`${name}=`));
-  if (values.length !== 1) return false;
-  const nonce = values[0]!.slice(name.length + 1);
-  if (!/^[a-f0-9]{64}$/.test(nonce)) return false;
+  if (typeof csrf !== 'string' || !/^[a-f0-9]{64}$/.test(csrf)) return false;
+  const nonce = consentNonce(req.headers.cookie);
+  if (!nonce) return false;
   return timingSafeEqual(Buffer.from(csrf, 'hex'), Buffer.from(consentCsrf(pendingId, nonce), 'hex'));
 }
 
@@ -445,8 +450,8 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
         applyConsentPageHeaders(reply);
         return reply.status(500).send(renderDeadEndPage('server_error'));
       }
-      const nonce = randomBytes(32).toString('hex');
-      reply.header('set-cookie', `${consentCookieName(pending.id)}=${nonce}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=1800`);
+      const nonce = consentNonce(req.headers.cookie) ?? randomBytes(32).toString('hex');
+      reply.header('set-cookie', `${CONSENT_COOKIE_NAME}=${nonce}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=1800`);
       applyConsentPageHeaders(reply, redirect_uri);
       return reply.status(200).send(renderConsentPage(pending.id, undefined, pending.expiresAt, Date.now(), consentCsrf(pending.id, nonce)));
     }
@@ -500,7 +505,6 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
         return reply.status(500).send(renderDeadEndPage('server_error'));
       }
       if (resolved.outcome === 'burned') {
-        reply.header('set-cookie', `${consentCookieName(pendingId)}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0`);
         applyConsentPageHeaders(reply);
         return reply.status(400).send(renderDeadEndPage('expired'));
       }
@@ -527,7 +531,6 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
         { type: 'oauth_authorize_consent', elevated: Boolean(resolved.agentOverride) },
         'issued auth code via the consent interstitial',
       );
-      reply.header('set-cookie', `${consentCookieName(pendingId)}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0`);
       reply.header('cache-control', 'no-store');
       return reply.status(302).redirect(url);
     } catch (e) {
