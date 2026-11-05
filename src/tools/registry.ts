@@ -759,6 +759,9 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
   /** Maximum UTF-8 bytes for the complete inline MCP response, including text and structured content. */
   maxResponseBytes?: number;
   handler: ToolHandler<z.infer<z.ZodObject<Shape>>>;
+  /** Pure, fail-closed authorization before input logging, shields or handlers. */
+  authorizeBeforeInput?: (input: unknown, callerAgent: string) => { code: string; message: string } | null;
+
   /** Optional safe projection for structured start logs and mutation journaling when raw inputs contain sensitive text. */
   redactInputForLog?: (input: Record<string, unknown>) => unknown;
   /** Short-lived login grants must not become journal artifacts or result-offload records. */
