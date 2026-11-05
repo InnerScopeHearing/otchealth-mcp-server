@@ -292,11 +292,11 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         // An episode alone cannot hide a failed explicit memory or requested distillation.
         const episodeText = buildEpisodeText({
           tool: 'checkpoint',
-          actor: input.agent,
+          actor: agent,
           outcome: distillationComplete && deliveries.every(item => item.stored && item.indexed) ? 'delivery_pending_episode' : 'partial',
           redactedArgs: { memories: memoriesIn.length, has_summary: Boolean(input.summary) },
         });
-        const episode = await deps.deliver(input.agent, 'episode', episodeText, {
+        const episode = await deps.deliver(agent, 'episode', episodeText, {
           tags: ['checkpoint'],
           source: `correlation:${ctx.correlationId}`,
         });
