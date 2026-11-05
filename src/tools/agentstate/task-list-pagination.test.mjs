@@ -30,6 +30,16 @@ test('legacy default and summary retain their response and filters',async()=>{
   assert.equal(summary.data.next_cursor,undefined);
 });
 
+test('paged requests fail closed when storage is unavailable while legacy output stays unchanged',async()=>{
+  const f=fixture([]);
+  const deps={...f.deps,isConfigured:()=>false};
+  const legacy=await handleTaskList({}, {callerAgent:'cto'}, deps);
+  assert.deepEqual(legacy.data,{count:0,tasks:[],note:'agent-state Cosmos not configured.'});
+  await assert.rejects(handleTaskList({paginate:true,view:'summary'}, {callerAgent:'cto'}, deps),/task_page_unavailable/);
+  await assert.rejects(handleTaskList({paginate:true,view:'summary',cursor:'invalid'}, {callerAgent:'cto'}, deps),/task_page_unavailable/);
+  assert.deepEqual(f.seen,[]);
+});
+
 test('paged summary enumerates 251 synthetic tasks with real privacy checks',async()=>{
   const data=Array.from({length:251},(_,i)=>mk(i));
   data[2]=mk(2,{created_by:'clo-personal',detail_readers:['clo-personal'],title:'hidden-synthetic'});
