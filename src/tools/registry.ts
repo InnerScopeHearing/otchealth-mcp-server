@@ -759,6 +759,9 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
   /** Maximum UTF-8 bytes for the complete inline MCP response, including text and structured content. */
   maxResponseBytes?: number;
   handler: ToolHandler<z.infer<z.ZodObject<Shape>>>;
+  /** Pure, fail-closed authorization before input logging, shields or handlers. */
+  authorizeBeforeInput?: (input: unknown, callerAgent: string) => { code: string; message: string } | null;
+
   /** Optional safe projection for structured start logs and mutation journaling when raw inputs contain sensitive text. */
   redactInputForLog?: (input: Record<string, unknown>) => unknown;
   /** Short-lived login grants must not become journal artifacts or result-offload records. */
@@ -1032,11 +1035,19 @@ export function finalizeM365Aliases(server: McpServer, callerHashProvider: () =>
   }
 }
 
+/** Injectable effects for isolated registry tests; production uses the real implementations. */
+export interface RegistryEffects {
+  inboundShield?: typeof inboundShield;
+  journalMutation?: typeof journalMutation;
+  logToolStart?: typeof logToolStart;
+}
+
 export function registerTool<Shape extends ZodRawShape, Output extends ZodRawShape>(
   server: McpServer,
   def: ToolDefinition<Shape, Output>,
   callerHashProvider: () => string,
   isAlias = false,
+  effects: RegistryEffects = {},
 ): void {
   const env = loadEnv();
   const CONNECTOR_TOOLSET = connectorToolset(env, currentCallerAgent());
@@ -1212,6 +1223,19 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     toolConfig,
     async (rawArgs) => {
       const correlationId = newCorrelationId();
+      // Before parsing, logging, shield/provider calls or mutation accounting, let a tool
+      // reject unauthorized raw input using caller identity without exposing the payload.
+      const callerAgent = currentCallerAgent();
+      if (def.authorizeBeforeInput) {
+        let rejection: { code: string; message: string } | null;
+        try { rejection = def.authorizeBeforeInput(rawArgs, callerAgent); }
+        catch { rejection = { code: 'input_authorization_failed', message: 'Input authorization failed.' }; }
+        if (rejection) {
+          return { isError: true, content: [{ type: 'text', text: rejection.message }],
+            structuredContent: { result: null, compliance_warning: null, correlation_id: correlationId,
+              dry_run: false, error: rejection } };
+        }
+      }
       const callerHash = callerHashProvider();
       const started = Date.now();
       let callbackOutcome: ToolTimingOutcome = 'unknown';
@@ -1261,8 +1285,6 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       const acknowledged = args.acknowledge_warning === true;
 
       // Governance: every agent SEES every tool, but some actions are role-gated for EXECUTION.
-      const callerAgent = currentCallerAgent();
-
       // Curation is not authorization. Cached/internal/alias calls must respect the same bounded
       // Developer grant before previews, handlers or upstream requests. Never fall back to a
       // fleet-global credential for a Developer catalog write.
@@ -1512,7 +1534,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
 
       const ctx: ToolContext = { correlationId, callerHash, dryRun, acknowledgeWarning: acknowledged, callerAgent };
 
-      logToolStart({
+      (effects.logToolStart ?? logToolStart)({
         correlation_id: correlationId,
         tool: def.name,
         caller_hash: callerHash,
@@ -1538,7 +1560,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       const shieldInput = def.shieldInputForScan
         ? def.shieldInputForScan(handlerInput)
         : handlerInput;
-      const shield = await inboundShield(canonicalName, shieldInput);
+      const shield = await (effects.inboundShield ?? inboundShield)(canonicalName, shieldInput);
       if (shield.blocked) {
         const smsg =
           `Tool "${def.name}" blocked by Prompt Shields (SHIELD_MODE=enforce): a prompt-injection / ` +
@@ -1648,7 +1670,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           if (def.name !== 'checkpoint') recordMutation(callerHash);
           const journaled = parseAutoJournalMode(process.env.AUTO_JOURNAL_MODE) === 'on';
           if (journaled) {
-            void journalMutation({
+            void (effects.journalMutation ?? journalMutation)({
               // Aliases retain `def.name` (for example `push_files`) but every safety boundary is
               // keyed to the canonical name. Journaling must do the same or alias calls can evade
               // GitHub mutation argument suppression and copy file/issue content into memory-exec.

@@ -288,3 +288,8 @@ test('safeAgentForJournal: empty or malformed input falls back to "gateway"', ()
   assert.equal(safeAgentForJournal('   '), 'gateway');
   assert.equal(safeAgentForJournal('bad agent!'), 'gateway');
 });
+
+test('checkpoint arguments are never included in shared automatic journal records', () => {
+  assert.equal(suppressJournalArgs('checkpoint'), true);
+  assert.equal(redactArgs('checkpoint', {summary:'SYNTHETIC_PRIVATE_SENTINEL',memories:[{text:'SYNTHETIC_PRIVATE_SENTINEL'}]}), null);
+});

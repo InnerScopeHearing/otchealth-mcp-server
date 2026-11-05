@@ -6,6 +6,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { isConfigured } from '../../agentstate/store.js';
+import { normalizeAgent } from '../../agentstate/agents.js';
+import { PERSONAL_SHARED_MEMORY_AGENT } from './shared-memory-access.js';
 import { writeMemory, recordMemoryIndexOutcome } from '../../agentstate/memory.js';
 import { MEMORY_KINDS } from '../../agentstate/agents.js';
 import { indexMemory as indexMemoryNow } from '../../search/index.js';
@@ -21,6 +23,23 @@ import {
   checkpointDeliveryStatus,
   type Delivery,
 } from './checkpoint-delivery.js';
+
+// Checkpoint persists to company agent-state and the shared search index. These are the
+// current company seats, not the narrower Chat-action bridge or GitHub-specific policy.
+// agents-shared is a single shared identity: it cannot distinguish its individual holders.
+const CHECKPOINT_COMPANY_LANES = new Set([
+  'cto', 'developer', 'cfo', 'clo', 'coo', 'cro', 'cpo', 'cco', 'exec', 'wefunder-campaign-director', 'agents-shared',
+]);
+
+function checkpointCallerAgent(caller: unknown, input: unknown): string | null {
+  try {
+    const agent = normalizeAgent(typeof caller === 'string' ? caller : '');
+    const targetValue = input && typeof input === 'object' && !Array.isArray(input)
+      ? (input as Record<string, unknown>).agent : undefined;
+    const target = normalizeAgent(typeof targetValue === 'string' ? targetValue : '');
+    return agent === target && agent !== PERSONAL_SHARED_MEMORY_AGENT && CHECKPOINT_COMPANY_LANES.has(agent) ? agent : null;
+  } catch { return null; }
+}
 
 const DISTILL_KINDS = ['fact', 'decision', 'correction', 'pitfall'] as const;
 type DistillKind = (typeof DISTILL_KINDS)[number];
@@ -143,6 +162,11 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
     {
       name: 'checkpoint',
       category: 'write_simple',
+      authorizeBeforeInput: (input, caller) => checkpointCallerAgent(caller, input) ? null : ({
+        code: 'checkpoint_scope_forbidden',
+        message: 'Checkpoints are restricted to the authenticated company lane.',
+      }),
+      redactInputForLog: () => ({ redacted: true }),
       annotations: {
         title: 'Checkpoint: distill and persist session memory',
         description:
@@ -188,6 +212,15 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         distillation_complete: z.boolean().optional(),
       },
       handler: async (input, ctx) => {
+        // Checkpoint writes to agent state and the shared search index. Unlike the explicitly
+        // attributed memory_remember handoff, this is a self-lane capture, never a delegation.
+        const agent = checkpointCallerAgent(ctx.callerAgent, input);
+        if (!agent) {
+          return {
+            data: { written: [], distilled: 0, checkpoint: false, note: 'checkpoint_scope_forbidden' },
+            summary: 'Refused: checkpoint_scope_forbidden. Checkpoints are restricted to the authenticated company lane.',
+          };
+        }
         // MNPI DETERMINISTIC PRE-SHARE GATE (Wave 3 item 3.5, safety/mnpi-gate.ts). Runs BEFORE any
         // write, over the summary AND every explicit memory's text. Unlike the rest of this handler
         // (deliberately fail-open per its own doc comment), this check is a HARD BLOCK for every
@@ -214,11 +247,11 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
               written: [],
               distilled: 0,
               checkpoint: false,
-              preview: { agent: input.agent, summary: input.summary, memories: memoriesIn },
+              preview: { agent: agent, summary: input.summary, memories: memoriesIn },
               note: 'dry_run: nothing written. Pass dry_run=false to persist.',
             },
             summary:
-              `DRY RUN: would checkpoint ${input.agent} (${memoriesIn.length} explicit ` +
+              `DRY RUN: would checkpoint ${agent} (${memoriesIn.length} explicit ` +
               `memor${memoriesIn.length === 1 ? 'y' : 'ies'}${input.summary ? ' + a summary distillation' : ''}) ` +
               `and reset capture pressure.`,
           };
@@ -232,7 +265,7 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         // caller-specified supersession exists, preserve the original serial order for the batch.
         const explicitDeliveries = await deliverCheckpointBatch(
           memoriesIn,
-          m => deps.deliver(input.agent, m.kind, m.text, { tags: m.tags, supersedes: m.supersedes }),
+          m => deps.deliver(agent, m.kind, m.text, { tags: m.tags, supersedes: m.supersedes }),
           CHECKPOINT_DELIVERY_CONCURRENCY,
           memoriesIn.some(m => Boolean(m.supersedes)),
         );
@@ -245,7 +278,7 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
           try {
             const items = await distillSummary(input.summary);
             for (const dm of items) {
-              const delivery = await deps.deliver(input.agent, dm.kind, dm.text, { tags: ['checkpoint-distilled'], source: 'checkpoint distillation' });
+              const delivery = await deps.deliver(agent, dm.kind, dm.text, { tags: ['checkpoint-distilled'], source: 'checkpoint distillation' });
               deliveries.push(delivery);
               if (delivery.stored) {
                 distilled += 1;
@@ -260,11 +293,11 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         // An episode alone cannot hide a failed explicit memory or requested distillation.
         const episodeText = buildEpisodeText({
           tool: 'checkpoint',
-          actor: input.agent,
+          actor: agent,
           outcome: distillationComplete && deliveries.every(item => item.stored && item.indexed) ? 'delivery_pending_episode' : 'partial',
           redactedArgs: { memories: memoriesIn.length, has_summary: Boolean(input.summary) },
         });
-        const episode = await deps.deliver(input.agent, 'episode', episodeText, {
+        const episode = await deps.deliver(agent, 'episode', episodeText, {
           tags: ['checkpoint'],
           source: `correlation:${ctx.correlationId}`,
         });
@@ -279,14 +312,14 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         // (non-dry-run) checkpoint -- the dry_run branch returns early above. captureGatewayEvent is
         // fire-and-forget, inert unless POSTHOG_GATEWAYOPS_KEY is set, and never throws, so it cannot
         // add latency or a new failure mode to this response.
-        if (checkpoint) captureGatewayEvent('gw_checkpoint', { agent: input.agent, written: written.length, distilled }, ctx.callerHash);
+        if (checkpoint) captureGatewayEvent('gw_checkpoint', { agent: agent, written: written.length, distilled }, ctx.callerHash);
 
         return {
           data: { ...deliveryStatus, distilled, checkpoint, distillation_complete: distillationComplete },
           summary:
-            `checkpoint(${input.agent}): wrote ${written.length} memor${written.length === 1 ? 'y' : 'ies'}` +
+            `checkpoint(${agent}): wrote ${written.length} memor${written.length === 1 ? 'y' : 'ies'}` +
             ` (${distilled} distilled from summary). ` + (checkpoint ? 'Capture pressure reset.' : 'Delivery incomplete; capture pressure retained. Preserve written IDs, do not blindly repeat stored memories.'),
-          audit: { after: { agent: input.agent, written, distilled } },
+          audit: { after: { agent: agent, written, distilled } },
         };
       },
     },
