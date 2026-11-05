@@ -11,6 +11,7 @@ export interface TaskListInput {
   status?: TaskListFilter['status'];
   board?: string;
   limit?: number;
+  view?: 'full' | 'summary';
 }
 
 export interface TaskListDeps {
@@ -33,12 +34,21 @@ export async function handleTaskList(
   }
 
   const excludePersonalLegal = !canReadPersonalTasks(ctx.callerAgent);
-  const tasks = await deps.listTasks({ ...input, exclude_personal_legal: excludePersonalLegal });
+  const { view, ...filter } = input;
+  const tasks = await deps.listTasks({ ...filter, exclude_personal_legal: excludePersonalLegal });
   // Defense in depth for malformed or stale store adapters. The database query performs the same
   // exclusion before its max limit, so this post-filter cannot starve an ordinary caller's page.
   const visible = tasks.filter((task) => taskVisibleToCaller(task, ctx.callerAgent));
+  const projected = visible.map((task) => projectTaskForCaller(task, ctx.callerAgent));
+  const rows = view === 'summary' ? projected.map((task) => ({
+    id: task.id, board: task.board, type: task.type, owner_agent: task.owner_agent,
+    status: task.status, priority: task.priority, created_at: task.created_at, updated_at: task.updated_at,
+    claim_ts: task.claim_ts, lease_until: task.lease_until, lease_version: task.lease_version,
+    done_ts: task.done_ts, attempt_count: task.attempt_count ?? 0,
+    ...('title' in task ? { title: task.title } : {}),
+  })) : projected;
   return {
-    data: { count: visible.length, tasks: visible.map((task) => projectTaskForCaller(task, ctx.callerAgent)) },
+    data: { count: visible.length, tasks: rows },
     summary: String(visible.length) + ' task(s)' +
       (input.owner_agent ? ' for ' + input.owner_agent : '') +
       (input.status ? ' [' + input.status + ']' : '') + '.',
@@ -65,6 +75,7 @@ export function registerTaskList(server: McpServer, callerHash: CallerHashProvid
         status: z.enum(TASK_STATUSES).optional().describe('Filter by status.'),
         board: z.string().optional().describe('Board partition (default "fleet").'),
         limit: z.number().int().min(1).max(200).optional().describe('Max results (default 50).'),
+        view: z.enum(['full', 'summary']).optional().describe('Summary omits notes, descriptions and other details; cross-seat visibility remains unchanged. Default full.'),
       },
       outputShape: { count: z.number(), tasks: z.unknown() },
       handler: handleTaskList,
