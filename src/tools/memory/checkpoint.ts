@@ -24,6 +24,22 @@ import {
   type Delivery,
 } from './checkpoint-delivery.js';
 
+// Checkpoint persists to company agent-state and the shared search index. These are the
+// current company seats, not the narrower Chat-action bridge or GitHub-specific policy.
+const CHECKPOINT_COMPANY_LANES = new Set([
+  'cto', 'developer', 'cfo', 'clo', 'coo', 'cro', 'cpo', 'cco', 'exec', 'wefunder-campaign-director',
+]);
+
+function checkpointCallerAgent(caller: unknown, input: unknown): string | null {
+  try {
+    const agent = normalizeAgent(typeof caller === 'string' ? caller : '');
+    const targetValue = input && typeof input === 'object' && !Array.isArray(input)
+      ? (input as Record<string, unknown>).agent : undefined;
+    const target = normalizeAgent(typeof targetValue === 'string' ? targetValue : '');
+    return agent === target && agent !== PERSONAL_SHARED_MEMORY_AGENT && CHECKPOINT_COMPANY_LANES.has(agent) ? agent : null;
+  } catch { return null; }
+}
+
 const DISTILL_KINDS = ['fact', 'decision', 'correction', 'pitfall'] as const;
 type DistillKind = (typeof DISTILL_KINDS)[number];
 const DISTILL_KIND_SET = new Set<string>(DISTILL_KINDS);
