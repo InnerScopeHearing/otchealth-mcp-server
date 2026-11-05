@@ -1,13 +1,10 @@
 /**
  * Agent-name normalization for the agent state plane.
  *
- * FORMER PRIVILEGE WALL (removed 2026-07-07, CEO directive): clo-personal was previously
- * rejected outright as a target/caller agent id on this plane (task ledger + agent inbox).
- * Standing directive (Matt/CEO, 2026-07-07): ring-gating/security firewalls between ALL
- * executive agents (cfo, clo, clo-personal, coo, cro, cpo, cco) are SUSPENDED fleet-wide
- * until connectivity/stability is fully dialed in -- prioritize connectivity + performance
- * over security for now. This does NOT touch the separate PHI/MedReview boundary, which
- * remains non-waivable and was never in scope of this directive.
+ * Normalization validates an identifier's shape; it does not grant access to any lane. The
+ * earlier statement that the personal-legal privilege wall was suspended fleet-wide was retracted
+ * on 2026-07-29. Callers must enforce the applicable current role and personal-legal boundaries
+ * at each read/write operation; this generic helper intentionally does not encode a role policy.
  */
 
 const FORBIDDEN_AGENTS = new Set<string>([]);
