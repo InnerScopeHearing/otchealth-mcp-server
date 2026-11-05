@@ -1035,11 +1035,19 @@ export function finalizeM365Aliases(server: McpServer, callerHashProvider: () =>
   }
 }
 
+/** Injectable effects for isolated registry tests; production uses the real implementations. */
+export interface RegistryEffects {
+  inboundShield?: typeof inboundShield;
+  journalMutation?: typeof journalMutation;
+  logToolStart?: typeof logToolStart;
+}
+
 export function registerTool<Shape extends ZodRawShape, Output extends ZodRawShape>(
   server: McpServer,
   def: ToolDefinition<Shape, Output>,
   callerHashProvider: () => string,
   isAlias = false,
+  effects: RegistryEffects = {},
 ): void {
   const env = loadEnv();
   const CONNECTOR_TOOLSET = connectorToolset(env, currentCallerAgent());
