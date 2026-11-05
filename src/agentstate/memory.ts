@@ -109,7 +109,7 @@ export async function searchMemory(filter: {
     if (!filter.agent) throw new Error('An agent is required for an exact memory ID lookup');
     const agent = normalizeAgent(filter.agent);
     const record = await readExact(filter.id, agent);
-    if (!record || record.id !== filter.id || normalizeAgent(record.agent) !== agent ||
+    if (!record || record.type !== 'memory' || record.id !== filter.id || normalizeAgent(record.agent) !== agent ||
         (filter.kind && record.kind !== filter.kind) ||
         (filter.contains && !record.text.toLowerCase().includes(filter.contains.toLowerCase()))) return [];
     return [record];
