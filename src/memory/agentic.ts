@@ -32,14 +32,12 @@
  * KbHit (src/search/index.ts) is the dispatcher's deliberately room-agnostic hit shape and does
  * not carry memory-exec's own `ts`/`tags` fields (stripped for every room kind — see
  * azure/search.ts's runHybridSearch). RawHit reports them as '' / [] here rather than paying for a
- * second per-hit fetch. `agent` IS recoverable losslessly: the write path encodes it as the
- * `{agent}__{entryId}` doc-id prefix (azure/search-write.ts memoryDocId), so this reuses
- * agentFromDocId — the same parser ./semantic.ts (fixed alongside this file), auto-supersede-
- * runtime.ts, and incident-match.ts all rely on for the identical recovery.
+ * second per-hit fetch. Current IDs encode the owner as `{agent}__{entryId}`; legacy bare IDs can
+ * instead carry it in the indexed agent field. Preserve that field for retraction and ring checks.
  */
 
 import { hybridSearch as dispatcherHybridSearch, searchConfigured } from '../search/index.js';
-import { agentFromDocId } from './auto-supersede-runtime.js';
+import { memorySearchHitOwner } from './search-hit-owner.js';
 
 const INDEX = 'memory-exec';
 const RRF_K = 60;
@@ -131,7 +129,7 @@ async function subQuerySearch(subQuery: string, top: number): Promise<RawHit[]> 
       type: h.type ?? '',
       text: h.text ?? '',
       tags: [] as string[],
-      agent: agentFromDocId(id),
+      agent: memorySearchHitOwner(id, h.agent),
       score: h.score ?? 0,
     };
   });
@@ -141,20 +139,25 @@ async function subQuerySearch(subQuery: string, top: number): Promise<RawHit[]> 
 
 function rrfFuse(
   rankedLists: Array<{ subQuery: string; hits: RawHit[] }>,
+  agentFilter: string | null,
 ): AgenticHit[] {
   // Accumulate RRF scores: score(d) = Σ 1/(k + rank)
   const scoreMap = new Map<string, { hit: RawHit; rrfScore: number; sourceSubQuery: string }>();
 
   for (const { subQuery, hits } of rankedLists) {
     hits.forEach((hit, zeroIdx) => {
+      // Filter before the bounded fusion window so other lanes cannot crowd out this lane.
+      if (agentFilter && hit.agent !== agentFilter) return;
       const rank = zeroIdx + 1;
       const contrib = 1 / (RRF_K + rank);
-      const existing = scoreMap.get(hit.id);
+      // Legacy bare IDs can collide across lanes; do not merge their evidence before filtering.
+      const identity = JSON.stringify([hit.agent, hit.id]);
+      const existing = scoreMap.get(identity);
       if (existing) {
         existing.rrfScore += contrib;
         // Keep the sub-query label of the highest-contributing list (first seen wins)
       } else {
-        scoreMap.set(hit.id, { hit, rrfScore: contrib, sourceSubQuery: subQuery });
+        scoreMap.set(identity, { hit, rrfScore: contrib, sourceSubQuery: subQuery });
       }
     });
   }
@@ -207,12 +210,8 @@ export async function agenticRecall(
     // Silently drop failed sub-queries — partial results are better than a full throw
   }
 
-  let fused = rrfFuse(rankedLists);
-
-  // Client-side agent filter (mirrors semantic.ts approach — field not guaranteed filterable)
-  if (agentFilter) {
-    fused = fused.filter((h) => h.agent === agentFilter);
-  }
+  // Filter client-side (the backend filter is not guaranteed), before the fusion limit.
+  const fused = rrfFuse(rankedLists, agentFilter);
 
   return { mode: 'agentic-hybrid', subQueries, results: fused };
 }

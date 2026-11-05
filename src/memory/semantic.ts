@@ -28,15 +28,13 @@
  * not carry memory-exec's own `ts`/`tags` fields (stripped for every room kind — see
  * azure/search.ts's runHybridSearch, "Strip the internal dedup + re-rank signal keys"). Rather
  * than pay for a second per-hit fetch just to backfill two cosmetic fields, SemanticHit reports
- * them as '' / [] here. `agent` IS recoverable losslessly without an extra round trip: the write
- * path encodes it as the `{agent}__{entryId}` doc-id prefix (azure/search-write.ts memoryDocId),
- * so this reuses agentFromDocId — the same parser auto-supersede-runtime.ts and incident-match.ts
- * already rely on for the identical recovery — instead of a third reimplementation.
+ * them as '' / [] here. Current IDs encode an agent prefix; legacy bare IDs can instead carry the
+ * owner in the indexed agent field. Preserve it for lane-specific retraction and privacy checks.
  *
  * Inert unless the ACTIVE backend (SEARCH_BACKEND) is configured (callers fall back to keyword).
  */
 import { hybridSearch, searchConfigured } from '../search/index.js';
-import { agentFromDocId } from './auto-supersede-runtime.js';
+import { memorySearchHitOwner } from './search-hit-owner.js';
 
 const INDEX = 'memory-exec';
 
@@ -85,7 +83,7 @@ export async function semanticSearch(
       type: h.type ?? '',
       text: h.text ?? '',
       tags: [],
-      agent: agentFromDocId(id),
+      agent: memorySearchHitOwner(id, h.agent),
       score: h.score ?? 0,
     };
   });
