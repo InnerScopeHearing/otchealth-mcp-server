@@ -52,7 +52,6 @@ export async function queryTaskPage(pool: pg.Pool, input: TaskPageQuery): Promis
       return d;
     });
     await client.query('COMMIT');
-    begun = false;
     return docs;
   } catch {
     if (begun) { try { await client.query('ROLLBACK'); } catch { discard = true; } }
