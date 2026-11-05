@@ -182,6 +182,7 @@ test('structured record IDs never fall back to unrelated semantic matches', asyn
     for (const include_superseded of [false, true]) {
       const result = await recallHandler({ query, include_superseded }, context, dependencies as any);
       assert.equal((result.data as { mode: string }).mode, 'structured-id-unsupported');
+      assert.equal((result.data as { lookup_performed: boolean }).lookup_performed, false);
       assert.deepEqual((result.data as { matches: unknown[] }).matches, []);
       assert.match(result.summary ?? '', /did not look it up/);
     }
