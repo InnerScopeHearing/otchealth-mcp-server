@@ -90,7 +90,7 @@ export function evaluateMemorySearchAccess(callerAgent: string | undefined | nul
   return { allowed: true, excludeClopersonalFromGlobal: !(PERSONAL_LEGAL_RING as readonly string[]).includes(caller) };
 }
 
-export function registerMemorySearch(server: McpServer, callerHash: CallerHashProvider): void {
+export function registerMemorySearch(server: McpServer, callerHash: CallerHashProvider, dependencies: { isConfigured?: typeof isConfigured; search?: typeof searchMemory } = {}): void {
   registerTool(
     server,
     {
