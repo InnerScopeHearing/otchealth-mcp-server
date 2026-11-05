@@ -114,6 +114,7 @@ export function registerMemorySearch(server: McpServer, callerHash: CallerHashPr
       },
       outputShape: { count: z.number(), records: z.unknown(), blocked: z.boolean().optional(), reason: z.string().optional(), note: z.string().optional(), status: z.enum(['unconfigured', 'denied', 'success']).optional(), lookup_performed: z.boolean().optional() },
       handler: async (input, ctx) => {
+        // Keep the existing response shape unless the caller requests an exact ID.
         const exact = input.id !== undefined;
         if (!(dependencies.isConfigured ?? isConfigured)()) return { data: { count: 0, records: [], note: 'agent-state Cosmos not configured.', ...(exact ? { status: 'unconfigured', lookup_performed: false } : {}) }, summary: 'Memory store not configured.' };
 
