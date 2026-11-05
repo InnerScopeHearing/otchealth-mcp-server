@@ -41,6 +41,7 @@ export async function handleTaskList(
   deps: TaskListDeps = DEFAULT_DEPS,
 ): Promise<ToolResultPayload> {
   if (!deps.isConfigured()) {
+    // A paged caller must not interpret an unavailable store as an exhausted traversal.
     if (input.paginate) throw new Error('task_page_unavailable');
     return {
       data: { count: 0, tasks: [], note: 'agent-state Cosmos not configured.' },
