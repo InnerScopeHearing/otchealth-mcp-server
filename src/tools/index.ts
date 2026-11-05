@@ -38,6 +38,7 @@ import { registerN8nListWorkflows } from './n8n/list-workflows.js';
 import { registerN8nCooWorkflowMetadata } from './n8n/coo-workflow-metadata.js';
 import { registerN8nGetExecution } from './n8n/get-execution.js';
 import { registerN8nChatActions } from './n8n/chat-actions.js';
+import { registerChatActionInventory } from './n8n/chat-action-inventory.js';
 
 // Phase 3 — Cloudflare (fleet email routing + DNS)
 import { registerCloudflareListEmailDestinations } from './cloudflare/list-email-destinations.js';
