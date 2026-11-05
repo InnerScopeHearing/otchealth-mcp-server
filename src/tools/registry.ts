@@ -175,7 +175,7 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'wake', 'checkpoint', 'memory_recall', 'memory_search', 'memory_write', 'memory_remember', 'memory_pack', 'memory_team', 'memory_inbound', 'memory_reconcile',
   // Narrow durable bridge for ordinary Chat: exactly the allowlisted Brain
   // search/checkpoint action contract, never direct n8n administration.
-  'chat_action_submit', 'chat_action_status', 'chat_action_result',
+  'chat_action_submit', 'chat_action_status', 'chat_action_result', 'chat_action_inventory',
   // Wave 7 item 7.1: opt-in feedback reporting on a brain_search/kb_search hit (see kb/search.ts,
   // kb/brain-search.ts, memory/retrieval-feedback.ts). Not added to EXTERNAL_READONLY_TOOLSET below,
   // which deliberately excludes every write tool by design; the ship lane is where this is needed.
@@ -1096,7 +1096,11 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // internal tools. Keep the M365 path stricter than that broad allowlist, and
   // apply the same exclusion to canonical and generated alias registrations.
   if (isM365StaticAuth() && laneForThisTool !== 'cto' && CTO_ONLY_M365_TOOLS.has(canonicalName)) return;
-  if (catalogCuration && !catalogCuration.advertise) return;
+  // Keep this exact CTO-only reader visible to non-M365 CTO clients under catalog curation.
+  // Its own authorization checks remain in force; the M365 seed is unchanged.
+  const ctoInventory = laneForThisTool === 'cto' && canonicalName === 'chat_action_inventory' &&
+    def.name === 'chat_action_inventory' && !isM365StaticAuth();
+  if (catalogCuration && !catalogCuration.advertise && !ctoInventory) return;
   // Only an explicitly opted-in tool receives a connector projection. A lane-specific projection
   // takes precedence over the neutral projection; strict validation uses the selected public schema,
   // while handler authorization and the internal Work/Codex input shape remain unchanged.
