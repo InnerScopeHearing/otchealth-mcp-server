@@ -100,7 +100,7 @@ export function registerMemorySearch(server: McpServer, callerHash: CallerHashPr
       annotations: {
         title: 'Search the structured memory-of-record',
         description:
-          'Deterministic keyword/field search over the Cosmos memory store (by agent, kind, and/or a text substring). This is exact recall of the byte-exact record. For meaning-based semantic recall across all rooms, use the company-brain instead. RING GATE: searching your own agent, or a non-privileged agent, is always allowed; clo-personal is refused unless you are clo-personal/exec; any other executive-ring agent (cfo/clo/cpo/cco/exec) requires an executive-ring caller; omitting the agent filter never returns another ring-gated agent\'s records unless you are yourself entitled to read them.',
+          'Set inventory:true for a bounded ID/category/date listing of your own authenticated company lane, following next_cursor until has_more is false. This mode returns no source bodies and is a live listing, not a transactional snapshot. Otherwise: Deterministic keyword/field search over the Cosmos memory store (by agent, kind, and/or a text substring). This is exact recall of the byte-exact record. For meaning-based semantic recall across all rooms, use the company-brain instead. RING GATE: searching your own agent, or a non-privileged agent, is always allowed; clo-personal is refused unless you are clo-personal/exec; any other executive-ring agent (cfo/clo/cpo/cco/exec) requires an executive-ring caller; omitting the agent filter never returns another ring-gated agent\'s records unless you are yourself entitled to read them.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
