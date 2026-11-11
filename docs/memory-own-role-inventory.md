@@ -2,6 +2,8 @@
 
 The historical-import rollout needs a source inventory beyond the existing 100-record search cap. `memory_search` gains an optional `inventory: true` mode. Ordinary search and exact-ID behavior retain their existing access rules and response shape.
 
+This listing covers the structured memory-of-record store. Other authorized source families require separate censuses: federated Brain knowledge rooms, chat archives, local source documents and Supermemory provider documents. Completion requires reconciling all source families actually in scope for the role.
+
 Use the authenticated source-owning role's native connection:
 
 1. Call `memory_search({inventory: true, limit: 50})`.
