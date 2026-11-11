@@ -159,7 +159,7 @@ export function createTrustedBrowserBinaryValidator(options: TrustedBrowserBinar
       let workDir: string | undefined;
       try {
         workDir = await mkdtemp(join(tmpdir(), 'browser-binary-validation-'));
-        const filePath = join(workDir, 'input.bin');
+        const filePath = join(workDir, input.contentType === 'application/pdf' ? 'input.pdf' : 'input.bin');
         // Copy to an owned file so parsers see a stable bounded snapshot, not caller memory.
         const body = Buffer.from(input.body);
         await writeFile(filePath, body, { flag: 'wx', mode: 0o600 });
