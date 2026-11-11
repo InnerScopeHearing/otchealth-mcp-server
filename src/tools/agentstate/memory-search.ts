@@ -4,6 +4,7 @@ import { registerTool, type CallerHashProvider } from '../registry.js';
 import { isConfigured } from '../../agentstate/store.js';
 import { searchMemory, type MemoryRecord } from '../../agentstate/memory.js';
 import { MEMORY_KINDS } from '../../agentstate/agents.js';
+import { inventoryOwnMemory } from '../../agentstate/memory-inventory.js';
 import { EXEC_RING, PERSONAL_LEGAL_RING, isExecRingLane } from '../kb/search-privileged.js';
 
 /**
