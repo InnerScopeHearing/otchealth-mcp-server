@@ -12,7 +12,7 @@ function makePdf(catalog = '', extraObjects: string[] = [], page = ''): Buffer {
   const offsets = [0];
   const objects = [
     `<< /Type /Catalog /Pages 2 0 R ${catalog} >>`,
-    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 /Resources << >> >>',
     `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] ${page} >>`,
     ...extraObjects,
   ];
