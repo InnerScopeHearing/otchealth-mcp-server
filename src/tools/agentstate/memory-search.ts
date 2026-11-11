@@ -4,6 +4,7 @@ import { registerTool, type CallerHashProvider } from '../registry.js';
 import { isConfigured } from '../../agentstate/store.js';
 import { searchMemory, type MemoryRecord } from '../../agentstate/memory.js';
 import { MEMORY_KINDS } from '../../agentstate/agents.js';
+import { inventoryOwnMemory } from '../../agentstate/memory-inventory.js';
 import { EXEC_RING, PERSONAL_LEGAL_RING, isExecRingLane } from '../kb/search-privileged.js';
 
 /**
@@ -99,25 +100,33 @@ export function registerMemorySearch(server: McpServer, callerHash: CallerHashPr
       annotations: {
         title: 'Search the structured memory-of-record',
         description:
-          'Deterministic keyword/field search over the Cosmos memory store (by agent, kind, and/or a text substring). This is exact recall of the byte-exact record. For meaning-based semantic recall across all rooms, use the company-brain instead. RING GATE: searching your own agent, or a non-privileged agent, is always allowed; clo-personal is refused unless you are clo-personal/exec; any other executive-ring agent (cfo/clo/cpo/cco/exec) requires an executive-ring caller; omitting the agent filter never returns another ring-gated agent\'s records unless you are yourself entitled to read them.',
+          'Set inventory:true for a bounded ID/category/date listing of your own authenticated company lane, following next_cursor until has_more is false. This mode returns no source bodies and is a live listing, not a transactional snapshot. Otherwise: Deterministic keyword/field search over the Cosmos memory store (by agent, kind, and/or a text substring). This is exact recall of the byte-exact record. For meaning-based semantic recall across all rooms, use the company-brain instead. RING GATE: searching your own agent, or a non-privileged agent, is always allowed; clo-personal is refused unless you are clo-personal/exec; any other executive-ring agent (cfo/clo/cpo/cco/exec) requires an executive-ring caller; omitting the agent filter never returns another ring-gated agent\'s records unless you are yourself entitled to read them.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
         openWorldHint: true,
       },
       inputShape: {
-        agent: z.string().optional().describe('Filter by agent lane.'),
+        agent: z.string().optional().describe('Filter by agent lane. Inventory mode permits only the authenticated company lane itself.'),
+        inventory: z.boolean().optional().describe('List only own-role source ID/category/date metadata. Rejects id, kind and contains filters; no cross-role or protected-personal inventory.'),
+        cursor: z.string().min(1).max(2048).optional().describe('Opaque continuation from inventory mode. Pass only with inventory:true; do not modify it.'),
         id: z.string().min(1).max(200).optional().describe('Retrieve one exact raw memory record within the selected agent. Defaults to the caller agent. A returned record may have been superseded; its presence alone does not establish current truth.'),
         kind: z.enum(MEMORY_KINDS).optional().describe('Filter by kind.'),
         contains: z.string().optional().describe('Case-insensitive substring match on the text.'),
         limit: z.number().int().min(1).max(100).optional().describe('Max results (default 25).'),
       },
-      outputShape: { count: z.number(), records: z.unknown(), blocked: z.boolean().optional(), reason: z.string().optional(), note: z.string().optional(), status: z.enum(['unconfigured', 'denied', 'success']).optional(), lookup_performed: z.boolean().optional() },
+      outputShape: { count: z.number(), records: z.unknown(), blocked: z.boolean().optional(), reason: z.string().optional(), note: z.string().optional(), status: z.enum(['unconfigured', 'denied', 'success']).optional(), lookup_performed: z.boolean().optional(), inventory: z.boolean().optional(), owner: z.string().optional(), has_more: z.boolean().optional(), next_cursor: z.string().nullable().optional(), scan_started_at: z.string().optional(), consistency: z.literal('live_keyset_not_snapshot').optional() },
       handler: async (input, ctx) => {
         // Keep the existing response shape unless the caller requests an exact ID.
         const exact = input.id !== undefined;
-        if (!(dependencies.isConfigured ?? isConfigured)()) return { data: { count: 0, records: [], note: 'agent-state Cosmos not configured.', ...(exact ? { status: 'unconfigured', lookup_performed: false } : {}) }, summary: 'Memory store not configured.' };
+        if (!(dependencies.isConfigured ?? isConfigured)()) return { data: { count: 0, records: [], note: 'agent-state Cosmos not configured.', ...((exact || input.inventory) ? { status: 'unconfigured', lookup_performed: false } : {}), ...(input.inventory ? { inventory: true } : {}) }, summary: 'Memory store not configured.' };
 
+        if (input.inventory) {
+          const data = await inventoryOwnMemory({ callerAgent: ctx.callerAgent, requestedAgent: input.agent,
+            cursor: input.cursor, limit: input.limit, id: input.id, kind: input.kind, contains: input.contains });
+          return { data, summary: data.blocked ? `Refused: ${data.reason}` : `${data.count} own-role memory metadata record(s); ${data.has_more ? 'continue with next_cursor' : 'end of live listing'}.` };
+        }
+        if (input.cursor !== undefined) throw new Error('memory_inventory_cursor_requires_inventory_mode');
         const data = await searchAuthorizedMemory(input, ctx.callerAgent, dependencies.search);
         return { data: exact ? { ...data, status: data.blocked ? 'denied' : 'success', lookup_performed: !data.blocked } : data, summary: data.blocked ? `Refused: ${data.reason}` : `${data.count} memory record(s).` };
       },

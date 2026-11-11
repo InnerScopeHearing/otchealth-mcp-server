@@ -12,7 +12,7 @@ function makePdf(catalog = '', extraObjects: string[] = [], page = ''): Buffer {
   const offsets = [0];
   const objects = [
     `<< /Type /Catalog /Pages 2 0 R ${catalog} >>`,
-    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 /Resources << >> >>',
     `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] ${page} >>`,
     ...extraObjects,
   ];
@@ -108,6 +108,11 @@ test('real qpdf rejects indirect EmbeddedFile and FileAttachment names after val
   let inspections = 0;
   const validator = createTrustedBrowserBinaryValidator({ runTool: async (file, args, timeout, maxBuffer) => {
     const result = spawnSync(file, [...args], { encoding: 'utf8', timeout, maxBuffer });
+    if (process.env.CI) console.error('Synthetic qpdf fixture diagnostic', {
+      phase: args.includes('--json=2') ? 'json' : 'check', status: result.status, signal: result.signal,
+      error: result.error?.message, stdout: args.includes('--json=2') ? undefined : result.stdout?.slice(0, 2000),
+      stderr: result.stderr?.slice(0, 2000),
+    });
     if (result.status !== 0) throw new Error('local parser failed');
     if (args.includes('--json=2')) inspections += 1;
     return { stdout: result.stdout, stderr: result.stderr };
@@ -155,6 +160,11 @@ test('real qpdf rejects named, associated, annotation, orphan, and escaped-name 
   let inspections = 0;
   const validator = createTrustedBrowserBinaryValidator({ runTool: async (file, args, timeout, maxBuffer) => {
     const result = spawnSync(file, [...args], { encoding: 'utf8', timeout, maxBuffer });
+    if (process.env.CI) console.error('Synthetic qpdf fixture diagnostic', {
+      phase: args.includes('--json=2') ? 'json' : 'check', status: result.status, signal: result.signal,
+      error: result.error?.message, stdout: args.includes('--json=2') ? undefined : result.stdout?.slice(0, 2000),
+      stderr: result.stderr?.slice(0, 2000),
+    });
     if (result.status !== 0) throw new Error('local parser failed');
     if (args.includes('--json=2')) inspections += 1;
     return { stdout: result.stdout, stderr: result.stderr };
