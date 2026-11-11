@@ -1,9 +1,11 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
-import { isConfigured } from '../../agentstate/store.js';
+import { isConfigured, activeBackend, listTaskPage } from '../../agentstate/store.js';
+import type { TaskPageQuery } from '../../agentstate/task-page-postgres.js';
+import { taskPage } from './task-list-page.js';
 import { listTasks, type Task, type TaskListFilter } from '../../agentstate/ledger.js';
-import { TASK_STATUSES } from '../../agentstate/agents.js';
+import { TASK_STATUSES, normalizeAgent } from '../../agentstate/agents.js';
 import { canReadPersonalTasks, projectTaskForCaller, taskVisibleToCaller } from './task-read-access.js';
 
 export interface TaskListInput {
@@ -11,14 +13,28 @@ export interface TaskListInput {
   status?: TaskListFilter['status'];
   board?: string;
   limit?: number;
+  view?: 'full' | 'summary';
+  paginate?: boolean;
+  cursor?: string;
 }
 
 export interface TaskListDeps {
   isConfigured: () => boolean;
   listTasks: (filter: TaskListFilter) => Promise<Task[]>;
+  listTaskPage?: (input: TaskPageQuery) => Promise<Record<string, unknown>[]>;
+  activeBackend?: () => string;
 }
 
-const DEFAULT_DEPS: TaskListDeps = { isConfigured, listTasks };
+const DEFAULT_DEPS: TaskListDeps = { isConfigured, listTasks, listTaskPage, activeBackend };
+
+function compactTask(task: ReturnType<typeof projectTaskForCaller>, original?: Pick<Task, 'attempt_count'>) {
+  const attemptCount = original ? original.attempt_count : task.attempt_count;
+  return { id: task.id, board: task.board, type: task.type, owner_agent: task.owner_agent,
+    status: task.status, priority: task.priority, created_at: task.created_at, updated_at: task.updated_at,
+    claim_ts: task.claim_ts, lease_until: task.lease_until, lease_version: task.lease_version,
+    done_ts: task.done_ts, ...(attemptCount === undefined ? {} : { attempt_count: attemptCount }),
+    ...('title' in task ? { title: task.title } : {}) };
+}
 
 export async function handleTaskList(
   input: TaskListInput,
@@ -26,6 +42,8 @@ export async function handleTaskList(
   deps: TaskListDeps = DEFAULT_DEPS,
 ): Promise<ToolResultPayload> {
   if (!deps.isConfigured()) {
+    // A paged caller must not interpret an unavailable store as an exhausted traversal.
+    if (input.paginate) throw new Error('task_page_unavailable');
     return {
       data: { count: 0, tasks: [], note: 'agent-state Cosmos not configured.' },
       summary: 'Ledger not configured.',
@@ -33,12 +51,36 @@ export async function handleTaskList(
   }
 
   const excludePersonalLegal = !canReadPersonalTasks(ctx.callerAgent);
-  const tasks = await deps.listTasks({ ...input, exclude_personal_legal: excludePersonalLegal });
+  const { view, paginate, cursor, ...filter } = input;
+  if (cursor !== undefined && !paginate) throw new Error('invalid_cursor');
+  if (paginate) {
+    if (view !== 'summary' || !ctx.callerAgent) throw new Error('invalid_pagination_input');
+    const size = input.limit ?? 50;
+    if (!Number.isInteger(size) || size < 1 || size > 100) throw new Error('invalid_pagination_input');
+    const caller = ctx.callerAgent.trim().toLowerCase();
+    const board = (input.board || 'fleet').trim().toLowerCase();
+    const owner = input.owner_agent ? normalizeAgent(input.owner_agent) : null;
+    const status = input.status ?? null;
+    const backend = (deps.activeBackend ?? activeBackend)();
+    if (!caller || !board || backend !== 'postgres') throw new Error('task_page_backend_unsupported');
+    const readPage = deps.listTaskPage ?? listTaskPage;
+    const result = await taskPage({ caller, board, owner, status, size, backend }, cursor, {
+      fetchBatch: async (after, limit) => await readPage({ board, ...(owner ? {owner} : {}),
+        ...(status ? {status} : {}), ...(after ? {after} : {}), limit,
+        includePersonal: canReadPersonalTasks(caller) }) as unknown as Task[],
+      visibleTo: taskVisibleToCaller,
+      project: (t: Task, c: string) => compactTask(projectTaskForCaller(t, c), t),
+    });
+    return { data: { count: result.tasks.length, ...result, cursor_integrity: 'unsigned' }, summary: `${result.tasks.length} task(s); paged, not a snapshot.`, compactText: true };
+  }
+  const tasks = await deps.listTasks({ ...filter, exclude_personal_legal: excludePersonalLegal });
   // Defense in depth for malformed or stale store adapters. The database query performs the same
   // exclusion before its max limit, so this post-filter cannot starve an ordinary caller's page.
   const visible = tasks.filter((task) => taskVisibleToCaller(task, ctx.callerAgent));
+  const projected = visible.map((task) => projectTaskForCaller(task, ctx.callerAgent));
+  const rows = view === 'summary' ? projected.map((task, index) => compactTask(task, visible[index])) : projected;
   return {
-    data: { count: visible.length, tasks: visible.map((task) => projectTaskForCaller(task, ctx.callerAgent)) },
+    data: { count: visible.length, tasks: rows },
     summary: String(visible.length) + ' task(s)' +
       (input.owner_agent ? ' for ' + input.owner_agent : '') +
       (input.status ? ' [' + input.status + ']' : '') + '.',
@@ -65,8 +107,11 @@ export function registerTaskList(server: McpServer, callerHash: CallerHashProvid
         status: z.enum(TASK_STATUSES).optional().describe('Filter by status.'),
         board: z.string().optional().describe('Board partition (default "fleet").'),
         limit: z.number().int().min(1).max(200).optional().describe('Max results (default 50).'),
+        view: z.enum(['full', 'summary']).optional().describe('Summary omits notes, descriptions and other details; cross-seat visibility remains unchanged. Default full.'),
+        paginate: z.boolean().optional().describe('Opt into ID-ordered, non-snapshot pages on PostgreSQL; requires summary view, limit at most 100, and UTC ISO timestamps with at most three fractional digits.'),
+        cursor: z.string().max(2048).optional().describe('Unsigned, client-editable continuation. Pass the exact returned value unchanged with the same caller, board, filters and limit. A null next_cursor does not prove prior coverage or snapshot completeness.'),
       },
-      outputShape: { count: z.number(), tasks: z.unknown() },
+      outputShape: { count: z.number(), tasks: z.unknown(), next_cursor: z.string().nullable().optional(), snapshot: z.boolean().optional(), scan_incomplete: z.boolean().optional(), cursor_integrity: z.enum(['unsigned']).optional() },
       handler: handleTaskList,
     },
     callerHash,

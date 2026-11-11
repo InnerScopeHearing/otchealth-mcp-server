@@ -28,6 +28,7 @@
 
 import crypto from 'node:crypto';
 import pg from 'pg';
+import { queryTaskPage, type TaskPageQuery } from './task-page-postgres.js';
 import { translate } from './pg-sql.js';
 import { COMPANY_CHAT_ACTION_LANES } from './chat-action-metadata.js';
 import { loadAgentStatePostgresConfig } from './runtime-config.js';
@@ -332,4 +333,9 @@ export async function upsertDocWithVector(
     [pkValue, id, JSON.stringify(doc), etag, JSON.stringify(vector)],
   );
   return { status: 200, ok: true, body: doc, etag };
+}
+
+/** Opt-in bounded ID-keyset reads. Caller supplies server-derived visibility policy. */
+export async function listTaskPage(input: TaskPageQuery): Promise<Record<string, unknown>[]> {
+  return queryTaskPage(getPool(), input);
 }
