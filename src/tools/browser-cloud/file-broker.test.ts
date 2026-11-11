@@ -325,9 +325,9 @@ test('previously ready PDFs cannot transfer without current positive validation'
 });
 
 test('real parser preserves the exact ordinary PDF with a clean AV receipt', { skip: !qpdfAvailable }, async () => {
-  const body = Buffer.from('JVBERi0xLjQKJSBwcm9vZjIwMjYxMDE2IHN5bnRoZXRpYyBvbmx5CjEgMCBvYmoKPDwgL1R5cGUgL0NhdGFsb2cgL1BhZ2VzIDIgMCBSID4+CmVuZG9iagoyIDAgb2JqCjw8IC9UeXBlIC9QYWdlcyAvS2lkcyBbMyAwIFJdIC9Db3VudCAxID4+CmVuZG9iagozIDAgb2JqCjw8IC9UeXBlIC9QYWdlIC9QYXJlbnQgMiAwIFIgL01lZGlhQm94IFswIDAgNzIgNzJdIC9Db250ZW50cyA0IDAgUiA+PgplbmRvYmoKNCAwIG9iago8PCAvTGVuZ3RoIDQgPj4Kc3RyZWFtCnEKUQplbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA1CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDA0MCAwMDAwMCBuIAowMDAwMDAwMDg5IDAwMDAwIG4gCjAwMDAwMDAxNDYgMDAwMDAgbiAKMDAwMDAwMDIzMSAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDUgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjI4MwolJUVPRgo=', 'base64');
-  assert.equal(body.byteLength, 446);
-  assert.equal(sha(body), 'd567cb68ae0ab27533326f9a113bd4a1146a6672037ea78a06d57fa705197a7b');
+  const body = Buffer.from('JVBERi0xLjQKJSBwcm9vZjIwMjYxMDE2IHN5bnRoZXRpYyBvbmx5CjEgMCBvYmoKPDwgL1R5cGUgL0NhdGFsb2cgL1BhZ2VzIDIgMCBSID4+CmVuZG9iagoyIDAgb2JqCjw8IC9UeXBlIC9QYWdlcyAvS2lkcyBbMyAwIFJdIC9Db3VudCAxIC9SZXNvdXJjZXMgPDwgPj4gPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA3MiA3Ml0gL0NvbnRlbnRzIDQgMCBSID4+CmVuZG9iago0IDAgb2JqCjw8IC9MZW5ndGggNCA+PgpzdHJlYW0KcQpRCmVuZHN0cmVhbQplbmRvYmoKeHJlZgowIDUKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDQwIDAwMDAwIG4gCjAwMDAwMDAwODkgMDAwMDAgbiAKMDAwMDAwMDE2MyAwMDAwMCBuIAowMDAwMDAwMjQ4IDAwMDAwIG4gCnRyYWlsZXIKPDwgL1NpemUgNSAvUm9vdCAxIDAgUiA+PgpzdGFydHhyZWYKMzAwCiUlRU9GCg==', 'base64');
+  assert.equal(body.byteLength, 463);
+  assert.equal(sha(body), 'b8a906ecaaa78c7fdccf637b86e8fd309527d710284976f5bfbf56aacae6fa1f');
   const { broker: files } = broker(new MemoryFileStore(), cleanScanner, 1_800_000_000_000, createTrustedBrowserBinaryValidator());
   const staged = await files.stage('cfo', { filename: 'proof20261016-clean.pdf', contentType: 'application/pdf', body }, 'a'.repeat(64));
   assert.equal(staged.status, 'ready');
