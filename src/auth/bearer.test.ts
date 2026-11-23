@@ -18,6 +18,8 @@ const M365_CTO_TOKEN = 'm'.repeat(40);
 // independent (neither accepts the other's value) and that CODEX_* is its own variable.
 const CODEX_CTO_TOKEN = 'codex-cto-static-' + 'k'.repeat(40);
 const CODEX_CTO_NEXT_TOKEN = 'codex-cto-next-static-' + 'n'.repeat(40);
+const CODEX_CLO_TOKEN = 'synthetic-corporate-clo-' + 'l'.repeat(40);
+const CODEX_CLO_NEXT_TOKEN = 'synthetic-corporate-clo-next-' + 'v'.repeat(40);
 const CODEX_CLO_PERSONAL_TOKEN = 'codex-clo-personal-static-' + 'p'.repeat(40);
 const CODEX_WEFUNDER_TOKEN = 'synthetic-wefunder-' + 'w'.repeat(40);
 const EVAL_TOKEN = 'e'.repeat(40);
@@ -44,6 +46,8 @@ before(() => {
     EVAL_AGENT_TOKEN: EVAL_TOKEN,
     CODEX_CTO_MCP_TOKEN: CODEX_CTO_TOKEN,
     CODEX_CTO_MCP_TOKEN_NEXT: CODEX_CTO_NEXT_TOKEN,
+    CODEX_CLO_MCP_TOKEN: CODEX_CLO_TOKEN,
+    CODEX_CLO_MCP_TOKEN_NEXT: CODEX_CLO_NEXT_TOKEN,
     CODEX_CLO_PERSONAL_MCP_TOKEN: CODEX_CLO_PERSONAL_TOKEN,
     CODEX_WEFUNDER_MCP_TOKEN: CODEX_WEFUNDER_TOKEN,
   };
@@ -448,6 +452,38 @@ test('CODEX: revocation rejects only the selected CTO overlap token', async () =
   assert.equal(await validateBearer(`Bearer ${CODEX_CTO_NEXT_TOKEN}`, () => true), null);
   const primary = await validateBearer(`Bearer ${CODEX_CTO_TOKEN}`, () => true);
   assert.equal(primary?.caller_agent, 'cto');
+});
+
+test('CODEX: corporate CLO primary and next resolve to the same curated principal', async () => {
+  const { validateBearer } = await import('./bearer.js');
+  for (const token of [CODEX_CLO_TOKEN, CODEX_CLO_NEXT_TOKEN]) {
+    const ctx = await validateBearer(`Bearer ${token}`, () => true);
+    assert.ok(ctx);
+    assert.equal(ctx.caller_agent, 'clo');
+    assert.equal(ctx.connector_surface, true);
+    assert.equal(ctx.auth_kind, 'codex');
+    assert.notEqual(ctx.caller_agent, 'clo-personal');
+  }
+});
+
+test('CODEX: revoking the CLO overlap token preserves its primary token', async () => {
+  const { validateBearer } = await import('./bearer.js');
+  const { revokeToken } = await import('./revocation-store.js');
+  const result = await revokeToken(CODEX_CLO_NEXT_TOKEN, 'fictional CLO overlap revocation test');
+  assert.equal(result.durability, 'memory_only');
+  assert.equal(await validateBearer(`Bearer ${CODEX_CLO_NEXT_TOKEN}`, () => true), null);
+  assert.equal((await validateBearer(`Bearer ${CODEX_CLO_TOKEN}`, () => true))?.caller_agent, 'clo');
+});
+
+test('CODEX: CLO overlap rejects personal-lane and duplicate-slot collisions', async () => {
+  const { resolveCodexStaticAgent } = await import('./bearer.js');
+  assert.equal(resolveCodexStaticAgent(CODEX_CLO_NEXT_TOKEN, {
+    clo: [CODEX_CLO_TOKEN, CODEX_CLO_NEXT_TOKEN],
+    'clo-personal': CODEX_CLO_NEXT_TOKEN,
+  }), null);
+  assert.equal(resolveCodexStaticAgent(CODEX_CLO_NEXT_TOKEN, {
+    clo: [CODEX_CLO_TOKEN, CODEX_CLO_NEXT_TOKEN, CODEX_CLO_NEXT_TOKEN],
+  }), null);
 });
 
 test('CODEX: a forged token and a too-short token are both rejected', async () => {
