@@ -21,6 +21,16 @@ const esperCompletionInput = z.object({
   local_job: z.string().regex(/^esper-[0-9a-f]{24}$/),
 }).strict();
 const esperEnvelope = 'esper-local-ai';
+const esperLegacySubject = 'esper-local-ai:v1';
+const esperLegacyBody = /^(summarize|extract) ([a-z0-9][a-z0-9-]{3,94})$/;
+
+function parseEsperLegacyEnvelope(subject: string, body: string): z.infer<typeof esperHandoffInput> {
+  const parts = body.length <= 105 ? esperLegacyBody.exec(body) : null;
+  if (subject !== esperLegacySubject || !parts || parts[0] !== body) {
+    throw new Error('Esper compatibility requests require only an approved task and exact source ID.');
+  }
+  return esperHandoffInput.parse({ task: parts[1], source_document: parts[2] });
+}
 
 export interface AgentDispatchInput {
   to_agent: string;
@@ -38,10 +48,12 @@ export async function handleAgentDispatch(
   ctx: ToolContext,
   queue: AgentDispatchQueue = defaultQueue,
 ): Promise<ToolResultPayload> {
-  if (input.esper_handoff || input.esper_completion) {
+  if (input.to_agent === ESPER_HANDOFF_QUEUE || input.subject === esperLegacySubject
+      || input.esper_handoff || input.esper_completion) {
     const role = ESPER_HANDOFF_ROLES.find((allowed) => allowed === ctx.callerAgent);
-    if (!role || input.from_agent !== role || input.to_agent !== ESPER_HANDOFF_QUEUE
-        || input.subject !== esperEnvelope || input.body !== esperEnvelope || input.task_id !== undefined) {
+    const typed = input.esper_handoff || input.esper_completion;
+    if (!role || input.from_agent !== role || input.to_agent !== ESPER_HANDOFF_QUEUE || input.task_id !== undefined
+        || (typed && (input.subject !== esperEnvelope || input.body !== esperEnvelope))) {
       throw new Error('Esper requires the authenticated company role, CTO recipient and metadata-only envelope.');
     }
     if (input.esper_completion) {
@@ -60,7 +72,10 @@ export async function handleAgentDispatch(
         ...(completed ? { audit: { after: completion } } : {}),
       };
     }
-    const request: EsperHandoff = { ...esperHandoffInput.parse(input.esper_handoff), role };
+    const handoff = input.esper_handoff
+      ? esperHandoffInput.parse(input.esper_handoff)
+      : parseEsperLegacyEnvelope(input.subject, input.body);
+    const request: EsperHandoff = { ...handoff, role };
     if (ctx.dryRun) {
       return { data: { dispatched: false, to: 'cto' }, summary: 'DRY RUN: would enqueue one Esper request.' };
     }

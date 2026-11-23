@@ -93,11 +93,13 @@ import { loadEnv } from '../config/env.js';
 import {
   ESPER_HANDOFF_QUEUE,
   ESPER_HANDOFF_ROLES,
+  ESPER_MESSAGE_ID,
   INBOX_MAX_AGE_SECONDS,
   INBOX_MAX_DELIVERIES,
   queueName,
   type EsperHandoff,
   type EsperHandoffReceipt,
+  type EsperHandoffRole,
   type EsperHandoffSubmission,
   type InboxMessage,
   type ReadMessage,
@@ -110,7 +112,6 @@ export { queueName };
 const TABLE = 'agentstate_queue';
 const ESPER_SOURCE_ID = '^[a-z0-9][a-z0-9-]{3,94}$';
 const ESPER_SOURCE_PATTERN = new RegExp(ESPER_SOURCE_ID);
-const ESPER_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export function isConfigured(): boolean {
   return Boolean(loadEnv().PG_HOST);
@@ -305,23 +306,41 @@ export async function enqueueEsperHandoff(request: EsperHandoff): Promise<EsperH
     [ESPER_HANDOFF_QUEUE, messageId, role, task, source_document, INBOX_MAX_AGE_SECONDS],
   );
   if (inserted.rowCount === 1) return { message_id: messageId, created: true, state: 'pending' };
-  const prior = await database.query<{ state: EsperHandoffSubmission['state']; local_job: string | null }>(
+  const existing = await readEsperHandoffStatus(role, messageId, request);
+  if (!existing) throw new Error('The original Esper request needs CTO reconciliation.');
+  return { ...existing, created: false };
+}
+
+/** Return one original receipt to its authenticated role without queue writes. */
+export async function readEsperHandoffStatus(
+  role: EsperHandoffRole,
+  messageId: string,
+  expected?: EsperHandoff,
+): Promise<Omit<EsperHandoffSubmission, 'created'> | null> {
+  if (!ESPER_HANDOFF_ROLES.includes(role) || messageId.length !== 36 || !ESPER_MESSAGE_ID.test(messageId)) {
+    throw new Error('Invalid Esper handoff status request.');
+  }
+  const prior = await getPool().query<{ state: EsperHandoffSubmission['state']; local_job: string | null }>(
     `SELECT CASE
           WHEN payload ? 'local_job' THEN 'completed'
-          WHEN expires_at <= now() OR enqueued_at <= now() - ($6 * interval '1 second')
-            OR dequeue_count > $7 THEN 'expired'
+          WHEN expires_at <= now() OR enqueued_at <= now() - ($4 * interval '1 second')
+            OR dequeue_count > $5 THEN 'expired'
           ELSE 'pending'
         END AS state, payload->>'local_job' AS local_job
        FROM ${TABLE}
       WHERE queue = $1 AND message_id = $2
-        AND payload @> jsonb_build_object('role', $3::text, 'task', $4::text, 'source_document', $5::text)`,
-    [ESPER_HANDOFF_QUEUE, messageId, role, task, source_document, INBOX_MAX_AGE_SECONDS, INBOX_MAX_DELIVERIES],
+        AND payload->>'role' = $3::text
+        AND ($6::text IS NULL OR payload->>'task' = $6::text)
+        AND ($7::text IS NULL OR payload->>'source_document' = $7::text)`,
+    [ESPER_HANDOFF_QUEUE, messageId, role, INBOX_MAX_AGE_SECONDS, INBOX_MAX_DELIVERIES,
+      expected?.task ?? null, expected?.source_document ?? null],
   );
   const existing = prior.rows[0];
-  if (!existing || (existing.state === 'completed' && !/^esper-[0-9a-f]{24}$/.test(existing.local_job ?? ''))) {
+  if (!existing) return null;
+  if (existing.state === 'completed' && !/^esper-[0-9a-f]{24}$/.test(existing.local_job ?? '')) {
     throw new Error('The original Esper request needs CTO reconciliation.');
   }
-  return { message_id: messageId, created: false, state: existing.state,
+  return { message_id: messageId, state: existing.state,
     ...(existing.local_job ? { local_job: existing.local_job } : {}) };
 }
 

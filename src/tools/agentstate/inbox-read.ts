@@ -1,8 +1,8 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
-import { acknowledgeMessage, isConfigured, readEsperHandoffs, readMessages, supportsExactAcknowledgment } from '../../agentstate/queue.js';
-import { ESPER_HANDOFF_QUEUE } from '../../agentstate/queue-shared.js';
+import { acknowledgeMessage, isConfigured, readEsperHandoffs, readEsperHandoffStatus, readMessages, supportsExactAcknowledgment } from '../../agentstate/queue.js';
+import { ESPER_HANDOFF_QUEUE, ESPER_HANDOFF_ROLES, ESPER_MESSAGE_ID } from '../../agentstate/queue-shared.js';
 
 interface InboxQueue {
   isConfigured: typeof isConfigured;
@@ -10,9 +10,13 @@ interface InboxQueue {
   acknowledgeMessage: typeof acknowledgeMessage;
   readMessages: typeof readMessages;
   readEsperHandoffs?: typeof readEsperHandoffs;
+  readEsperHandoffStatus?: typeof readEsperHandoffStatus;
 }
 
-const defaultQueue: InboxQueue = { isConfigured, supportsExactAcknowledgment, acknowledgeMessage, readMessages, readEsperHandoffs };
+const defaultQueue: InboxQueue = {
+  isConfigured, supportsExactAcknowledgment, acknowledgeMessage, readMessages, readEsperHandoffs, readEsperHandoffStatus,
+};
+const esperStatusPrefix = `${ESPER_HANDOFF_QUEUE}:`;
 
 export function registerInboxRead(server: McpServer, callerHash: CallerHashProvider, queue: InboxQueue = defaultQueue): void {
   registerTool(
@@ -42,6 +46,19 @@ export function registerInboxRead(server: McpServer, callerHash: CallerHashProvi
       },
       outputShape: { count: z.number(), messages: z.unknown() },
       handler: async (input, ctx) => {
+        if (input.agent.startsWith(esperStatusPrefix)) {
+          const role = ESPER_HANDOFF_ROLES.find((allowed) => allowed === ctx.callerAgent);
+          const messageId = input.agent.slice(esperStatusPrefix.length);
+          if (!role || messageId.length !== 36 || !ESPER_MESSAGE_ID.test(messageId)
+              || input.ack !== false || input.expected_message_id !== undefined || input.esper_handoff
+              || input.newest_first !== undefined || input.dead_letter !== undefined || input.max !== undefined) {
+            throw new Error('Esper status requires one original request ID, ack=false, and the authenticated originating role.');
+          }
+          if (!queue.readEsperHandoffStatus) throw new Error('Esper request queue is unavailable.');
+          const status = await queue.readEsperHandoffStatus(role, messageId);
+          return { data: { count: status ? 1 : 0, messages: status ? [status] : [] },
+            summary: status ? `The original Esper request is ${status.state}.` : 'No Esper request for this role and ID.' };
+        }
         if (input.esper_handoff) {
           if (ctx.callerAgent !== 'cto' || input.agent !== ESPER_HANDOFF_QUEUE) {
             throw new Error('Esper handoffs are available only to the authenticated CTO role.');

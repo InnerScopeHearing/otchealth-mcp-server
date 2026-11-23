@@ -31,6 +31,7 @@ export interface ReadMessage extends InboxMessage {
 // The generic agent-name validator cannot form this queue name.
 export const ESPER_HANDOFF_QUEUE = 'esper:cto:local-ai:v1';
 export const ESPER_HANDOFF_ROLES = ['cto', 'developer', 'coo', 'cro', 'cfo', 'clo', 'wefunder'] as const;
+export const ESPER_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export type EsperHandoffRole = (typeof ESPER_HANDOFF_ROLES)[number];
 export type EsperHandoffTask = 'summarize' | 'extract';
 export interface EsperHandoff {
