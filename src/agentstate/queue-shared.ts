@@ -28,6 +28,27 @@ export interface ReadMessage extends InboxMessage {
   dead_letter_reason?: 'expired' | 'max_deliveries';
 }
 
+// The generic agent-name validator cannot form this queue name.
+export const ESPER_HANDOFF_QUEUE = 'esper:cto:local-ai:v1';
+export const ESPER_HANDOFF_ROLES = ['cto', 'developer', 'coo', 'cro', 'cfo', 'clo', 'wefunder'] as const;
+export type EsperHandoffRole = (typeof ESPER_HANDOFF_ROLES)[number];
+export type EsperHandoffTask = 'summarize' | 'extract';
+export interface EsperHandoff {
+  role: EsperHandoffRole;
+  task: EsperHandoffTask;
+  source_document: string;
+}
+export interface EsperHandoffReceipt extends EsperHandoff {
+  message_id: string;
+  enqueued_at: string;
+}
+export interface EsperHandoffSubmission {
+  message_id: string;
+  created: boolean;
+  state: 'pending' | 'completed' | 'expired';
+  local_job?: string;
+}
+
 /** A message older than this is dead-lettered even when its enqueue-time TTL is longer. */
 export const INBOX_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
 /** A message fetched more than this many times is treated as poison: dead-lettered, never redelivered. */

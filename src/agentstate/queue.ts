@@ -22,7 +22,15 @@
 import { activeBackend } from './store.js';
 import * as azure from './queue-azure.js';
 import * as postgres from './queue-postgres.js';
-import { queueName as sharedQueueName, type InboxMessage, type ReadMessage, type ReadMessagesOptions } from './queue-shared.js';
+import {
+  queueName as sharedQueueName,
+  type EsperHandoff,
+  type EsperHandoffReceipt,
+  type EsperHandoffSubmission,
+  type InboxMessage,
+  type ReadMessage,
+  type ReadMessagesOptions,
+} from './queue-shared.js';
 
 export type { InboxMessage, ReadMessage };
 
@@ -68,4 +76,25 @@ export async function acknowledgeMessage(agent: string, messageId: string): Prom
     throw new Error('Exact message acknowledgment is unsupported by the active Azure Queue backend.');
   }
   return postgres.acknowledgeMessage(agent, messageId);
+}
+
+function requireEsperBackend(): void {
+  if (activeBackend() !== 'postgres') {
+    throw new Error('Esper handoffs require the Postgres queue backend.');
+  }
+}
+
+export async function enqueueEsperHandoff(request: EsperHandoff): Promise<EsperHandoffSubmission> {
+  requireEsperBackend();
+  return postgres.enqueueEsperHandoff(request);
+}
+
+export async function readEsperHandoffs(max: number, afterMessageId?: string): Promise<EsperHandoffReceipt[]> {
+  requireEsperBackend();
+  return postgres.readEsperHandoffs(max, afterMessageId);
+}
+
+export async function completeEsperHandoff(messageId: string, localJob: string): Promise<boolean> {
+  requireEsperBackend();
+  return postgres.completeEsperHandoff(messageId, localJob);
 }

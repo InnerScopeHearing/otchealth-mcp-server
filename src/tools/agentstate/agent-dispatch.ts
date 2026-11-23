@@ -1,14 +1,26 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
-import { isConfigured, enqueue } from '../../agentstate/queue.js';
+import { completeEsperHandoff, isConfigured, enqueue, enqueueEsperHandoff } from '../../agentstate/queue.js';
+import { ESPER_HANDOFF_QUEUE, ESPER_HANDOFF_ROLES, type EsperHandoff } from '../../agentstate/queue-shared.js';
 
 export interface AgentDispatchQueue {
   isConfigured: typeof isConfigured;
   enqueue: typeof enqueue;
+  enqueueEsperHandoff?: typeof enqueueEsperHandoff;
+  completeEsperHandoff?: typeof completeEsperHandoff;
 }
 
-const defaultQueue: AgentDispatchQueue = { isConfigured, enqueue };
+const defaultQueue: AgentDispatchQueue = { isConfigured, enqueue, enqueueEsperHandoff, completeEsperHandoff };
+const esperHandoffInput = z.object({
+  task: z.enum(['summarize', 'extract']),
+  source_document: z.string().regex(/^[a-z0-9][a-z0-9-]{3,94}$/),
+}).strict();
+const esperCompletionInput = z.object({
+  message_id: z.string().uuid(),
+  local_job: z.string().regex(/^esper-[0-9a-f]{24}$/),
+}).strict();
+const esperEnvelope = 'esper-local-ai';
 
 export interface AgentDispatchInput {
   to_agent: string;
@@ -16,6 +28,8 @@ export interface AgentDispatchInput {
   body: string;
   from_agent: string;
   task_id?: string;
+  esper_handoff?: Omit<EsperHandoff, 'role'>;
+  esper_completion?: z.infer<typeof esperCompletionInput>;
 }
 
 /** The receipt contains the backend's persisted native message ID, when that backend returns one. */
@@ -24,6 +38,41 @@ export async function handleAgentDispatch(
   ctx: ToolContext,
   queue: AgentDispatchQueue = defaultQueue,
 ): Promise<ToolResultPayload> {
+  if (input.esper_handoff || input.esper_completion) {
+    const role = ESPER_HANDOFF_ROLES.find((allowed) => allowed === ctx.callerAgent);
+    if (!role || input.from_agent !== role || input.to_agent !== ESPER_HANDOFF_QUEUE
+        || input.subject !== esperEnvelope || input.body !== esperEnvelope || input.task_id !== undefined) {
+      throw new Error('Esper requires the authenticated company role, CTO recipient and metadata-only envelope.');
+    }
+    if (input.esper_completion) {
+      if (role !== 'cto' || input.esper_handoff) {
+        throw new Error('Esper completion requires a separate request from the authenticated CTO role.');
+      }
+      const completion = esperCompletionInput.parse(input.esper_completion);
+      if (ctx.dryRun) {
+        return { data: { dispatched: false, to: 'cto' }, summary: 'DRY RUN: would mark one exact Esper request complete.' };
+      }
+      if (!queue.completeEsperHandoff) throw new Error('Esper request queue is unavailable.');
+      const completed = await queue.completeEsperHandoff(completion.message_id, completion.local_job);
+      return {
+        data: { dispatched: false, to: 'cto', message_id: completion.message_id, esper_completed: completed },
+        summary: completed ? 'The exact Esper request is complete.' : 'The exact Esper request is unavailable or already has a different result.',
+        ...(completed ? { audit: { after: completion } } : {}),
+      };
+    }
+    const request: EsperHandoff = { ...esperHandoffInput.parse(input.esper_handoff), role };
+    if (ctx.dryRun) {
+      return { data: { dispatched: false, to: 'cto' }, summary: 'DRY RUN: would enqueue one Esper request.' };
+    }
+    if (!queue.enqueueEsperHandoff) throw new Error('Esper request queue is unavailable.');
+    const result = await queue.enqueueEsperHandoff(request);
+    return {
+      data: { dispatched: result.created, to: 'cto', message_id: result.message_id, esper_status: result.state,
+        ...(result.local_job ? { local_job: result.local_job } : {}) },
+      summary: result.created ? 'Enqueued one source-linked Esper request.' : `The original Esper request is ${result.state}.`,
+      ...(result.created ? { audit: { after: { ...request, message_id: result.message_id } } } : {}),
+    };
+  }
   if (!queue.isConfigured()) return { data: { dispatched: false, note: 'agent inbox not configured on the gateway.' }, summary: 'Inbox not configured.' };
   if (ctx.dryRun) return { data: { dispatched: false, preview: input, note: 'dry_run: pass dry_run=false to send.' }, summary: `DRY RUN: would dispatch to ${input.to_agent}.` };
   const msg = { to: input.to_agent, from: input.from_agent, subject: input.subject, body: input.body, ts: new Date().toISOString(), ...(input.task_id ? { task_id: input.task_id } : {}) };
@@ -57,8 +106,12 @@ export function registerAgentDispatch(server: McpServer, callerHash: CallerHashP
         body: z.string().min(1).describe('The message body (non-sensitive).'),
         from_agent: z.string().describe('Sender agent id (or "matt").'),
         task_id: z.string().optional().describe('Optional related work-ledger task id.'),
+        esper_handoff: esperHandoffInput.optional().describe('Request Esper processing of one approved company-shared Hindsight ID. Use esper:cto:local-ai:v1 as recipient, the authenticated role as sender, esper-local-ai as both subject and body, and omit task_id.'),
+        esper_completion: esperCompletionInput.optional().describe('CTO only. Mark a dedicated Esper request complete after verifying its durable local result. Use cto as sender, esper:cto:local-ai:v1 as recipient, esper-local-ai as both subject and body, and omit task_id.'),
       },
-      outputShape: { dispatched: z.boolean(), to: z.string().optional(), message_id: z.string().optional() },
+      outputShape: { dispatched: z.boolean(), to: z.string().optional(), message_id: z.string().optional(),
+        esper_completed: z.boolean().optional(), esper_status: z.enum(['pending', 'completed', 'expired']).optional(),
+        local_job: z.string().optional() },
       handler: (input, ctx) => handleAgentDispatch(input, ctx, queue),
     },
     callerHash,

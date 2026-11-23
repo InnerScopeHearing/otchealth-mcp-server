@@ -1,16 +1,18 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
-import { acknowledgeMessage, isConfigured, readMessages, supportsExactAcknowledgment } from '../../agentstate/queue.js';
+import { acknowledgeMessage, isConfigured, readEsperHandoffs, readMessages, supportsExactAcknowledgment } from '../../agentstate/queue.js';
+import { ESPER_HANDOFF_QUEUE } from '../../agentstate/queue-shared.js';
 
 interface InboxQueue {
   isConfigured: typeof isConfigured;
   supportsExactAcknowledgment: typeof supportsExactAcknowledgment;
   acknowledgeMessage: typeof acknowledgeMessage;
   readMessages: typeof readMessages;
+  readEsperHandoffs?: typeof readEsperHandoffs;
 }
 
-const defaultQueue: InboxQueue = { isConfigured, supportsExactAcknowledgment, acknowledgeMessage, readMessages };
+const defaultQueue: InboxQueue = { isConfigured, supportsExactAcknowledgment, acknowledgeMessage, readMessages, readEsperHandoffs };
 
 export function registerInboxRead(server: McpServer, callerHash: CallerHashProvider, queue: InboxQueue = defaultQueue): void {
   registerTool(
@@ -34,9 +36,24 @@ export function registerInboxRead(server: McpServer, callerHash: CallerHashProvi
         newest_first: z.boolean().optional().describe('Return selected live messages newest first. Requires ack=false and Postgres; no selected message is consumed, leased, or counted as a delivery. Inbox dead-letter housekeeping still applies.'),
         dead_letter: z.boolean().optional().describe('Audit: list dead-lettered messages (newest first) instead of live ones. Read-only; ack is ignored.'),
         expected_message_id: z.string().uuid().optional().describe('Atomically acknowledge exactly this previously observed message ID in your own inbox. Cannot be combined with drain, peek, or dead-letter mode.'),
+        esper_handoff: z.object({
+          after_message_id: z.string().uuid().optional(),
+        }).strict().optional().describe('CTO only. Read metadata from the dedicated Esper queue. Set agent to esper:cto:local-ai:v1 and ack to false. Use the last result ID for the next page.'),
       },
       outputShape: { count: z.number(), messages: z.unknown() },
       handler: async (input, ctx) => {
+        if (input.esper_handoff) {
+          if (ctx.callerAgent !== 'cto' || input.agent !== ESPER_HANDOFF_QUEUE) {
+            throw new Error('Esper handoffs are available only to the authenticated CTO role.');
+          }
+          if (input.ack !== false || input.expected_message_id !== undefined
+              || input.newest_first !== undefined || input.dead_letter !== undefined) {
+            throw new Error('Esper handoff peeks require ack=false and cannot be combined with other inbox modes.');
+          }
+          if (!queue.readEsperHandoffs) throw new Error('Esper request queue is unavailable.');
+          const messages = await queue.readEsperHandoffs(input.max ?? 16, input.esper_handoff.after_message_id);
+          return { data: { count: messages.length, messages }, summary: `${messages.length} pending Esper request(s).` };
+        }
         if (input.expected_message_id) {
           if (input.ack !== undefined || input.newest_first !== undefined || input.dead_letter !== undefined || input.max !== undefined) {
             throw new Error('expected_message_id cannot be combined with ack, max, newest_first, or dead_letter.');
