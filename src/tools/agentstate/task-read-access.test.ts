@@ -203,3 +203,36 @@ test('legacy company tasks expose status only outside their immutable creator gr
   assert.equal(projected.notes, undefined);
   assert.equal(projected.created_by, undefined);
 });
+
+test('task_list summary preserves caller permissions while omitting large details', async () => {
+  const own = task({ id: 't_own', created_by: 'cto', owner_agent: 'cto', detail_readers: ['cto'], notes: ['x'.repeat(30000)] });
+  const cross = task({ id: 't_cross', created_by: 'cfo', owner_agent: 'cfo', detail_readers: ['cfo'] });
+  const personal = task({ id: 't_personal', owner_agent: 'clo-personal' });
+  let filter: unknown;
+  const deps = { isConfigured: () => true, listTasks: async (input: any) => { filter = input; return [own, cross, personal]; } };
+  const summary = await handleTaskList({ view: 'summary', limit: 3 }, { callerAgent: 'cto' }, deps);
+  const rows = (summary.data as any).tasks;
+  assert.deepEqual(filter, { limit: 3, exclude_personal_legal: true });
+  assert.deepEqual(rows.map((row: any) => row.id), ['t_own', 't_cross']);
+  assert.equal(rows[0].title, 'Synthetic task');
+  assert.equal(rows[1].title, undefined);
+  for (const row of rows) {
+    assert.equal(row.notes, undefined);
+    assert.equal(row.description, undefined);
+    assert.equal(row.detail_readers, undefined);
+  }
+  const full = await handleTaskList({ limit: 3 }, { callerAgent: 'cto' }, deps);
+  assert.equal((full.data as any).tasks[0].notes[0].length, 30000);
+  assert.ok(JSON.stringify(summary.data).length < JSON.stringify(full.data).length / 10);
+});
+test('task_list summary does not grant details to a reassigned owner', async () => {
+  const reassigned = task({ owner_agent: 'cto', created_by: 'cfo', detail_readers: ['cfo'] });
+  const result = await handleTaskList(
+    { view: 'summary' }, { callerAgent: 'cto' },
+    { isConfigured: () => true, listTasks: async () => [reassigned] },
+  );
+  const row = (result.data as any).tasks[0];
+  assert.equal(row.title, undefined);
+  assert.equal(row.description, undefined);
+  assert.equal(row.notes, undefined);
+});
