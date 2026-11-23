@@ -26,6 +26,7 @@ import {
   queueName as sharedQueueName,
   type EsperHandoff,
   type EsperHandoffReceipt,
+  type EsperHandoffRole,
   type EsperHandoffSubmission,
   type InboxMessage,
   type ReadMessage,
@@ -92,6 +93,14 @@ export async function enqueueEsperHandoff(request: EsperHandoff): Promise<EsperH
 export async function readEsperHandoffs(max: number, afterMessageId?: string): Promise<EsperHandoffReceipt[]> {
   requireEsperBackend();
   return postgres.readEsperHandoffs(max, afterMessageId);
+}
+
+export async function readEsperHandoffStatus(
+  role: EsperHandoffRole,
+  messageId: string,
+): Promise<Omit<EsperHandoffSubmission, 'created'> | null> {
+  requireEsperBackend();
+  return postgres.readEsperHandoffStatus(role, messageId);
 }
 
 export async function completeEsperHandoff(messageId: string, localJob: string): Promise<boolean> {
