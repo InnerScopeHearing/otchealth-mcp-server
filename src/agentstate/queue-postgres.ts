@@ -111,9 +111,6 @@ const TABLE = 'agentstate_queue';
 const ESPER_SOURCE_ID = '^[a-z0-9][a-z0-9-]{3,94}$';
 const ESPER_SOURCE_PATTERN = new RegExp(ESPER_SOURCE_ID);
 const ESPER_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const ESPER_PENDING = `visible_at <= now() AND expires_at > now()
-  AND enqueued_at > now() - ($2 * interval '1 second') AND dequeue_count <= $3
-  AND NOT (payload ? 'local_job')`;
 
 export function isConfigured(): boolean {
   return Boolean(loadEnv().PG_HOST);
@@ -340,7 +337,9 @@ export async function readEsperHandoffs(max: number, afterMessageId?: string): P
     `SELECT message_id, enqueued_at, payload->>'role' AS role, payload->>'task' AS task,
             payload->>'source_document' AS source_document
        FROM ${TABLE}
-      WHERE queue = $1 AND ${ESPER_PENDING}
+      WHERE queue = $1 AND visible_at <= now() AND expires_at > now()
+        AND enqueued_at > now() - ($2 * interval '1 second') AND dequeue_count <= $3
+        AND NOT (payload ? 'local_job')
         AND payload->>'role' = ANY($5::text[])
         AND payload->>'task' IN ('summarize', 'extract')
         AND payload->>'source_document' ~ $6::text
@@ -362,7 +361,9 @@ export async function completeEsperHandoff(messageId: string, localJob: string):
   const completed = await database.query(
     `UPDATE ${TABLE}
         SET payload = payload || jsonb_build_object('local_job', $5::text, 'completed_at', now())
-      WHERE queue = $1 AND message_id = $4 AND ${ESPER_PENDING}
+      WHERE queue = $1 AND message_id = $4 AND visible_at <= now() AND expires_at > now()
+        AND enqueued_at > now() - ($2 * interval '1 second') AND dequeue_count <= $3
+        AND NOT (payload ? 'local_job')
       RETURNING message_id`,
     [ESPER_HANDOFF_QUEUE, INBOX_MAX_AGE_SECONDS, INBOX_MAX_DELIVERIES, messageId, localJob],
   );
