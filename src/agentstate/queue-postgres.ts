@@ -91,9 +91,14 @@ import crypto from 'node:crypto';
 import pg from 'pg';
 import { loadEnv } from '../config/env.js';
 import {
+  ESPER_HANDOFF_QUEUE,
+  ESPER_HANDOFF_ROLES,
   INBOX_MAX_AGE_SECONDS,
   INBOX_MAX_DELIVERIES,
   queueName,
+  type EsperHandoff,
+  type EsperHandoffReceipt,
+  type EsperHandoffSubmission,
   type InboxMessage,
   type ReadMessage,
   type ReadMessagesOptions,
@@ -103,6 +108,9 @@ export type { InboxMessage, ReadMessage };
 export { queueName };
 
 const TABLE = 'agentstate_queue';
+const ESPER_SOURCE_ID = '^[a-z0-9][a-z0-9-]{3,94}$';
+const ESPER_SOURCE_PATTERN = new RegExp(ESPER_SOURCE_ID);
+const ESPER_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export function isConfigured(): boolean {
   return Boolean(loadEnv().PG_HOST);
@@ -268,6 +276,105 @@ export async function acknowledgeMessage(agent: string, messageId: string): Prom
   const query = buildAcknowledgeQuery(q, messageId);
   const r = await getPool().query(query.text, query.values);
   return r.rowCount === 1;
+}
+
+export async function enqueueEsperHandoff(request: EsperHandoff): Promise<EsperHandoffSubmission> {
+  const { role, task, source_document } = request;
+  if (!ESPER_HANDOFF_ROLES.includes(role) || (task !== 'summarize' && task !== 'extract')
+      || typeof source_document !== 'string' || source_document !== source_document.trim()
+      || !ESPER_SOURCE_PATTERN.test(source_document)) {
+    throw new Error('Invalid Esper handoff envelope.');
+  }
+  const id = crypto.createHash('sha256')
+    .update(JSON.stringify([ESPER_HANDOFF_QUEUE, role, task, source_document]))
+    .digest().subarray(0, 16);
+  // UUIDv8 carries a custom SHA-256-based identifier with the RFC UUID variant.
+  id[6] = (id[6] & 0x0f) | 0x80;
+  id[8] = (id[8] & 0x3f) | 0x80;
+  const hex = id.toString('hex');
+  const messageId = [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
+
+  await ensureSchema();
+  const database = getPool();
+  const inserted = await database.query(
+    `INSERT INTO ${TABLE} (queue, message_id, payload, expires_at)
+     VALUES ($1, $2, jsonb_build_object('role', $3::text, 'task', $4::text, 'source_document', $5::text),
+        now() + ($6 * interval '1 second'))
+     ON CONFLICT (message_id) DO NOTHING
+     RETURNING message_id`,
+    [ESPER_HANDOFF_QUEUE, messageId, role, task, source_document, INBOX_MAX_AGE_SECONDS],
+  );
+  if (inserted.rowCount === 1) return { message_id: messageId, created: true, state: 'pending' };
+  const prior = await database.query<{ state: EsperHandoffSubmission['state']; local_job: string | null }>(
+    `SELECT CASE
+          WHEN payload ? 'local_job' THEN 'completed'
+          WHEN expires_at <= now() OR enqueued_at <= now() - ($6 * interval '1 second')
+            OR dequeue_count > $7 THEN 'expired'
+          ELSE 'pending'
+        END AS state, payload->>'local_job' AS local_job
+       FROM ${TABLE}
+      WHERE queue = $1 AND message_id = $2
+        AND payload @> jsonb_build_object('role', $3::text, 'task', $4::text, 'source_document', $5::text)`,
+    [ESPER_HANDOFF_QUEUE, messageId, role, task, source_document, INBOX_MAX_AGE_SECONDS, INBOX_MAX_DELIVERIES],
+  );
+  const existing = prior.rows[0];
+  if (!existing || (existing.state === 'completed' && !/^esper-[0-9a-f]{24}$/.test(existing.local_job ?? ''))) {
+    throw new Error('The original Esper request needs CTO reconciliation.');
+  }
+  return { message_id: messageId, created: false, state: existing.state,
+    ...(existing.local_job ? { local_job: existing.local_job } : {}) };
+}
+
+export async function readEsperHandoffs(max: number, afterMessageId?: string): Promise<EsperHandoffReceipt[]> {
+  if (!Number.isInteger(max) || max < 1 || max > 32) {
+    throw new Error('Esper handoff read limit must be an integer from 1 through 32.');
+  }
+  if (afterMessageId !== undefined && (afterMessageId.length !== 36 || !ESPER_MESSAGE_ID.test(afterMessageId))) {
+    throw new Error('Invalid Esper handoff cursor.');
+  }
+  // The dedicated read performs no queue housekeeping and never selects a body or raw payload.
+  const result = await getPool().query<Omit<EsperHandoffReceipt, 'enqueued_at'> & { enqueued_at: Date }>(
+    `SELECT message_id, enqueued_at, payload->>'role' AS role, payload->>'task' AS task,
+            payload->>'source_document' AS source_document
+       FROM ${TABLE}
+      WHERE queue = $1 AND visible_at <= now() AND expires_at > now()
+        AND enqueued_at > now() - ($2 * interval '1 second') AND dequeue_count <= $3
+        AND NOT (payload ? 'local_job')
+        AND payload->>'role' = ANY($5::text[])
+        AND payload->>'task' IN ('summarize', 'extract')
+        AND payload->>'source_document' ~ $6::text
+        AND ($7::text IS NULL OR seq > (SELECT seq FROM ${TABLE} WHERE queue = $1 AND message_id = $7))
+      ORDER BY seq
+      LIMIT $4`,
+    [ESPER_HANDOFF_QUEUE, INBOX_MAX_AGE_SECONDS, INBOX_MAX_DELIVERIES, max, ESPER_HANDOFF_ROLES,
+      ESPER_SOURCE_ID, afterMessageId ?? null],
+  );
+  return result.rows.map((row) => ({ ...row, enqueued_at: row.enqueued_at.toISOString() }));
+}
+
+export async function completeEsperHandoff(messageId: string, localJob: string): Promise<boolean> {
+  if (messageId.length !== 36 || !ESPER_MESSAGE_ID.test(messageId)
+      || localJob.length !== 30 || !/^esper-[0-9a-f]{24}$/.test(localJob)) {
+    throw new Error('Invalid Esper handoff or local job ID.');
+  }
+  const database = getPool();
+  const completed = await database.query(
+    `UPDATE ${TABLE}
+        SET payload = payload || jsonb_build_object('local_job', $5::text, 'completed_at', now())
+      WHERE queue = $1 AND message_id = $4 AND visible_at <= now() AND expires_at > now()
+        AND enqueued_at > now() - ($2 * interval '1 second') AND dequeue_count <= $3
+        AND NOT (payload ? 'local_job')
+      RETURNING message_id`,
+    [ESPER_HANDOFF_QUEUE, INBOX_MAX_AGE_SECONDS, INBOX_MAX_DELIVERIES, messageId, localJob],
+  );
+  if (completed.rowCount === 1) return true;
+  // A separate read sees a concurrent committed completion and preserves same-job idempotency.
+  const prior = await database.query(
+    `SELECT message_id FROM ${TABLE}
+      WHERE queue = $1 AND message_id = $2 AND payload->>'local_job' = $3`,
+    [ESPER_HANDOFF_QUEUE, messageId, localJob],
+  );
+  return prior.rowCount === 1;
 }
 
 /**
